@@ -55,7 +55,7 @@ if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
 const swarmOwnDir = swarmId ? path.join(swarmDir, 'swarms', swarmId) : swarmDir;
 
 // --------------------------------------------------------- restore-state
-// SessionStart verb (standing agents). On a fresh or post-compaction session,
+// SessionStart verb (all agents). On a fresh or post-compaction session,
 // re-inject this agent's goal-status checkpoint so it recovers its working state
 // (Thread C). source=="compact" means we just lost context to compaction — the
 // checkpoint is now the trustworthy record. Bulletproof: any error => no-op.
@@ -85,7 +85,7 @@ if (event === 'restore-state') {
 }
 
 // ------------------------------------------------------ precompact-marker
-// PreCompact verb (standing agents). Compaction is about to happen and we CANNOT
+// PreCompact verb (all agents). Compaction is about to happen and we CANNOT
 // inject forward from here — so just record that it happened (a marker + a note
 // in the state file if present), and do NOT block (the window is genuinely full).
 // The restore-state hook (SessionStart source=compact) does the actual re-inject.
