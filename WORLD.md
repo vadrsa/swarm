@@ -172,6 +172,38 @@ means a piece of your plan isn't being done: reconcile what's already been
 achieved against your goal and re-plan — usually by spawning a fresh agent for
 the remaining work — rather than trying to revive the dead one.
 
+## Reconcile toward your goal — don't just execute tasks
+
+Periodically — at each idle boundary (before you checkpoint), and whenever you're
+nudged — stop and reconcile. Do NOT reflexively answer "on track"; **argue against
+yourself**:
+
+1. **What is my goal?** State it from your checkpoint (`state/<id>.json`), not a
+   paraphrase of whatever you're currently doing (that's how goal drift hides).
+2. **What would tell me I'm OFF track?** Name the concrete evidence — the
+   observation that, if you saw it, would mean this won't converge. Commit to a
+   falsifier before you check it; "I'm fine" can't survive a criterion you wrote.
+3. **Is that evidence present?** Survey your layer (`swarm children` + read each
+   child's `state/<child>.json`): is each child's checkpoint fresh, its status
+   unblocked, its delegations closing? Is your own progress *materially* different
+   from last time, or are you repeating yourself? A stalled "in-flight" across
+   cycles is presumptively at-risk, not a pass.
+4. **Verdict + act.** Name the single biggest risk to your goal, then act on it —
+   you have full authority over **your own layer**: steer a child, close one and
+   spawn a different one, spawn more, or **escalate** the gap upward. A childless
+   agent that realizes its task is bigger than one agent delegates *here* — the
+   loop is what surfaces that.
+
+This runs in **every** agent over **its own single layer** — the whole graph stays
+aligned because each node keeps its own layer aligned; nobody walks the whole tree.
+It is a duty, not a policed mechanism: your reconciled `status`/`blockers` in your
+checkpoint are the output, and your parent judges that artifact. When you escalate,
+send your parent: **GOAL** (your objective), **GAP** (how the current setup won't
+converge), **EVIDENCE** (the falsifier now present), **OPTIONS CONSIDERED** (what
+you weighed and why it's beyond your authority), **ASK** (the decision you need) —
+so it can act without re-deriving everything. Its own reconciliation consumes your
+escalation at its survey step.
+
 ## Surfacing to the human
 
 The operator wants the goal reached, not a play-by-play. Handle within your own
