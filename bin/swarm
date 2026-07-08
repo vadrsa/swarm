@@ -184,18 +184,17 @@ cmd_start() {
 }
 
 # ------------------------------------------------------------------ spawn
-# swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]
+# swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
 cmd_spawn() {
   init_swarm_paths
   local task="${1:-}"; shift || true
   [ -n "$task" ] || die 'spawn needs a task: swarm spawn "<task>" [--label L] [--model M]'
-  local label="claude" model="" cwd="$PWD" standing="" role=""
+  local label="claude" model="" cwd="$PWD" role=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --label) label="$2"; shift 2;;
       --model) model="$2"; shift 2;;
       --cwd) cwd="$2"; shift 2;;
-      --standing) standing=1; shift;;
       --role) role="$2"; shift 2;;
       *) die "unknown flag: $1";;
     esac
@@ -221,22 +220,22 @@ cmd_spawn() {
   # every turn boundary to surface the agent's durable inbox (coordinator ->
   # subagent channel) into its context. Passed via `claude --settings` so the
   # GLOBAL ~/.claude/settings.json is never touched. Hooks are additive/merged.
-  # Standing agents additionally get RESTORATION hooks (Thread C): SessionStart
-  # (matcher "compact" + "startup") re-injects the agent's goal-status checkpoint
-  # into a fresh/post-compaction context; PreCompact records that compaction is
-  # happening (it cannot inject forward). These are restore-side only — there is
-  # NO enforcement hook (checkpointing is a briefed duty + judged artifact).
+  # EVERY agent gets the full hook set (all agents are standing — continuity is
+  # how every agent is built, not an opt-in category). Stop/Notification report
+  # state up; UserPromptSubmit surfaces the durable inbox; SessionStart
+  # (startup + compact) re-injects the agent's goal-status checkpoint after a
+  # fresh start or a context compaction; PreCompact records that compaction is
+  # happening (it cannot inject forward). There is NO enforcement hook —
+  # checkpointing is a briefed duty + a judged artifact.
   local settings="$SETTINGS_DIR/$id.json"
-  STANDING="${standing:-}" python3 - "$settings" "$HOOK" <<'PY'
-import json,sys,os
+  python3 - "$settings" "$HOOK" <<'PY'
+import json,sys
 settings_path, hook = sys.argv[1], sys.argv[2]
 def h(ev): return {"matcher":"","hooks":[{"type":"command","command":f"node '{hook}' {ev}"}]}
-hooks={"Stop":[h("stop")],"Notification":[h("notification")],
-       "UserPromptSubmit":[h("inbox-check")]}
-if os.environ.get("STANDING"):
-    hooks["SessionStart"]=[h("restore-state")]
-    hooks["PreCompact"]=[h("precompact-marker")]
-json.dump({"hooks":hooks}, open(settings_path,"w"))
+json.dump({"hooks":{"Stop":[h("stop")],"Notification":[h("notification")],
+                    "UserPromptSubmit":[h("inbox-check")],
+                    "SessionStart":[h("restore-state")],
+                    "PreCompact":[h("precompact-marker")]}}, open(settings_path,"w"))
 PY
 
   # Build the claude launch command. Positional prompt = the task (interactive
@@ -269,18 +268,17 @@ PY
     printf 'read it (do this if you intend to coordinate others). Produce your result as a\n'
     printf 'concrete, inspectable artifact (code, a PR, a file, a document) so your parent can\n'
     printf 'judge it without reading your session.\n\n'
-    if [ -n "$standing" ]; then
-      printf -- '--- STANDING-AGENT DUTY (continuity) ---\n'
-      printf 'You are a STANDING agent: you live indefinitely, re-activated over time. You\n'
-      printf 'maintain a durable goal-status checkpoint at `%s`.\n' ".swarm/swarms/$SWARM_ID/state/$id.json"
-      printf 'BEFORE you go idle (finish current work and wait for the next trigger), update it:\n'
-      printf 'your mission (why you exist), your tasks[] (each with status/progress/delegated_to/\n'
-      printf 'blockers), your overall status, and your context usage. This file is how your parent\n'
-      printf 'knows you are on track and how YOU recover your working state after a context\n'
-      printf 'compaction or a restart — keep it current. A helper is available: run\n'
-      printf '`swarm checkpoint --help` for the schema and the context-usage reader. Your seed\n'
-      printf 'checkpoint has already been written with your mission; grow tasks[] as work arrives.\n\n'
-    fi
+    printf -- '--- CONTINUITY DUTY ---\n'
+    printf 'You keep a durable goal-status checkpoint at `%s`.\n' ".swarm/swarms/$SWARM_ID/state/$id.json"
+    printf 'BEFORE you go idle — whether that is after one quick task or at the end of a long\n'
+    printf 'life — update it: your mission (why you exist), your tasks[] (each with status/\n'
+    printf 'progress/delegated_to/blockers), your overall status, and your context usage. It is\n'
+    printf 'how your parent judges whether you are on track, and how YOU recover your working\n'
+    printf 'state if your context is compacted or your session restarts. For a short one-shot\n'
+    printf 'agent this is cheap — update it once before you report done. For a long-lived one,\n'
+    printf 'update it at every idle boundary. Run `swarm checkpoint --help` for the schema and\n'
+    printf 'the context-usage reader. A seed checkpoint is already written with your mission;\n'
+    printf 'grow tasks[] as work arrives and decomposes.\n\n'
     printf -- '--- YOUR TASK ---\n'
     printf '%s' "$task"
   } > "$taskfile"
@@ -358,37 +356,40 @@ PY
   # of "this agent exists" is the registry + the hook — NOT a screen-detection
   # poll. Registering first means a slow-to-detect-but-actually-running agent
   # is never lost from the roster.
-  ROLE="${role:-}" STANDING="${standing:-}" python3 - "$AGENTS_DIR/$id.json" "$id" "$label" "$pane" "$model" "$cwd" "$task" "$parent" <<'PY'
+  ROLE="${role:-}" python3 - "$AGENTS_DIR/$id.json" "$id" "$label" "$pane" "$model" "$cwd" "$task" "$parent" <<'PY'
 import json,sys,os
 _,f,id,label,pane,model,cwd,task,parent = sys.argv
 rec={"id":id,"label":label,"pane":pane,"model":model,"cwd":cwd,"task":task,"parent":parent}
-if os.environ.get("STANDING"): rec["standing"]=True
 if os.environ.get("ROLE"): rec["role"]=os.environ["ROLE"]
 json.dump(rec,open(f,"w"))
 PY
 
-  # Seed the standing agent's goal-status checkpoint (Thread C). mission = role
-  # (or a generic line); tasks[] starts with the delegated task; the agent grows
-  # it. Seeding means the restore/SessionStart hook always has a file to inject,
-  # and the agent starts from a well-formed envelope rather than a blank page.
-  if [ -n "$standing" ]; then
-    mkdir -p "$SWARM_ROOT/state"
-    ROLE="${role:-}" MODEL="$model" TASK="$task" AID="$id" \
-      python3 - "$SWARM_ROOT/state/$id.json" <<'PY'
+  # Seed EVERY agent's goal-status checkpoint (Thread C) — all agents are standing.
+  # mission = --role if given, else derived from the label/task; tasks[] starts
+  # with the delegated task; the agent grows it. Seeding means the restore hook
+  # always has a file to inject and the agent starts from a well-formed envelope.
+  mkdir -p "$SWARM_ROOT/state"
+  ROLE="${role:-}" LABEL="$label" MODEL="$model" TASK="$task" AID="$id" \
+    python3 - "$SWARM_ROOT/state/$id.json" <<'PY'
 import json,sys,os,time
 f=sys.argv[1]
-mission=os.environ.get("ROLE") or "a standing agent; mission to be refined from my task"
+role=os.environ.get("ROLE","").strip()
+task=os.environ.get("TASK","").strip()
+label=os.environ.get("LABEL","").strip()
+# mission: explicit role wins; else derive a sensible one-liner from label + task.
+if role: mission=role
+elif label and label!="claude": mission=f"{label}: {task[:100]}"
+else: mission=task[:120] or "mission to be refined from my task"
 json.dump({
-  "agent":os.environ["AID"],"role":os.environ.get("ROLE",""),
+  "agent":os.environ["AID"],"role":role,
   "model":os.environ.get("MODEL",""),"updated_ts":int(time.time()*1000),"seq":0,
   "mission":mission,
-  "tasks":[{"id":"t1","title":os.environ.get("TASK","")[:120],
+  "tasks":[{"id":"t1","title":task[:120],
             "status":"in-progress","progress":"just spawned","delegated_to":[],"blockers":[]}],
   "status":"on-track","progress_summary":"seeded at spawn; not yet reconciled",
   "open_threads":[],"context":{},"work_cache":{}
 },open(f,"w"))
 PY
-  fi
 
   # Confirm the harness STARTED, using the LAUNCHER'S OWN signal — the status
   # file it writes ("launching" once claude is exec'd, "failed: ..." if
@@ -680,7 +681,7 @@ PY
 # swarm checkpoint --context     — read THIS agent's own transcript and print its
 #                                  current context-window occupancy (tokens + pct),
 #                                  so the agent can drop it into its state file.
-# A standing agent writes its own state/<id>.json (it's a plain JSON file it fully
+# Every agent writes its own state/<id>.json (it's a plain JSON file it fully
 # controls); this verb is a convenience: the schema reference + the verified
 # context-usage reader. It does not write the file for the agent.
 cmd_checkpoint() {
@@ -688,9 +689,9 @@ cmd_checkpoint() {
   case "$mode" in
     --help|"" )
       cat <<'EOF'
-swarm checkpoint — goal-status continuity for standing agents (Thread C).
+swarm checkpoint — goal-status continuity, kept by EVERY agent (Thread C).
 
-You (a standing agent) maintain: .swarm/swarms/<swarm-id>/state/<your-id>.json
+You maintain: .swarm/swarms/<swarm-id>/state/<your-id>.json
 Write it yourself before going idle. Schema:
 
   {
@@ -1089,8 +1090,8 @@ other verbs act within that swarm only.
                                          (--pre: incl pre-releases; --major: cross breaking)
   swarm start [--id <swarm-id>]          mint a swarm; prints its id
                                          -> export SWARM_ID=<that id>
-  swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--standing --role R]
-  swarm checkpoint --help | --context    goal-status continuity (standing agents)
+  swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
+  swarm checkpoint --help | --context    goal-status continuity (every agent)
   swarm send  <agent-id> "<message>"
   swarm updates [--id <agent-id>] [--json]
   swarm wait  <agent-id> [--timeout SEC]

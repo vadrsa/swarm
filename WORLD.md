@@ -17,18 +17,19 @@ within it:
 
 - `swarm world` → print this document (what every agent reads). Path-agnostic:
   works wherever swarm is installed.
-- `swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--standing --role R]`
+- `swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]`
   → starts a Claude subagent in a new herdr tab, seeded with `<task>` as its first
   prompt. Prints the subagent's id (e.g. `a1`). `--model` picks the model (e.g.
-  `opus`, `sonnet`); `--label` names it; `--cwd` sets its directory. `--standing`
-  marks it a long-lived agent: it gets a seeded goal-status checkpoint at
-  `state/<id>.json`, restoration hooks (its checkpoint is re-injected after a
-  context compaction or restart), and a briefed duty to keep that checkpoint
-  current; `--role` sets its mission line.
-- `swarm checkpoint --help | --context` → (standing agents) the goal-status
-  state-file schema, and a reader that reports your own context-window usage to
-  drop into your checkpoint. You write `state/<id>.json` yourself; this is the
-  reference + the usage helper.
+  `opus`, `sonnet`); `--label` names it; `--cwd` sets its directory; `--role`
+  sets its mission line (optional — otherwise the mission is derived from the
+  task/label). **Every** agent is seeded with a goal-status checkpoint at
+  `state/<id>.json`, gets restoration hooks (its checkpoint is re-injected after
+  a context compaction or restart), and carries a briefed duty to keep that
+  checkpoint current — continuity is how every agent is built, not an opt-in.
+- `swarm checkpoint --help | --context` → the goal-status state-file schema, and
+  a reader that reports your own context-window usage to drop into your
+  checkpoint. You write `state/<id>.json` yourself; this is the reference + the
+  usage helper.
 - `swarm send <id> "<message>"` → delivers a message to a subagent's **durable
   file inbox** (`.swarm/swarms/<id>/inbox/<agent-id>/`), then rings a best-effort
   "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
@@ -93,6 +94,11 @@ verified result.
 
 - The hook firing is reliable; **what the agent claims in its summary is not** —
   the pane is ground truth.
+- **Every agent keeps a goal-status checkpoint** (`state/<id>.json`) — its mission,
+  its tasks and their status, blockers, and context usage. Update it before you go
+  idle; it is how your parent judges whether you're on track and how you recover
+  your working state after a compaction or restart. There is no enforcement — it's
+  a duty and a judged artifact, like producing any inspectable result.
 - `swarm send` is **durable**: the message is written to the target's file inbox
   before anything else, so it is never lost even if the target is busy or its pane
   is gone. The "doorbell" that surfaces it in near-realtime is best-effort — a
