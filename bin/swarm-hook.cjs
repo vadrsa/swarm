@@ -76,7 +76,12 @@ if (event === 'restore-state') {
       `OVERALL STATUS: ${st.status || '?'} — ${st.progress_summary || ''}\n` +
       (taskLines ? `CURRENT TASKS:\n${taskLines}\n` : '') +
       (st.open_threads && st.open_threads.length ? `OPEN THREADS: ${st.open_threads.map(o => o.id + ':' + o.state).join(', ')}\n` : '') +
-      `Re-read your full checkpoint at state/${id}.json before proceeding, and pick up where it says you are.`;
+      `Re-read your full checkpoint at state/${id}.json before proceeding, and pick up where it says you are.\n\n` +
+      `RECONCILE now (argue against yourself, do not reflexively say "on track"): ` +
+      `(1) state your goal from the file above; (2) name the concrete evidence that WOULD show you are OFF track; ` +
+      `(3) check each child (swarm children + their state files) and your own progress against that evidence; ` +
+      `(4) verdict + the ONE biggest risk, then ACT on it (steer/close/spawn a child, or escalate up with GOAL/GAP/EVIDENCE/OPTIONS/ASK). ` +
+      `Then update your checkpoint to reflect the reconciled status.`;
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx },
     }));
