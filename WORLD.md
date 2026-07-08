@@ -33,6 +33,10 @@ within it:
   NOT need `SWARM_ID` — use it to discover what swarms exist on disk.
 - `swarm status [--json]` → snapshot of the active swarm (agents, live/DEAD, each
   one's last reported state).
+
+`swarm list`, `swarm status`, and `swarm graph` also accept `--id <swarm-id>` to
+target a specific swarm instead of the exported `SWARM_ID`; omit it to use
+`SWARM_ID` as usual.
 - `swarm whoami` → your own agent id in the graph (or `operator` if you are the
   root — started directly by the human, not spawned by another agent).
 - `swarm parent` → the id of the agent who delegated to you and approves your

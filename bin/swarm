@@ -527,9 +527,9 @@ for p in d.get("result",{}).get("panes",[]): print(p.get("pane_id",""))' 2>/dev/
 # longer exists is DEAD (stale). Truth = herdr, not the on-disk registry.
 # --json emits records with a "live" field; --live-only hides dead ones.
 cmd_list() {
-  init_swarm_paths
   local as_json="" live_only=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
+  init_swarm_paths
   local panes; panes="$(live_panes)"
   AGENTS_DIR="$AGENTS_DIR" PANES="$panes" AS_JSON="${as_json:-}" LIVE_ONLY="${live_only:-}" python3 <<'PY'
 import json,os,sys
@@ -617,9 +617,9 @@ cmd_reap() {
 # how to continue. Exit code: 0 = swarm exists, 3 = SWARM_ID set but no such
 # swarm on disk, (init_swarm_paths dies if SWARM_ID unset).
 cmd_status() {
-  init_swarm_paths
   local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  init_swarm_paths
   if [ ! -d "$SWARM_ROOT" ]; then
     if [ -n "$as_json" ]; then echo "{\"swarm_id\":\"$SWARM_ID\",\"exists\":false,\"agents\":[]}"
     else echo "swarm '$SWARM_ID' — no state on disk (SWARM_ID is set but this swarm was never started here)"; fi
@@ -737,9 +737,9 @@ PY
 # living. Root children hang under "operator" (the human). Role is emergent, not
 # shown as a field: a node with children is coordinating, a leaf is working.
 cmd_graph() {
-  init_swarm_paths
   local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  init_swarm_paths
   local panes; panes="$(live_panes)"
   SWARM_ID="$SWARM_ID" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
 import json,os,sys
@@ -934,12 +934,12 @@ other verbs act within that swarm only.
   swarm send  <agent-id> "<message>"
   swarm updates [--id <agent-id>] [--json]
   swarm wait  <agent-id> [--timeout SEC]
-  swarm list  [--json] [--live-only]     agents in the active swarm (marks DEAD)
+  swarm list  [--id <swarm-id>] [--json] [--live-only]   agents in the active swarm (marks DEAD)
   swarm swarms [--json]                  ALL swarm-ids for this project (no SWARM_ID needed)
-  swarm status [--json]                  reconciled snapshot (restart: read this)
+  swarm status [--id <swarm-id>] [--json]                reconciled snapshot (restart: read this)
   swarm whoami                           my own agent id (operator if root)
   swarm parent                           who delegated to / approves me
-  swarm graph [--json]                   the LIVING tree of work (dead hidden)
+  swarm graph [--id <swarm-id>] [--json]                 the LIVING tree of work (dead hidden)
   swarm children [--json]                YOUR direct children (one layer down)
   swarm close [<id>] [--self]            close <id>+subtree (--self: just <id>); keeps state
   swarm reap                             prune dead agents in the active swarm
