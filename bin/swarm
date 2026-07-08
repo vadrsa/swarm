@@ -213,15 +213,19 @@ cmd_spawn() {
 
   local id; id="$(next_id)"
 
-  # Per-subagent settings: wire the Stop + Notification hooks to swarm-hook.
-  # Passed via `claude --settings` so the GLOBAL ~/.claude/settings.json is
-  # never touched. Hooks are additive/merged by claude.
+  # Per-subagent settings: wire the Stop + Notification + UserPromptSubmit hooks
+  # to swarm-hook. Stop/Notification report the agent's state to the coordinator
+  # (subagent -> coordinator channel). UserPromptSubmit runs `inbox-check` at
+  # every turn boundary to surface the agent's durable inbox (coordinator ->
+  # subagent channel) into its context. Passed via `claude --settings` so the
+  # GLOBAL ~/.claude/settings.json is never touched. Hooks are additive/merged.
   local settings="$SETTINGS_DIR/$id.json"
   python3 - "$settings" "$HOOK" <<'PY'
 import json,sys
 settings_path, hook = sys.argv[1], sys.argv[2]
 def h(ev): return {"matcher":"","hooks":[{"type":"command","command":f"node '{hook}' {ev}"}]}
-json.dump({"hooks":{"Stop":[h("stop")],"Notification":[h("notification")]}}, open(settings_path,"w"))
+json.dump({"hooks":{"Stop":[h("stop")],"Notification":[h("notification")],
+                    "UserPromptSubmit":[h("inbox-check")]}}, open(settings_path,"w"))
 PY
 
   # Build the claude launch command. Positional prompt = the task (interactive
@@ -382,59 +386,55 @@ PY
 
 # ------------------------------------------------------------------ send
 # swarm send <id> "<message>"
+#
+# Durable inbox delivery. Instead of typing the message into the target's live
+# TUI pane (fragile, no delivery guarantee), we write ONE JSON message file to
+# the target's durable inbox and then fire a best-effort "doorbell" — a bare
+# Enter into the pane — to trigger a turn boundary now so the agent's
+# UserPromptSubmit inbox-check hook picks the message up in near-realtime. The
+# inbox FILE is the source of truth: if the pane is missing/unavailable the
+# message is already durably written and will be picked up on the agent's next
+# turn, so a missing doorbell only delays pickup — it never loses a message.
 cmd_send() {
   init_swarm_paths
   local id="${1:-}" msg="${2:-}"
   [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"'
+  # Validate the target exists (and get its pane for the doorbell).
   local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
   local pane; pane="$(json_get "$reg" pane)"
-  [ -n "$pane" ] || die "no pane for $id"
-  herdr pane send-text "$pane" "$msg"
-  send_enter_when_settled "$pane"
-}
 
-# Read the agent's current prompt-input line (content after the ❯ marker).
-# Empty string means the input box is empty (message submitted / not yet arrived).
-_prompt_box_content() {
-  herdr pane read "$1" --source visible --lines 40 2>/dev/null \
-    | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//'
-}
+  # Sender: the calling agent's id if we're a subagent, else "operator"
+  # (a human/root coordinator that has no agent id of its own).
+  local from="${SWARM_AGENT_ID:-operator}"
 
-# Submit the text just sent with send-text.
-#
-# herdr's send-text delivers a long/multi-paragraph message as SEVERAL
-# bracketed-paste chunks that land asynchronously over a short window. A bare
-# `send-keys Enter` fired immediately races those chunks: it is consumed while
-# paste handling is still in progress, so the text sits QUEUED in the prompt box
-# UNSUBMITTED (visible as "[Pasted text #N ...]"). This function fixes that by:
-#   1. waiting until the prompt box is non-empty AND stable across two reads
-#      (all paste chunks have arrived — "settled"), then
-#   2. pressing Enter and CONFIRMING the box emptied, retrying Enter a bounded
-#      number of times in case an Enter still lands mid-settle.
-# It degrades gracefully: if the box never appears to settle (unexpected UI),
-# it still sends Enter so behaviour is no worse than before.
-send_enter_when_settled() {
-  local pane="$1" prev="" cur="" i settled=0
-  # Phase 1 — wait for the pasted input to settle (bounded ~8s).
-  for i in $(seq 1 40); do
-    cur="$(_prompt_box_content "$pane")"
-    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then settled=1; break; fi
-    prev="$cur"; sleep 0.2
-  done
-  # Phase 2 — submit and confirm the box drained; retry Enter if not (bounded).
-  local attempt
-  for attempt in 1 2 3 4 5; do
-    herdr pane send-keys "$pane" Enter >/dev/null 2>&1
-    sleep 0.4
-    cur="$(_prompt_box_content "$pane")"
-    [ -z "$cur" ] && return 0
-    sleep 0.3
-  done
-  # Could not confirm an empty box. If we never saw it settle the message may be
-  # genuinely empty/odd; either way we have already pressed Enter several times.
-  [ "$settled" = 1 ] && \
-    echo "swarm: warning: send to $pane may not have submitted (prompt box not empty after retries)" >&2
-  return 0
+  # Write the message atomically (tmp + rename) into the target's inbox. The
+  # filename is <ts_ms>-<from>.json so files sort by arrival time.
+  local inbox="$SWARM_ROOT/inbox/$id"
+  mkdir -p "$inbox" || die "cannot create inbox dir: $inbox"
+  local ts; ts="$(date +%s%3N)"
+  # date +%3N is GNU-only; fall back to a millisecond stamp via python if needed.
+  case "$ts" in *N|"") ts="$(python3 -c 'import time;print(int(time.time()*1000))')";; esac
+  local file="$inbox/$ts-$from.json"
+  local tmp="$file.tmp"
+  TO="$id" FROM="$from" TS="$ts" BODY="$msg" OUT="$tmp" python3 - <<'PY'
+import json,os
+rec={"id":f"{os.environ['FROM']}-{os.environ['TS']}",
+     "to":os.environ["TO"],"from":os.environ["FROM"],
+     "ts":int(os.environ["TS"]),"type":"message",
+     "body":os.environ["BODY"],"read":False}
+json.dump(rec,open(os.environ["OUT"],"w"))
+PY
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; die "failed to write inbox message for $id"; }
+
+  # Doorbell (best-effort): a bare Enter submits an empty prompt, which fires the
+  # UserPromptSubmit inbox-check hook and surfaces the message now. The pane is
+  # ONLY a doorbell here — the message text is never sent to the pane. If the
+  # pane is missing/unavailable we do NOT fail: the file is already durable.
+  if [ -n "$pane" ] && herdr pane send-keys "$pane" Enter >/dev/null 2>&1; then
+    :
+  else
+    echo "swarm: note: doorbell to $id skipped (pane unavailable); message is durably queued and will be picked up on $id's next turn" >&2
+  fi
 }
 
 # ------------------------------------------------------------------ updates
