@@ -72,9 +72,23 @@ points users here.
   should read the matching migration note first.
 - `swarm update` refuses if the checkout has uncommitted local changes.
 
-Because `install.sh` symlinks into the repo, an update is just a tag checkout +
-`install.sh --update` (refreshes symlinks, re-checks prereqs, warns about state
-compatibility). No rebuild.
+There's no build step — `install.sh` symlinks `~/.local/bin/swarm` straight into
+a git checkout, so the version that runs is whatever tag/commit that checkout is
+on. `swarm update` just moves that checkout to a new tag (`git checkout <tag>` +
+`install.sh --update` to refresh symlinks, re-check prereqs, and warn about state
+compatibility). Two things follow from this that trip people up:
+
+- **`swarm update` only moves between _tagged, pushed_ releases.** It fetches
+  tags and checks out the newest one; merged-but-untagged commits on `main` are
+  invisible to it until someone cuts a tag (see "How a release is cut"). To run
+  unreleased `main`, `git pull` a checkout yourself — `swarm update` won't.
+- **It acts on the checkout the running `swarm` is symlinked into, and only
+  that one.** The `curl … | sh` bootstrap clones into `~/.local/share/swarm` and
+  points `~/.local/bin/swarm` there, so `swarm update` updates that clone. But if
+  you instead ran `install.sh` from a dev checkout (e.g. `~/git/swarm`), the
+  symlink points there and `swarm update` moves _that_ checkout's tag — leaving
+  any bootstrap clone untouched. A machine can have both; whichever one your PATH
+  resolves to is what runs and what `swarm update` operates on.
 
 ## Migration notes
 
