@@ -46,8 +46,13 @@ cd swarm
 After installing, verify with `swarm world` (prints the world doc) — if that
 works, you're set.
 
-**Update:** `git pull && ./install.sh`. **Remove:** `./install.sh --uninstall`
-(removes the two symlinks; leaves your `.swarm/` state and PATH edits alone).
+**Update:** run `swarm update` — it moves you to the latest tagged release and
+re-runs the installer (`swarm update --check` just tells you if one's available).
+It only advances to versions that were deliberately tagged, never arbitrary
+commits, and refuses to run if you have uncommitted local changes.
+
+**Remove:** `./install.sh --uninstall` (removes the two symlinks; leaves your
+`.swarm/` state and PATH edits alone).
 
 ## Use
 
