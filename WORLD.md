@@ -17,10 +17,18 @@ within it:
 
 - `swarm world` → print this document (what every agent reads). Path-agnostic:
   works wherever swarm is installed.
-- `swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]` → starts a Claude
-  subagent in a new herdr tab, seeded with `<task>` as its first prompt. Prints
-  the subagent's id (e.g. `a1`). `--model` picks the model (e.g. `opus`,
-  `sonnet`); `--label` names it; `--cwd` sets its directory.
+- `swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--standing --role R]`
+  → starts a Claude subagent in a new herdr tab, seeded with `<task>` as its first
+  prompt. Prints the subagent's id (e.g. `a1`). `--model` picks the model (e.g.
+  `opus`, `sonnet`); `--label` names it; `--cwd` sets its directory. `--standing`
+  marks it a long-lived agent: it gets a seeded goal-status checkpoint at
+  `state/<id>.json`, restoration hooks (its checkpoint is re-injected after a
+  context compaction or restart), and a briefed duty to keep that checkpoint
+  current; `--role` sets its mission line.
+- `swarm checkpoint --help | --context` → (standing agents) the goal-status
+  state-file schema, and a reader that reports your own context-window usage to
+  drop into your checkpoint. You write `state/<id>.json` yourself; this is the
+  reference + the usage helper.
 - `swarm send <id> "<message>"` → delivers a message to a subagent's **durable
   file inbox** (`.swarm/swarms/<id>/inbox/<agent-id>/`), then rings a best-effort
   "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
