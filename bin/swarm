@@ -55,39 +55,84 @@ cmd_world() {
 # REPO_ROOT — the git checkout this install lives in (HERE is the resolved bin/).
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
-# swarm update [--check]  — update to the latest TAGGED release.
-#   Fetches tags, finds the newest semver tag, checks it out, and re-runs
-#   install.sh. Explicit and safe: it never pulls arbitrary main, only releases
-#   you deliberately tagged. --check just reports whether an update exists.
+# swarm update [--check] [--pre] [--major]  — update to the latest TAGGED release.
+#   Tags follow semver: vMAJOR.MINOR.PATCH, with pre-releases like v0.3.0-rc1.
+#   Default: newest STABLE tag within the CURRENT major only. Never pulls
+#   arbitrary commits — only releases you deliberately tagged.
+#     --check   report whether an update exists; change nothing.
+#     --pre     also consider pre-release tags (those with a '-', e.g. -rc1).
+#     --major   allow crossing into a new (breaking) major version. Without it,
+#               a new major is reported but NOT applied — so users are never
+#               silently carried across a breaking boundary.
 cmd_update() {
-  local check_only=""; [ "${1:-}" = "--check" ] && check_only=1
+  local check_only="" pre="" allow_major=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check) check_only=1; shift;;
+      --pre)   pre=1; shift;;
+      --major) allow_major=1; shift;;
+      *) die "unknown flag: $1 (usage: swarm update [--check] [--pre] [--major])";;
+    esac
+  done
   have git || die "git not found — needed to update"
   [ -d "$REPO_ROOT/.git" ] || die "not a git checkout ($REPO_ROOT) — update only works when installed via git clone"
-
   git -C "$REPO_ROOT" fetch --tags --quiet origin 2>/dev/null || die "could not fetch from origin (network?)"
-  # newest tag by version sort (handles v1.2.10 > v1.2.9)
-  local latest; latest="$(git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname | head -1)"
-  [ -n "$latest" ] || die "no release tags found on origin yet (nothing to update to)"
 
-  local current; current="$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || echo '(untagged/dev)')"
-  if [ "$current" = "$latest" ]; then
-    echo "swarm is up to date ($latest)"; return 0
+  local current; current="$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || echo '')"
+
+  # Pick the target tag with explicit semver logic (don't trust -v:refname for
+  # pre-release ordering). All comparisons happen in python for correctness.
+  local target major_of_current
+  read -r target major_of_current < <(
+    REPO="$REPO_ROOT" CUR="$current" PRE="${pre:-}" python3 <<'PY'
+import os, re, subprocess
+repo=os.environ["REPO"]; cur=os.environ["CUR"]; want_pre=bool(os.environ.get("PRE"))
+tags=subprocess.run(["git","-C",repo,"tag","-l","v*"],capture_output=True,text=True).stdout.split()
+def parse(t):
+    m=re.match(r'^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$', t)
+    if not m: return None
+    maj,mi,pa=int(m[1]),int(m[2]),int(m[3]); pre=m[4]
+    # sort key: (M,m,p, is_stable, pre-ident). stable (pre=None) ranks ABOVE pre.
+    return (maj,mi,pa, 1 if pre is None else 0, pre or "")
+parsed=[(t,parse(t)) for t in tags]; parsed=[(t,k) for t,k in parsed if k]
+if not want_pre: parsed=[(t,k) for t,k in parsed if k[3]==1]  # stable only
+parsed.sort(key=lambda x:x[1])
+target = parsed[-1][0] if parsed else ""
+cm = parse(cur)
+maj_cur = cm[0] if cm else ""
+print(target, maj_cur)
+PY
+  )
+  [ -n "$target" ] || die "no ${pre:+pre-release or }release tags found on origin yet (nothing to update to)"
+
+  if [ "$current" = "$target" ]; then echo "swarm is up to date ($target)"; return 0; fi
+
+  # Is the target a new MAJOR relative to current?
+  local target_major; target_major="${target#v}"; target_major="${target_major%%.*}"
+  local crosses_major=""
+  if [ -n "$major_of_current" ] && [ "$target_major" != "$major_of_current" ]; then crosses_major=1; fi
+
+  local from="${current:-(untagged/dev)}"
+  if [ -n "$crosses_major" ] && [ -z "$allow_major" ]; then
+    echo "a new MAJOR (breaking) release is available: $from -> $target"
+    echo "major versions may break existing swarms/state. Review the CHANGELOG/RELEASING notes,"
+    echo "then run 'swarm update --major' to cross into it."
+    return 0
   fi
   if [ -n "$check_only" ]; then
-    echo "update available: $current -> $latest  (run 'swarm update')"; return 0
+    echo "update available: $from -> $target${crosses_major:+  (MAJOR/breaking — needs --major)}  (run 'swarm update${crosses_major:+ --major}')"
+    return 0
   fi
 
-  # Refuse to clobber local edits (dev working copy).
   if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
     die "you have uncommitted local changes in $REPO_ROOT — commit/stash them before updating"
   fi
-  echo "updating $current -> $latest ..."
-  git -C "$REPO_ROOT" checkout --quiet "$latest" || die "checkout $latest failed"
-  # Re-run the installer to refresh symlinks/permissions (idempotent).
+  echo "updating $from -> $target ..."
+  git -C "$REPO_ROOT" checkout --quiet "$target" || die "checkout $target failed"
   if [ -x "$REPO_ROOT/install.sh" ]; then
-    ( cd "$REPO_ROOT" && ./install.sh ) || die "install.sh failed after update"
+    ( cd "$REPO_ROOT" && ./install.sh --update ) || die "install.sh failed after update"
   fi
-  echo "now on $latest"
+  echo "now on $target"
 }
 
 # Resolve the ACTIVE swarm's dirs from $SWARM_ID. `start` sets SWARM_ID itself
@@ -793,7 +838,8 @@ A SWARM is one run, scoped by swarm-id. Start one, export SWARM_ID, then all
 other verbs act within that swarm only.
 
   swarm world                            print the world doc (what agents read)
-  swarm update [--check]                 update to the latest tagged release
+  swarm update [--check] [--pre] [--major]  update to latest tagged release
+                                         (--pre: incl pre-releases; --major: cross breaking)
   swarm start [--id <swarm-id>]          mint a swarm; prints its id
                                          -> export SWARM_ID=<that id>
   swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]   (new herdr tab)
