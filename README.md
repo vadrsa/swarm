@@ -54,6 +54,10 @@ commits, and refuses to run if you have uncommitted local changes.
 **Remove:** `./install.sh --uninstall` (removes the two symlinks; leaves your
 `.swarm/` state and PATH edits alone).
 
+Pre-releases: `swarm update --pre`. Crossing a breaking major version needs
+`swarm update --major` — see [RELEASING.md](RELEASING.md) for the versioning
+policy, how changes land, and any migration notes.
+
 ## Use
 
 Inside a **herdr** pane, in your project directory, start a fresh Claude session
