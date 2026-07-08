@@ -30,14 +30,24 @@ agents read. The tools give reliable **spawn / send / receive**; the strategy
 ## Install
 
 ```sh
-git clone <this-repo> swarm
+git clone https://github.com/vadrsa/swarm.git
 cd swarm
 ./install.sh
 ```
 
-`install.sh` puts `swarm` on your PATH (`~/.local/bin`), symlinks the skill into
-`~/.claude/skills/swarm/`, and checks prerequisites. Re-run it to update after a
-`git pull`. `./install.sh --uninstall` removes the symlinks.
+`install.sh` is idempotent and:
+
+- symlinks `swarm` into `~/.local/bin/` (put it on your PATH if it isn't:
+  `export PATH="$HOME/.local/bin:$PATH"` in your shell rc),
+- symlinks the skill into `~/.claude/skills/swarm/` (start a **new** Claude Code
+  session afterward so it loads),
+- checks that `herdr`, `claude`, `node`, and `python3` are on your PATH.
+
+After installing, verify with `swarm world` (prints the world doc) — if that
+works, you're set.
+
+**Update:** `git pull && ./install.sh`. **Remove:** `./install.sh --uninstall`
+(removes the two symlinks; leaves your `.swarm/` state and PATH edits alone).
 
 ## Use
 
