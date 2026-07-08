@@ -28,6 +28,9 @@ within it:
   is a stop state, then prints it. Has a timeout (won't hang).
 - `swarm list [--live-only]` → your swarm's roster; each agent marked `live` or
   `DEAD` (reconciled against herdr, not just the registry).
+- `swarm swarms [--json]` → ALL swarm-ids for this project (not just the active
+  one), each with its agent count and last-modified time. The one verb that does
+  NOT need `SWARM_ID` — use it to discover what swarms exist on disk.
 - `swarm status [--json]` → snapshot of the active swarm (agents, live/DEAD, each
   one's last reported state).
 - `swarm whoami` → your own agent id in the graph (or `operator` if you are the

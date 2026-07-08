@@ -557,6 +557,39 @@ for r in rows:
 PY
 }
 
+# ------------------------------------------------------------------ swarms
+# swarm swarms [--json]  — list ALL swarm-ids for this project, not just the
+# active one. Unlike almost every other verb this does NOT need SWARM_ID: it
+# discovers swarm-ids by listing subdirs of the project's swarms/ dir (resolved
+# from SWARM_DIR, else $PWD/.swarm). For each swarm it shows the id, last-modified
+# time, and agent count (*.json under <swarm>/agents/, same convention as list).
+# Empty/missing swarms dir is not an error — it prints "(no swarms)" / "[]".
+cmd_swarms() {
+  local as_json=""
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  SWARMS_DIR="$SWARMS_DIR" AS_JSON="${as_json:-}" python3 <<'PY'
+import json,os,sys,time
+root=os.environ["SWARMS_DIR"]; as_json=os.environ.get("AS_JSON")
+rows=[]
+for sid in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+    sd=os.path.join(root,sid)
+    if not os.path.isdir(sd): continue
+    ad=os.path.join(sd,"agents")
+    agents=[fn for fn in os.listdir(ad) if fn.endswith(".json")] if os.path.isdir(ad) else []
+    try: mtime=os.path.getmtime(sd)
+    except OSError: mtime=0
+    rows.append({"swarm_id":sid,"agents":len(agents),
+                 "modified":time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(mtime)),
+                 "modified_epoch":int(mtime)})
+if as_json:
+    print(json.dumps(rows,indent=2)); sys.exit(0)
+if not rows:
+    print("(no swarms)"); sys.exit(0)
+for r in rows:
+    print(f"{r['swarm_id']}\t{r['agents']} agents\t{r['modified']}")
+PY
+}
+
 # ------------------------------------------------------------------ reap
 # Prune registry entries whose herdr pane is gone (stale from prior runs or
 # agents that died after starting). Safe: only removes entries herdr confirms
@@ -878,6 +911,7 @@ case "${1:-}" in
   updates) shift; cmd_updates "$@";;
   wait)    shift; cmd_wait "$@";;
   list)    shift; cmd_list "$@";;
+  swarms)  shift; cmd_swarms "$@";;
   status)   shift; cmd_status "$@";;
   whoami)   shift; cmd_whoami "$@";;
   parent)   shift; cmd_parent "$@";;
@@ -901,6 +935,7 @@ other verbs act within that swarm only.
   swarm updates [--id <agent-id>] [--json]
   swarm wait  <agent-id> [--timeout SEC]
   swarm list  [--json] [--live-only]     agents in the active swarm (marks DEAD)
+  swarm swarms [--json]                  ALL swarm-ids for this project (no SWARM_ID needed)
   swarm status [--json]                  reconciled snapshot (restart: read this)
   swarm whoami                           my own agent id (operator if root)
   swarm parent                           who delegated to / approves me
