@@ -30,9 +30,20 @@ agents read. The tools give reliable **spawn / send / receive**; the strategy
 ## Install
 
 ```sh
-git clone https://github.com/vadrsa/swarm.git
-cd swarm
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/vadrsa/swarm/main/bootstrap.sh | sh
+```
+
+This clones swarm into `~/.local/share/swarm` and runs its installer. Re-running
+the same command updates it. Override the location with `SWARM_HOME=... ` if you
+like. (Piping a script to `sh` runs code you haven't read — if you'd rather
+review it first, use the manual install below.)
+
+**Manual install** (also the right choice if you want to hack on swarm — clone
+it somewhere you'll work in):
+
+```sh
+git clone https://github.com/vadrsa/swarm.git ~/git/swarm
+~/git/swarm/install.sh
 ```
 
 `install.sh` is idempotent and:
