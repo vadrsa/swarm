@@ -22,7 +22,16 @@
 
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script's REAL location, following symlinks — install.sh symlinks
+# `swarm` into ~/.local/bin, so ${BASH_SOURCE[0]} is the symlink, not the repo.
+# We must dereference it to find bin/ (for the hook) and ../WORLD.md.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  case "$_src" in /*) ;; *) _src="$_dir/$_src";; esac   # resolve relative link
+done
+HERE="$(cd "$(dirname "$_src")" && pwd)"
 HOOK="$HERE/swarm-hook.cjs"
 SWARM_DIR="${SWARM_DIR:-$PWD/.swarm}"   # PROJECT root for swarm state
 SWARMS_DIR="$SWARM_DIR/swarms"          # one subdir per swarm-id
