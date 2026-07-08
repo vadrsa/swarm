@@ -307,11 +307,20 @@ PY
 
   # Open a new herdr TAB for this subagent (full-width pane; coordinator's
   # own view is untouched) and capture its root pane id. The env is set on
-  # the tab's pane so the subagent's hook knows its swarm id.
+  # the tab's pane so BOTH the child's swarm CLI and its hook resolve state:
+  #   SWARM_DIR      = PROJECT root (what the CLI expects; it appends
+  #                    /swarms/$SWARM_ID itself). NOT the swarm's own dir.
+  #   SWARM_ID       = the active swarm-id, so the child's `swarm <verb>`
+  #                    resolves SWARM_ROOT=$SWARM_DIR/swarms/$SWARM_ID.
+  #   SWARM_AGENT_ID = this subagent's stable id (used by the hook + whoami).
+  # The hook derives its updates dir from SWARM_DIR+SWARM_ID under this same
+  # contract (see bin/swarm-hook.cjs), so updates still land in the swarm's
+  # own updates/ dir.
   local pane tab
   local tabjson
   tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id:$label" \
-           --env "SWARM_DIR=$SWARM_ROOT" --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
+           --env "SWARM_DIR=$SWARM_DIR" --env "SWARM_ID=$SWARM_ID" \
+           --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
   pane=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null || true)
   tab=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["tab"]["tab_id"])' 2>/dev/null || true)
   [ -n "$pane" ] || die "herdr tab create failed"
@@ -381,7 +390,51 @@ cmd_send() {
   local pane; pane="$(json_get "$reg" pane)"
   [ -n "$pane" ] || die "no pane for $id"
   herdr pane send-text "$pane" "$msg"
-  herdr pane send-keys "$pane" Enter
+  send_enter_when_settled "$pane"
+}
+
+# Read the agent's current prompt-input line (content after the ❯ marker).
+# Empty string means the input box is empty (message submitted / not yet arrived).
+_prompt_box_content() {
+  herdr pane read "$1" --source visible --lines 40 2>/dev/null \
+    | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//'
+}
+
+# Submit the text just sent with send-text.
+#
+# herdr's send-text delivers a long/multi-paragraph message as SEVERAL
+# bracketed-paste chunks that land asynchronously over a short window. A bare
+# `send-keys Enter` fired immediately races those chunks: it is consumed while
+# paste handling is still in progress, so the text sits QUEUED in the prompt box
+# UNSUBMITTED (visible as "[Pasted text #N ...]"). This function fixes that by:
+#   1. waiting until the prompt box is non-empty AND stable across two reads
+#      (all paste chunks have arrived — "settled"), then
+#   2. pressing Enter and CONFIRMING the box emptied, retrying Enter a bounded
+#      number of times in case an Enter still lands mid-settle.
+# It degrades gracefully: if the box never appears to settle (unexpected UI),
+# it still sends Enter so behaviour is no worse than before.
+send_enter_when_settled() {
+  local pane="$1" prev="" cur="" i settled=0
+  # Phase 1 — wait for the pasted input to settle (bounded ~8s).
+  for i in $(seq 1 40); do
+    cur="$(_prompt_box_content "$pane")"
+    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then settled=1; break; fi
+    prev="$cur"; sleep 0.2
+  done
+  # Phase 2 — submit and confirm the box drained; retry Enter if not (bounded).
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    herdr pane send-keys "$pane" Enter >/dev/null 2>&1
+    sleep 0.4
+    cur="$(_prompt_box_content "$pane")"
+    [ -z "$cur" ] && return 0
+    sleep 0.3
+  done
+  # Could not confirm an empty box. If we never saw it settle the message may be
+  # genuinely empty/odd; either way we have already pressed Enter several times.
+  [ "$settled" = 1 ] && \
+    echo "swarm: warning: send to $pane may not have submitted (prompt box not empty after retries)" >&2
+  return 0
 }
 
 # ------------------------------------------------------------------ updates
@@ -415,10 +468,11 @@ PY
 
 # ------------------------------------------------------------------ wait
 # swarm wait <id> [--timeout SEC]  — block until the agent's NEWEST report is a
-# stop state (done | question | blocked), then print it. Driven by the fired
-# hook, with a timeout backstop (never hangs). "question" and "blocked" both
-# mean the agent yielded and needs the coordinator — only "done" means finished
-# (and the coordinator still verifies by reading the pane).
+# stop state (done | question | blocked | idle), then print it. Driven by the
+# fired hook, with a timeout backstop (never hangs). "question" and "blocked"
+# both mean the agent yielded and needs the coordinator; "done" (and its
+# post-completion "idle" follow-up) mean finished — the coordinator still
+# verifies by reading the pane.
 #
 # Only considers records newer than wait's start (a "since" mark), so a stale
 # `done` from a previous turn doesn't satisfy a fresh wait.
@@ -444,7 +498,7 @@ for fn in (sorted(os.listdir(d)) if os.path.isdir(d) else []):
     if r.get("id")!=only: continue
     if int(r.get("ts",0)) < since: continue
     if best is None or int(r.get("ts",0)) >= int(best.get("ts",0)): best=r
-if best and best.get("state") in ("done","question","blocked"):
+if best and best.get("state") in ("done","question","blocked","idle"):
     print(json.dumps(best))
 else:
     print("")

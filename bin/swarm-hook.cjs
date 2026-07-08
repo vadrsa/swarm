@@ -8,9 +8,18 @@
 // firing — never a screen scrape, never a parsed marker line.
 //
 // Env (set by swarm spawn on the subagent's pane):
-//   SWARM_DIR       — absolute path to the ACTIVE swarm's dir (holds updates/)
+//   SWARM_DIR       — absolute path to the PROJECT swarm root (holds swarms/).
+//                     The active swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID,
+//                     and its updates/ lives under that. This matches what the
+//                     `swarm` CLI expects, so the child can run swarm verbs too.
+//   SWARM_ID        — the active swarm-id; combined with SWARM_DIR it locates
+//                     this swarm's updates/ dir.
 //   SWARM_AGENT_ID  — this subagent's stable id within the swarm (e.g. "a1")
 //   SWARM_AGENT_LABEL — human label (e.g. "claude:opus")
+//
+// Back-compat: older `swarm spawn` passed SWARM_DIR = the swarm's OWN dir and no
+// SWARM_ID. If SWARM_ID is absent we fall back to treating SWARM_DIR as the dir
+// that directly contains updates/ (the legacy contract).
 //
 // Argv: [event]  where event is "stop" | "notification" (from the hook config).
 
@@ -31,12 +40,19 @@ const event = (process.argv[2] || 'stop').toLowerCase();
 const payload = readStdinJSON() || {};
 
 const swarmDir = process.env.SWARM_DIR || '';
+const swarmId = process.env.SWARM_ID || '';
 const id = process.env.SWARM_AGENT_ID || 'unknown';
 const label = process.env.SWARM_AGENT_LABEL || 'claude';
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
 
-const updatesDir = path.join(swarmDir, 'updates');
+// Resolve this swarm's updates/ dir. Under the current contract SWARM_DIR is the
+// PROJECT root and the swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID. If
+// SWARM_ID is absent we honour the legacy contract where SWARM_DIR was already
+// the swarm's own dir (updates/ directly beneath it).
+const updatesDir = swarmId
+  ? path.join(swarmDir, 'swarms', swarmId, 'updates')
+  : path.join(swarmDir, 'updates');
 try { fs.mkdirSync(updatesDir, { recursive: true }); } catch { process.exit(0); }
 
 // Claude includes the transcript path on every hook payload. We pull the
@@ -94,8 +110,38 @@ const transcriptPath = payload.transcript_path || payload.transcriptPath || '';
 const fullText = lastAssistantText(transcriptPath);
 const summary = fullText.slice(0, 300);
 
+// Newest state already recorded for THIS agent (used to tell "idle after done"
+// from a real block on a Notification event). Reads the same drop dir readers use.
+function lastRecordedState() {
+  try {
+    let best = null;
+    for (const fn of fs.readdirSync(updatesDir)) {
+      if (!fn.endsWith('.json')) continue;
+      let r;
+      try { r = JSON.parse(fs.readFileSync(path.join(updatesDir, fn), 'utf8')); } catch { continue; }
+      if (r.id !== id) continue;
+      if (!best || Number(r.ts || 0) >= Number(best.ts || 0)) best = r;
+    }
+    return best ? best.state : '';
+  } catch { return ''; }
+}
+
+// A Notification fires both for a REAL block (permission prompt / the agent
+// asked and is waiting) AND for plain idleness — Claude Code emits an idle
+// "waiting for your input" notification ~a minute after a turn ends, even when
+// the agent simply finished. Treating that idle ping as `blocked` makes a
+// DONE-then-idle agent look like it needs the coordinator. Distinguish them:
+//   - the notification's own message tells a permission/input request apart
+//     from the generic idle timeout, and
+//   - if the agent's last real state was already `done`, a bare idle ping is
+//     post-completion idleness, not a new block.
+const notifMsg = String(payload.message || payload.title || '').toLowerCase();
+const idleNotification = /waiting for your input|is idle|are you still there/.test(notifMsg);
+const permissionNotification = /permission|needs your|approve|allow|blocked|waiting for your response/.test(notifMsg);
+
 // state:
-//   notification -> "blocked"   (Claude Code needs input: permission/idle prompt)
+//   notification (real block)   -> "blocked"   (permission/input actually needed)
+//   notification (idle-after-done) -> "idle"    (finished, just sitting idle — NOT blocked)
 //   stop + looks like a question -> "question"  (agent asked the user and yielded)
 //   stop otherwise -> "done"    (turn ended, likely finished — coordinator verifies)
 // The distinction between "question" and "done" is the key one: a plain Stop
@@ -103,8 +149,15 @@ const summary = fullText.slice(0, 300);
 // from the trailing message. Still a hint — the coordinator confirms by reading
 // the pane.
 let state;
-if (event === 'notification') state = 'blocked';
-else state = looksLikeQuestion(fullText) ? 'question' : 'done';
+if (event === 'notification') {
+  const prev = lastRecordedState();
+  // Idle-after-done, or a generic idle ping with no permission signal: record
+  // as non-blocking `idle` so status/wait don't flip a finished agent to BLOCKED.
+  if (!permissionNotification && (idleNotification || prev === 'done')) state = 'idle';
+  else state = 'blocked';
+} else {
+  state = looksLikeQuestion(fullText) ? 'question' : 'done';
+}
 
 const record = {
   id,
