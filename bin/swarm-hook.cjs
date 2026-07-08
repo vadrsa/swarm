@@ -21,7 +21,10 @@
 // SWARM_ID. If SWARM_ID is absent we fall back to treating SWARM_DIR as the dir
 // that directly contains updates/ (the legacy contract).
 //
-// Argv: [event]  where event is "stop" | "notification" (from the hook config).
+// Argv: [event]  where event is "stop" | "notification" | "inbox-check"
+//   stop/notification  -> record a state event to updates/ (subagent -> coord).
+//   inbox-check        -> UserPromptSubmit: surface this agent's durable inbox
+//                         (coord -> subagent) into context, then mark read.
 
 const fs = require('fs');
 const path = require('path');
@@ -45,6 +48,87 @@ const id = process.env.SWARM_AGENT_ID || 'unknown';
 const label = process.env.SWARM_AGENT_LABEL || 'claude';
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
+
+// ------------------------------------------------------------- inbox-check
+// UserPromptSubmit verb. Surfaces this agent's durable inbox (coordinator ->
+// subagent messages, written by `swarm send`) into the model's context at the
+// turn boundary, then marks the surfaced messages read by MOVING them into a
+// read/ subdir (atomic rename; a durable audit trail; no re-injection race).
+//
+// This runs on EVERY turn of EVERY agent, so it is fast, side-effect-light, and
+// BULLETPROOF: any error → exit 0 with no output. It must never break the turn.
+// A no-op (no stdout) on an empty inbox is required.
+if (event === 'inbox-check') {
+  try {
+    // Same resolution as updatesDir below, minus the legacy branch: the inbox
+    // only exists on the new (SWARM_ID-carrying) contract. If we can't resolve
+    // it, silently do nothing.
+    const inboxDir = swarmId
+      ? path.join(swarmDir, 'swarms', swarmId, 'inbox', id)
+      : path.join(swarmDir, 'inbox', id);
+
+    let files;
+    try {
+      files = fs.readdirSync(inboxDir);
+    } catch {
+      process.exit(0); // no inbox dir yet -> nothing to deliver
+    }
+
+    // Unread = *.json directly under inboxDir (read ones live in read/).
+    const unread = files
+      .filter((fn) => fn.endsWith('.json'))
+      .map((fn) => {
+        let rec = null;
+        try { rec = JSON.parse(fs.readFileSync(path.join(inboxDir, fn), 'utf8')); } catch { /* skip */ }
+        return { fn, rec };
+      })
+      .filter((x) => x.rec && typeof x.rec.body === 'string')
+      .sort((a, b) => Number(a.rec.ts || 0) - Number(b.rec.ts || 0));
+
+    if (unread.length === 0) process.exit(0); // empty inbox -> no-op, no output
+
+    // Build the injected block. Frame it EXPLICITLY as incoming messages the
+    // agent should act on — additionalContext reads as out-of-band context, so
+    // without framing the model may not treat it as a directive.
+    const CAP = 8000; // defensive cap on total injected chars
+    const fmtTime = (ts) => {
+      try { return new Date(Number(ts)).toISOString().replace('T', ' ').slice(0, 19) + 'Z'; }
+      catch { return '?'; }
+    };
+    const header = `[swarm inbox] You have ${unread.length} new message(s) from other agents:`;
+    const blocks = [];
+    let used = header.length;
+    let injectedCount = 0;
+    for (const { rec } of unread) {
+      const block = `\n\n--- from ${rec.from || '?'} (${fmtTime(rec.ts)}) ---\n${rec.body}`;
+      if (used + block.length > CAP && injectedCount > 0) break; // keep at least one
+      blocks.push(block);
+      used += block.length;
+      injectedCount++;
+    }
+    const remaining = unread.length - injectedCount;
+    let context = header + blocks.join('');
+    if (remaining > 0) {
+      context += `\n\n…and ${remaining} more; full messages in inbox/${id}/`;
+    }
+    context += `\n\nThese were delivered to your durable inbox; act on them as part of this turn.`;
+
+    // Emit the injection FIRST, then mark read. If we crashed between the two,
+    // the messages would be re-injected next turn (safe) — losing one is not.
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context },
+    }));
+
+    // Mark surfaced messages read by moving them into read/ (atomic rename).
+    const readDir = path.join(inboxDir, 'read');
+    try { fs.mkdirSync(readDir, { recursive: true }); } catch { /* best effort */ }
+    for (let i = 0; i < injectedCount; i++) {
+      const fn = unread[i].fn;
+      try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch { /* best effort */ }
+    }
+  } catch { /* never break the turn */ }
+  process.exit(0);
+}
 
 // Resolve this swarm's updates/ dir. Under the current contract SWARM_DIR is the
 // PROJECT root and the swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID. If

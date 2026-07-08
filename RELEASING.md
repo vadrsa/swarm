@@ -101,4 +101,27 @@ Newest first. One entry per breaking (MAJOR) release.
 delete old .swarm/ dirs, re-run install>.
 -->
 
-_(none yet — no breaking releases so far.)_
+### v1.0.0 — durable inbox messaging replaces live-pane `swarm send`
+
+**Breaking:** `swarm send` no longer types the message into the target agent's
+live TUI pane. It now writes the message to a durable file inbox
+(`.swarm/swarms/<id>/inbox/<agent-id>/*.json`) and rings a best-effort doorbell;
+the message is surfaced into the agent's context by a new `UserPromptSubmit` hook
+that `swarm spawn` registers (alongside the existing Stop/Notification hooks).
+Consequences:
+- The `swarm send` **CLI signature is unchanged** (`swarm send <id> "<msg>"`), but
+  its contract changed from synchronous-keystroke to **durable-async**: a message
+  is *always delivered* to disk, but a busy agent may see it on its next turn
+  rather than the instant it is sent.
+- The per-agent settings schema and the `.swarm/` layout gained an `inbox/`
+  subtree and a `UserPromptSubmit` hook. A swarm **started on an older version**
+  has neither, so its running agents cannot receive new-style messages — an
+  in-flight old swarm is not compatible with this version.
+- The old live-typing helpers (`send_enter_when_settled`, `_prompt_box_content`)
+  are removed from the send path.
+
+**Migrate:** Finish or `swarm close` any active swarm started on a pre-1.0
+version before upgrading (its agents won't have the inbox hook). New swarms
+started on v1.0.0 get inbox messaging automatically — no user action beyond the
+normal `swarm update`. Old `.swarm/` dirs from prior runs are harmless to leave
+on disk but won't receive messages under the new model.

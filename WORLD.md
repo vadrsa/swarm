@@ -21,7 +21,14 @@ within it:
   subagent in a new herdr tab, seeded with `<task>` as its first prompt. Prints
   the subagent's id (e.g. `a1`). `--model` picks the model (e.g. `opus`,
   `sonnet`); `--label` names it; `--cwd` sets its directory.
-- `swarm send <id> "<message>"` → sends a message into a running subagent.
+- `swarm send <id> "<message>"` → delivers a message to a subagent's **durable
+  file inbox** (`.swarm/swarms/<id>/inbox/<agent-id>/`), then rings a best-effort
+  "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
+  the file: the message is surfaced into the agent's context (via a
+  UserPromptSubmit hook) on its next turn — even if the agent was busy or the
+  doorbell was missed. **This is durable-async, NOT the old live-keystroke model**
+  (see the reliability note below): a message is *always delivered*, but a busy
+  agent may see it on its next turn rather than instantly.
 - `swarm updates [--id X]` → subagent reports, each with a state and a one-line
   summary. Your inbox.
 - `swarm wait <id> [--timeout SEC]` → blocks until the subagent's newest report
@@ -78,6 +85,11 @@ verified result.
 
 - The hook firing is reliable; **what the agent claims in its summary is not** —
   the pane is ground truth.
+- `swarm send` is **durable**: the message is written to the target's file inbox
+  before anything else, so it is never lost even if the target is busy or its pane
+  is gone. The "doorbell" that surfaces it in near-realtime is best-effort — a
+  busy agent may pick the message up on its next turn instead of instantly, but it
+  *will* pick it up. Do not assume a sent message is seen the same instant.
 - The agent cap the user gives you is a real ceiling on concurrent subagents.
 - Each subagent has only the context you put in its `spawn` task — it does not
   see your conversation or the other agents'.
