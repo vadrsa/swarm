@@ -84,3 +84,16 @@ your project's `.gitignore`** so it isn't committed.
   correctness; work is judged by the deliverable, then approved.
 - **Each agent watches only its direct children**; failures route up one hop at
   a time. Dead agents drop out of the graph; the living reparent upward.
+
+## License
+
+Copyright (C) 2026 vadrsa
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License v3.0** as published by the Free
+Software Foundation. See [LICENSE](LICENSE) for the full text.
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. Under the GPL, if you distribute a modified version, you must also
+release your changes under the GPL.
