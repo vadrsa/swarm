@@ -1,0 +1,76 @@
+# swarm
+
+Run other Claude Code sessions as a **swarm of subagents** to accomplish a goal.
+One agent can spawn others (each a live session in its own [herdr](https://herdr.dev)
+tab), delegate work, receive reliable updates, and see the whole graph — and any
+subagent can do the same, so the structure nests as deep as the work needs.
+
+No daemon, no MCP, no git assumptions. Just a CLI, a hook, and a world doc the
+agents read. The tools give reliable **spawn / send / receive**; the strategy
+(how to decompose, delegate, judge, integrate) is the model's.
+
+## What's in here
+
+- `bin/swarm` — the CLI (`world, start, spawn, send, updates, wait, list,
+  status, whoami, parent, graph, children, close, reap`).
+- `bin/swarm-hook.cjs` — the completion hook each subagent runs (turns its
+  Stop/Notification events into reliable update records — no screen-scraping).
+- `WORLD.md` — the world every agent reads: the verbs, what the states mean,
+  what's reliable, and how work is judged/approved in the graph. Facts, not a
+  procedure. Print it with `swarm world`.
+- `skill/SKILL.md` — the Claude Code skill that triggers on "start a swarm" and
+  points the agent at `swarm world`.
+- `install.sh` — wires it into your machine.
+
+## Requirements
+
+`herdr` (the container that holds subagent panes), `claude` (Claude Code CLI),
+`node`, `python3`, `bash` — all on PATH.
+
+## Install
+
+```sh
+git clone <this-repo> swarm
+cd swarm
+./install.sh
+```
+
+`install.sh` puts `swarm` on your PATH (`~/.local/bin`), symlinks the skill into
+`~/.claude/skills/swarm/`, and checks prerequisites. Re-run it to update after a
+`git pull`. `./install.sh --uninstall` removes the symlinks.
+
+## Use
+
+Inside a **herdr** pane, in your project directory, start a fresh Claude session
+and ask it to run a swarm:
+
+> "start a swarm to build the CSV importer and its tests, max 3 agents"
+
+The `swarm` skill triggers, the agent reads `swarm world`, and drives it —
+spawning subagents, monitoring them, judging their artifacts, and following
+through. It surfaces only real blockers to you.
+
+Under the hood the agent uses the verbs directly, e.g.:
+
+```sh
+SWARM_ID=$(swarm start); export SWARM_ID
+id=$(swarm spawn "build the importer" --model opus --label importer)
+swarm wait "$id"          # blocks until it reports done/question/blocked
+swarm graph               # see the whole living tree
+swarm close "$id"         # approve & clean up (closes it + its subtree)
+```
+
+## State
+
+Runtime state lives in a `.swarm/` directory in your project (one subdir per
+swarm run). It's a paper trail, safe to delete between runs. **Add `.swarm/` to
+your project's `.gitignore`** so it isn't committed.
+
+## How it stays reliable
+
+- **Completion is a fired hook event**, not a guess from the screen. `DONE`
+  means a turn ended; `QUESTION`/`BLOCKED` mean the agent yielded.
+- **The pane and the artifact are ground truth** — a `DONE` isn't proof of
+  correctness; work is judged by the deliverable, then approved.
+- **Each agent watches only its direct children**; failures route up one hop at
+  a time. Dead agents drop out of the graph; the living reparent upward.

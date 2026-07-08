@@ -1,0 +1,7 @@
+# local backups, never part of the package
+.backups/
+*.bak
+
+# swarm runtime state lives in each project's .swarm/, not here — but ignore any
+# that ends up in the repo dir just in case
+.swarm/

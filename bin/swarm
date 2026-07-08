@@ -1,0 +1,769 @@
+#!/usr/bin/env bash
+# swarm — capability layer for a coordinating agent.
+#
+# Verbs: start, spawn, send, updates, wait, list, reap. No task model, no git,
+# no merge, no daemon. The coordinator (a claude/codex/... run) decides all
+# policy; this just gives it reliable primitives.
+#
+# Container: herdr (holds the subagent panes). Inbound updates come from each
+# subagent's Stop/Notification HOOK — a fired event, not a screen scrape.
+#
+# Scope:
+#   PROJECT = the .swarm dir (per repo; $PWD/.swarm, override with SWARM_DIR).
+#   SWARM   = one coordinator run, identified by a swarm-id. `swarm start` mints
+#             one and prints it; the coordinator exports SWARM_ID and every other
+#             verb operates within that swarm only.
+#   AGENT   = one subagent within a swarm (a1, a2, ...).
+#
+# State layout:
+#   .swarm/swarms/<swarm-id>/{agents,updates,settings}/
+# Everything (list, reap, wait, id allocation) is scoped to the active swarm;
+# swarms never see or touch each other.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK="$HERE/swarm-hook.cjs"
+SWARM_DIR="${SWARM_DIR:-$PWD/.swarm}"   # PROJECT root for swarm state
+SWARMS_DIR="$SWARM_DIR/swarms"          # one subdir per swarm-id
+
+die() { echo "swarm: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# WORLD.md sits next to this bin/ dir in the install. The CLI is the single
+# source of truth for its location — docs/skills reference `swarm world`, never
+# a hard path, so the package is portable across machines.
+WORLD_DOC="$(cd "$HERE/.." && pwd)/WORLD.md"
+
+# swarm world  — print the world doc (what every agent reads to learn the
+# environment). Path-agnostic entry point: `swarm world` works wherever swarm is
+# installed, so nothing else needs to know the doc's absolute path.
+cmd_world() {
+  [ -f "$WORLD_DOC" ] || die "WORLD.md not found next to swarm (expected $WORLD_DOC)"
+  cat "$WORLD_DOC"
+}
+
+# Resolve the ACTIVE swarm's dirs from $SWARM_ID. `start` sets SWARM_ID itself
+# (before this runs) so its dirs get created; every other verb requires it.
+SWARM_ID="${SWARM_ID:-}"
+init_swarm_paths() {
+  [ -n "$SWARM_ID" ] || die "no active swarm — run 'swarm start' and export SWARM_ID (SWARM_ID is unset)"
+  SWARM_ROOT="$SWARMS_DIR/$SWARM_ID"
+  AGENTS_DIR="$SWARM_ROOT/agents"
+  UPDATES_DIR="$SWARM_ROOT/updates"
+  SETTINGS_DIR="$SWARM_ROOT/settings"
+}
+
+# --- agent id allocation within the active swarm: a1, a2, ... ---
+next_id() {
+  local n=1
+  while [ -e "$AGENTS_DIR/a$n.json" ]; do n=$((n+1)); done
+  echo "a$n"
+}
+
+json_get() { # json_get <file> <key>  (flat string values only)
+  python3 - "$1" "$2" <<'PY'
+import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception:
+    print("")
+PY
+}
+
+# ------------------------------------------------------------------ start
+# swarm start [--id <swarm-id>]  — mint a new swarm and print its id. The
+# coordinator captures this and exports SWARM_ID for all subsequent verbs.
+cmd_start() {
+  local given=""
+  while [ $# -gt 0 ]; do case "$1" in --id) given="$2"; shift 2;; *) die "unknown flag: $1";; esac; done
+  # Default id: coordinator's herdr pane + a short counter, so it's readable and
+  # unique per project. No Date.now()/random needed — derive from existing dirs.
+  local sid="$given"
+  if [ -z "$sid" ]; then
+    local base="${HERDR_PANE_ID:-s}"; base="${base//:/-}"
+    local n=1
+    while [ -e "$SWARMS_DIR/${base}-$n" ]; do n=$((n+1)); done
+    sid="${base}-$n"
+  fi
+  [ -e "$SWARMS_DIR/$sid" ] && die "swarm '$sid' already exists"
+  mkdir -p "$SWARMS_DIR/$sid/agents" "$SWARMS_DIR/$sid/updates" "$SWARMS_DIR/$sid/settings"
+  echo "$sid"
+}
+
+# ------------------------------------------------------------------ spawn
+# swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]
+cmd_spawn() {
+  init_swarm_paths
+  local task="${1:-}"; shift || true
+  [ -n "$task" ] || die 'spawn needs a task: swarm spawn "<task>" [--label L] [--model M]'
+  local label="claude" model="" cwd="$PWD"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --label) label="$2"; shift 2;;
+      --model) model="$2"; shift 2;;
+      --cwd) cwd="$2"; shift 2;;
+      *) die "unknown flag: $1";;
+    esac
+  done
+  [ "${HERDR_ENV:-}" = "1" ] || die "not inside herdr (HERDR_ENV != 1); spawn needs herdr as the container"
+  have herdr || die "herdr not on PATH"
+
+  # Graph edges recorded on the node:
+  #   task   — what this agent was delegated. The task IS its goal; there is no
+  #            separate "goal" field, and no "role" field — role is emergent
+  #            from graph position (has children => coordinating).
+  #   parent — the agent that spawned this one. If `spawn` runs inside a
+  #            subagent pane, that pane carries SWARM_AGENT_ID (set when ITS
+  #            parent spawned it) — that's the parent. Empty ⇒ this agent's
+  #            parent is the human operator (the root of the graph).
+  local parent="${SWARM_AGENT_ID:-}"
+
+  local id; id="$(next_id)"
+
+  # Per-subagent settings: wire the Stop + Notification hooks to swarm-hook.
+  # Passed via `claude --settings` so the GLOBAL ~/.claude/settings.json is
+  # never touched. Hooks are additive/merged by claude.
+  local settings="$SETTINGS_DIR/$id.json"
+  python3 - "$settings" "$HOOK" <<'PY'
+import json,sys
+settings_path, hook = sys.argv[1], sys.argv[2]
+def h(ev): return {"matcher":"","hooks":[{"type":"command","command":f"node '{hook}' {ev}"}]}
+json.dump({"hooks":{"Stop":[h("stop")],"Notification":[h("notification")]}}, open(settings_path,"w"))
+PY
+
+  # Build the claude launch command. Positional prompt = the task (interactive
+  # session, so the pane stays live and Stop fires per turn).
+  # Never put the task on a command line. Multibyte/quote-heavy prompts break
+  # when re-parsed through herdr's pane shell (and `printf %q` emits $'...'
+  # ANSI-C literals that can crash the launch). Instead: write the task to a
+  # file, and write a tiny ALL-ASCII launcher script. `herdr pane run` only
+  # ever sees the launcher's path — zero escaping, zero multibyte on argv.
+  local taskfile="$SETTINGS_DIR/$id.task"
+  local launcher="$SETTINGS_DIR/$id.launch.sh"
+  local statusfile="$SETTINGS_DIR/$id.status"   # launcher writes its start outcome here
+
+  # Prepend a short SITUATIONAL-CONTEXT header to the task. Without it a subagent
+  # only knows its task — not that it lives in a swarm graph, nor that it can
+  # spawn its own children. The header is environmental fact (who you are, what
+  # world you're in, where to read the rules), not instruction; whether/how to
+  # use any of it stays the subagent's judgment. Its own task follows, clearly
+  # delimited. `env_doc` points at the same world description the top coordinator
+  # read. The world is referenced via `swarm world` (a command), not a path, so
+  # it stays correct on any machine the package is installed on.
+  local parent_desc; [ -n "$parent" ] && parent_desc="agent \`$parent\`" || parent_desc="the human operator"
+  {
+    printf 'You are a subagent in a swarm — a graph of Claude agents working toward a goal.\n'
+    printf 'Your agent id: %s. Your parent (who delegated to you and approves your work): %s.\n' "$id" "$parent_desc"
+    printf 'You have the `swarm` CLI: you can see the whole graph (`swarm graph`) and, if this\n'
+    printf 'task is large enough to be worth dividing, spawn your own children to help (`swarm\n'
+    printf 'spawn`). How you reach the goal is yours. The world you operate in — what is\n'
+    printf 'reliable, how work is judged and approved, whom you talk to — run `swarm world` to\n'
+    printf 'read it (do this if you intend to coordinate others). Produce your result as a\n'
+    printf 'concrete, inspectable artifact (code, a PR, a file, a document) so your parent can\n'
+    printf 'judge it without reading your session.\n\n'
+    printf -- '--- YOUR TASK ---\n'
+    printf '%s' "$task"
+  } > "$taskfile"
+  rm -f "$statusfile"
+
+  # The launcher ("start shell") pre-flights the harness and records the
+  # outcome to $statusfile BEFORE exec, so spawn can tell whether claude
+  # actually started. If claude is missing or the settings file is bad, it
+  # writes "failed: <reason>" and leaves the pane holding the error instead of
+  # silently dying — the coordinator sees the disruption at spawn time.
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -uo pipefail'
+    printf 'STATUS=%q\n' "$statusfile"
+    # 1. harness on PATH?
+    echo 'if ! command -v claude >/dev/null 2>&1; then'
+    echo '  echo "failed: claude not found on PATH" > "$STATUS"'
+    echo '  echo "[swarm] ERROR: claude not found on PATH in this pane" >&2'
+    echo '  exec bash'   # keep pane alive so the human/coordinator can read the error
+    echo 'fi'
+    # 2. settings file readable?
+    printf 'if [ ! -r %q ]; then\n' "$settings"
+    printf '  echo "failed: settings unreadable: %q" > "$STATUS"\n' "$settings"
+    printf '  echo "[swarm] ERROR: settings file unreadable: %q" >&2\n' "$settings"
+    echo '  exec bash'
+    echo 'fi'
+    # read the whole task file verbatim into $PROMPT (preserves unicode, quotes, newlines)
+    printf 'PROMPT="$(cat %q)"\n' "$taskfile"
+    # 3. mark launching, then RUN claude (do NOT exec — exec would replace this
+    #    process and discard our ability to detect an immediate exit). We keep
+    #    the launcher alive as claude's parent so that if claude dies right away
+    #    (bad flag, crash) we overwrite the status with the real exit code. On a
+    #    normal interactive session claude runs until the human/coordinator ends
+    #    it, and this launcher simply waits on it (the pane stays live).
+    echo 'echo "launching" > "$STATUS"'
+    if [ -n "$model" ]; then
+      printf 'claude --settings %q --model %q "$PROMPT"\n' "$settings" "$model"
+    else
+      printf 'claude --settings %q "$PROMPT"\n' "$settings"
+    fi
+    echo 'rc=$?'
+    # If claude exits almost immediately, it (very likely) failed to start; flag
+    # it. A long-lived session that later exits cleanly also lands here, but by
+    # then the agent has done its work and the hook already reported — the
+    # status is only consulted during the spawn readiness window.
+    echo 'if [ "$rc" -ne 0 ]; then echo "failed: claude exited code $rc" > "$STATUS"; fi'
+    # keep the pane on a shell so its output stays inspectable after claude ends
+    echo 'exec bash'
+  } > "$launcher"
+  chmod +x "$launcher"
+
+  # Open a new herdr TAB for this subagent (full-width pane; coordinator's
+  # own view is untouched) and capture its root pane id. The env is set on
+  # the tab's pane so the subagent's hook knows its swarm id.
+  local pane tab
+  local tabjson
+  tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id:$label" \
+           --env "SWARM_DIR=$SWARM_ROOT" --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
+  pane=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null || true)
+  tab=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["tab"]["tab_id"])' 2>/dev/null || true)
+  [ -n "$pane" ] || die "herdr tab create failed"
+  # Run the launcher by path — plain ASCII, no prompt on the command line.
+  herdr pane run "$pane" "$launcher"
+
+  # Register the subagent NOW, before the readiness wait. The reliable record
+  # of "this agent exists" is the registry + the hook — NOT a screen-detection
+  # poll. Registering first means a slow-to-detect-but-actually-running agent
+  # is never lost from the roster.
+  python3 - "$AGENTS_DIR/$id.json" "$id" "$label" "$pane" "$model" "$cwd" "$task" "$parent" <<'PY'
+import json,sys
+_,f,id,label,pane,model,cwd,task,parent = sys.argv
+json.dump({"id":id,"label":label,"pane":pane,"model":model,"cwd":cwd,
+           "task":task,"parent":parent},open(f,"w"))
+PY
+
+  # Confirm the harness STARTED, using the LAUNCHER'S OWN signal — the status
+  # file it writes ("launching" once claude is exec'd, "failed: ..." if
+  # pre-flight fails). This is a real fired event, not herdr's flaky
+  # screen-detection of agent==claude (which lags on cold/slow starts and gave
+  # false "did not start" negatives that killed live agents).
+  #
+  # Outcomes:
+  #   failed   -> launcher detected a real problem (claude missing / bad
+  #               settings / immediate exit). Tear the dead tab down, error.
+  #   started  -> status is "launching": claude was exec'd successfully. Done.
+  #   unknown  -> timed out with NO status at all. Ambiguous, NOT proof of
+  #               death. Keep the agent (already registered), warn, return ok.
+  local ready_timeout="${SWARM_READY_TIMEOUT:-30}"
+  local t0; t0=$(date +%s) ; local outcome="unknown"
+  while :; do
+    if [ -f "$statusfile" ]; then
+      if grep -q '^failed' "$statusfile" 2>/dev/null; then outcome="failed"; break; fi
+      if grep -q '^launching' "$statusfile" 2>/dev/null; then outcome="started"; break; fi
+    fi
+    if [ $(( $(date +%s) - t0 )) -ge "$ready_timeout" ]; then outcome="unknown"; break; fi
+    sleep 1
+  done
+
+  if [ "$outcome" = "failed" ]; then
+    local reason; reason=$(cat "$statusfile" 2>/dev/null || echo "no status recorded")
+    # Only tear down on a CONFIRMED failure — never on ambiguity.
+    if [ -n "$tab" ]; then herdr tab close "$tab" >/dev/null 2>&1 || true
+    else herdr pane close "$pane" >/dev/null 2>&1 || true; fi
+    rm -f "$AGENTS_DIR/$id.json"
+    die "subagent $id ($label) did not start: $reason  [pane $pane]"
+  fi
+
+  if [ "$outcome" = "unknown" ]; then
+    # Started shell never recorded status within the window. The agent is
+    # very likely running fine (slow launcher/FS); do NOT kill it. Warn so the
+    # coordinator knows to verify via the update inbox, and keep the agent.
+    echo "swarm: warning: $id ($label) launch unconfirmed after ${ready_timeout}s (no status file yet); keeping it — verify via 'swarm updates --id $id'  [pane $pane]" >&2
+  fi
+
+  echo "$id"  # coordinator uses this id for send/wait
+}
+
+# ------------------------------------------------------------------ send
+# swarm send <id> "<message>"
+cmd_send() {
+  init_swarm_paths
+  local id="${1:-}" msg="${2:-}"
+  [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"'
+  local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
+  local pane; pane="$(json_get "$reg" pane)"
+  [ -n "$pane" ] || die "no pane for $id"
+  herdr pane send-text "$pane" "$msg"
+  herdr pane send-keys "$pane" Enter
+}
+
+# ------------------------------------------------------------------ updates
+# swarm updates [--id X] [--json]   — read inbound hook records.
+cmd_updates() {
+  init_swarm_paths
+  local only_id="" as_json=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --id) only_id="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac
+  done
+  python3 - "$UPDATES_DIR" "$only_id" "${as_json:-}" <<'PY'
+import json,os,sys
+d,only,as_json = sys.argv[1],sys.argv[2],sys.argv[3]
+recs=[]
+for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(d,fn)))
+    except: continue
+    if only and r.get("id")!=only: continue
+    recs.append(r)
+if as_json:
+    print(json.dumps(recs,indent=2)); sys.exit(0)
+if not recs:
+    print("(no updates)"); sys.exit(0)
+for r in recs:
+    import datetime
+    t=datetime.datetime.fromtimestamp(r.get("ts",0)/1000).strftime("%H:%M:%S")
+    print(f"[{t}] {r.get('id')} {r.get('label','')} {r.get('state','').upper()}: {r.get('summary','') or '(no summary)'}")
+PY
+}
+
+# ------------------------------------------------------------------ wait
+# swarm wait <id> [--timeout SEC]  — block until the agent's NEWEST report is a
+# stop state (done | question | blocked), then print it. Driven by the fired
+# hook, with a timeout backstop (never hangs). "question" and "blocked" both
+# mean the agent yielded and needs the coordinator — only "done" means finished
+# (and the coordinator still verifies by reading the pane).
+#
+# Only considers records newer than wait's start (a "since" mark), so a stale
+# `done` from a previous turn doesn't satisfy a fresh wait.
+cmd_wait() {
+  init_swarm_paths
+  local id="${1:-}"; shift || true
+  [ -n "$id" ] || die "wait needs: swarm wait <id> [--timeout SEC]"
+  local timeout=600
+  while [ $# -gt 0 ]; do case "$1" in --timeout) timeout="$2"; shift 2;; *) die "unknown flag: $1";; esac; done
+  local start; start=$(date +%s)
+  local since_ms=$(( start * 1000 ))
+  while :; do
+    local hit
+    hit=$(python3 - "$UPDATES_DIR" "$id" "$since_ms" <<'PY'
+import json,os,sys
+d,only,since=sys.argv[1],sys.argv[2],int(sys.argv[3])
+# newest record for this agent at/after `since`
+best=None
+for fn in (sorted(os.listdir(d)) if os.path.isdir(d) else []):
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(d,fn)))
+    except: continue
+    if r.get("id")!=only: continue
+    if int(r.get("ts",0)) < since: continue
+    if best is None or int(r.get("ts",0)) >= int(best.get("ts",0)): best=r
+if best and best.get("state") in ("done","question","blocked"):
+    print(json.dumps(best))
+else:
+    print("")
+PY
+)
+    if [ -n "$hit" ]; then echo "$hit"; return 0; fi
+    if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+      echo "swarm: wait timed out for $id after ${timeout}s" >&2; return 1
+    fi
+    sleep 2
+  done
+}
+
+# live_panes — the set of pane ids herdr currently reports (ground truth for
+# whether a registered subagent still exists). Empty if herdr isn't reachable.
+live_panes() {
+  herdr pane list 2>/dev/null \
+    | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except: sys.exit(0)
+for p in d.get("result",{}).get("panes",[]): print(p.get("pane_id",""))' 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------ list
+# Reconciles the registry against live herdr panes: a subagent whose pane no
+# longer exists is DEAD (stale). Truth = herdr, not the on-disk registry.
+# --json emits records with a "live" field; --live-only hides dead ones.
+cmd_list() {
+  init_swarm_paths
+  local as_json="" live_only=""
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
+  local panes; panes="$(live_panes)"
+  AGENTS_DIR="$AGENTS_DIR" PANES="$panes" AS_JSON="${as_json:-}" LIVE_ONLY="${live_only:-}" python3 <<'PY'
+import json,os,sys
+d=os.environ["AGENTS_DIR"]
+live=set(l for l in os.environ.get("PANES","").splitlines() if l)
+have_herdr = bool(live)  # if we got any panes, herdr answered; else can't judge
+as_json=os.environ.get("AS_JSON"); live_only=os.environ.get("LIVE_ONLY")
+rows=[]
+for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(d,fn)))
+    except: continue
+    pane=r.get("pane","")
+    # unknown if herdr didn't answer; else alive iff pane is in the live set
+    r["live"] = (pane in live) if have_herdr else None
+    rows.append(r)
+if live_only: rows=[r for r in rows if r["live"]]
+if as_json:
+    print(json.dumps(rows,indent=2)); sys.exit(0)
+if not rows:
+    print("(no agents)"); sys.exit(0)
+for r in rows:
+    state = "live" if r["live"] else ("DEAD" if r["live"] is False else "?")
+    print(f"{r.get('id')}\t{r.get('label','')}\t{r.get('model','') or '-'}\t{state}\tpane={r.get('pane','')}")
+PY
+}
+
+# ------------------------------------------------------------------ reap
+# Prune registry entries whose herdr pane is gone (stale from prior runs or
+# agents that died after starting). Safe: only removes entries herdr confirms
+# are dead; never touches live ones or anything if herdr is unreachable.
+cmd_reap() {
+  init_swarm_paths
+  local panes; panes="$(live_panes)"
+  [ -n "$panes" ] || die "herdr unreachable — refusing to reap (cannot confirm which panes are dead)"
+  local removed=0
+  for f in "$AGENTS_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    local pane; pane="$(json_get "$f" pane)"
+    if ! printf '%s\n' "$panes" | grep -qx "$pane"; then
+      echo "reaped $(basename "$f" .json) (pane $pane gone)"
+      rm -f "$f"; removed=$((removed+1))
+    fi
+  done
+  [ "$removed" -eq 0 ] && echo "(nothing to reap — all registered agents are live)"
+}
+
+# ------------------------------------------------------------------ status
+# swarm status [--json]  — reconciled snapshot of the ACTIVE swarm: does it
+# exist, how many agents, each agent's live/DEAD + latest reported state
+# (done/blocked/none). This is what a restarting coordinator reads to decide
+# how to continue. Exit code: 0 = swarm exists, 3 = SWARM_ID set but no such
+# swarm on disk, (init_swarm_paths dies if SWARM_ID unset).
+cmd_status() {
+  init_swarm_paths
+  local as_json=""
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  if [ ! -d "$SWARM_ROOT" ]; then
+    if [ -n "$as_json" ]; then echo "{\"swarm_id\":\"$SWARM_ID\",\"exists\":false,\"agents\":[]}"
+    else echo "swarm '$SWARM_ID' — no state on disk (SWARM_ID is set but this swarm was never started here)"; fi
+    return 3
+  fi
+  local panes; panes="$(live_panes)"
+  SWARM_ID="$SWARM_ID" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
+import json,os,sys
+sid=os.environ["SWARM_ID"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
+live=set(l for l in os.environ.get("PANES","").splitlines() if l)
+have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+
+# latest reported state per agent from the update inbox (files sort by ts in name)
+last={}
+for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(ud,fn)))
+    except: continue
+    aid=r.get("id")
+    if aid: last[aid]={"state":r.get("state",""),"summary":r.get("summary",""),"ts":r.get("ts",0)}
+
+agents=[]
+for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
+    if not fn.endswith(".json"): continue
+    try: a=json.load(open(os.path.join(ad,fn)))
+    except: continue
+    pane=a.get("pane","")
+    a["live"]=(pane in live) if have_herdr else None
+    rep=last.get(a.get("id"))
+    a["reported"]=rep["state"] if rep else "none"
+    a["last_summary"]=rep["summary"] if rep else ""
+    agents.append(a)
+
+if as_json:
+    print(json.dumps({"swarm_id":sid,"exists":True,"herdr_reachable":have_herdr,"agents":agents},indent=2)); sys.exit(0)
+
+n=len(agents); live_n=sum(1 for a in agents if a["live"]); dead_n=sum(1 for a in agents if a["live"] is False)
+print(f"swarm '{sid}' — {n} agent(s): {live_n} live, {dead_n} DEAD" + ("" if have_herdr else "  (herdr unreachable — live/DEAD unknown)"))
+for a in agents:
+    lv = "live" if a["live"] else ("DEAD" if a["live"] is False else "?")
+    print(f"  {a.get('id')}  {a.get('label','')}  [{lv}]  reported={a['reported'].upper() or 'NONE'}  {('· '+a['last_summary'][:60]) if a['last_summary'] else ''}")
+PY
+}
+
+# ------------------------------------------------------------------ close
+# swarm close [<agent-id>] [--self]  — close herdr tab(s) for the active swarm.
+#   swarm close <id>          closes <id> AND its whole subtree (all descendants).
+#                             This is "approve & clean up": when you approve a
+#                             delegated agent's work, its children were part of
+#                             producing it, so the whole subtree is done together.
+#   swarm close <id> --self   close ONLY <id>, leave its children running (rare).
+#   swarm close               closes ALL agents in the swarm.
+# Never deletes state — the .swarm/swarms/<id>/ dir stays as a paper trail.
+cmd_close() {
+  init_swarm_paths
+  local one="" self=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --self) self=1; shift;; -*) die "unknown flag: $1";; *) one="$1"; shift;; esac
+  done
+
+  # Compute the target set of agent ids.
+  local targets
+  if [ -z "$one" ]; then
+    targets=$(for f in "$AGENTS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done)
+  elif [ -n "$self" ]; then
+    targets="$one"
+  else
+    # <id> + all descendants (walk the parent edges).
+    targets=$(AGENTS_DIR="$AGENTS_DIR" ROOT="$one" python3 <<'PY'
+import json,os
+ad=os.environ["AGENTS_DIR"]; root=os.environ["ROOT"]
+parent={}
+for fn in os.listdir(ad) if os.path.isdir(ad) else []:
+    if not fn.endswith(".json"): continue
+    try: a=json.load(open(os.path.join(ad,fn)))
+    except: continue
+    if a.get("id"): parent[a["id"]]=a.get("parent","")
+kids={}
+for c,p in parent.items(): kids.setdefault(p,[]).append(c)
+out=[]; stack=[root]
+seen=set()
+while stack:
+    x=stack.pop()
+    if x in seen: continue
+    seen.add(x)
+    if x in parent: out.append(x)     # only real, registered agents
+    stack.extend(kids.get(x,[]))
+print("\n".join(out))
+PY
+)
+    [ -n "$targets" ] || die "unknown agent: $one"
+  fi
+
+  local closed=0 tid
+  for aid in $targets; do
+    local f="$AGENTS_DIR/$aid.json"; [ -e "$f" ] || continue
+    local pane; pane="$(json_get "$f" pane)"
+    [ -n "$pane" ] || continue
+    tid=$(herdr pane get "$pane" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("pane",{}).get("tab_id","") or "")' 2>/dev/null || true)
+    if [ -n "$tid" ]; then herdr tab close "$tid" >/dev/null 2>&1 && { echo "closed $aid (tab $tid)"; closed=$((closed+1)); }
+    else herdr pane close "$pane" >/dev/null 2>&1 && { echo "closed $aid (pane $pane)"; closed=$((closed+1)); }
+    fi
+  done
+  [ "$closed" -eq 0 ] && echo "(nothing to close)"
+  echo "state kept at $SWARM_ROOT"
+}
+
+# ------------------------------------------------------------------ graph
+# swarm graph [--json]  — render the LIVING society: the parent->children tree
+# of currently-alive agents in the active swarm, each showing its task, last
+# reported state, and last words. Dead agents are NOT shown (a dead agent's
+# worth already flowed up to its parent as status; its corpse isn't part of the
+# living society). If a live agent's parent is dead, it REPARENTS to the nearest
+# living ancestor (else the operator) — so hiding the dead never orphans the
+# living. Root children hang under "operator" (the human). Role is emergent, not
+# shown as a field: a node with children is coordinating, a leaf is working.
+cmd_graph() {
+  init_swarm_paths
+  local as_json=""
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  local panes; panes="$(live_panes)"
+  SWARM_ID="$SWARM_ID" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
+import json,os,sys
+sid=os.environ["SWARM_ID"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
+live=set(l for l in os.environ.get("PANES","").splitlines() if l)
+have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+
+last={}
+for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(ud,fn)))
+    except: continue
+    if r.get("id"): last[r["id"]]={"state":r.get("state",""),"summary":r.get("summary","")}
+
+allnodes={}
+for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
+    if not fn.endswith(".json"): continue
+    try: a=json.load(open(os.path.join(ad,fn)))
+    except: continue
+    aid=a.get("id")
+    if not aid: continue
+    a["live"]=(a.get("pane","") in live) if have_herdr else None
+    rep=last.get(aid)
+    a["reported"]=rep["state"] if rep else "none"
+    a["last_summary"]=rep["summary"] if rep else ""
+    allnodes[aid]=a
+
+def is_live(a): return a["live"] is not False  # True or None(unknown) count as shown
+
+# LIVING society only. A live node whose parent is dead/missing reparents to its
+# nearest LIVING ancestor; if none, it becomes a root under the operator.
+def nearest_living_parent(aid):
+    p=allnodes[aid].get("parent","")
+    seen=set()
+    while p and p in allnodes and p not in seen:
+        seen.add(p)
+        if is_live(allnodes[p]): return p
+        p=allnodes[p].get("parent","")   # skip dead ancestor, keep climbing
+    return ""  # no living ancestor -> operator
+
+nodes={aid:a for aid,a in allnodes.items() if is_live(a)}
+kids={}; roots=[]
+for aid in nodes:
+    p=nearest_living_parent(aid)
+    if p in nodes: kids.setdefault(p,[]).append(aid)
+    else: roots.append(aid)
+for k in kids: kids[k].sort()
+roots.sort()
+
+if as_json:
+    def build(aid):
+        a=nodes[aid]
+        return {"id":aid,"label":a.get("label",""),"task":a.get("task",""),
+                "reported":a["reported"],"last_summary":a["last_summary"],
+                "children":[build(c) for c in kids.get(aid,[])]}
+    print(json.dumps({"swarm_id":sid,"operator_children":[build(r) for r in roots]},indent=2)); sys.exit(0)
+
+if not nodes:
+    print(f"swarm '{sid}' — no living agents"); sys.exit(0)
+print(f"swarm '{sid}' — living graph of work (operator is the root)")
+print("operator (human)")
+def render(aid, prefix, is_last):
+    a=nodes[aid]
+    branch = "└─ " if is_last else "├─ "
+    coord = " ·coordinating" if kids.get(aid) else ""
+    print(f"{prefix}{branch}{aid} [{a.get('label','')}] ({a['reported'].upper()}){coord}")
+    cont = "   " if is_last else "│  "
+    task=a.get("task","")
+    if task: print(f"{prefix}{cont}   task: {task[:80]}")
+    if a["last_summary"]: print(f"{prefix}{cont}   last: {a['last_summary'][:80]}")
+    ch=kids.get(aid,[])
+    for i,c in enumerate(ch):
+        render(c, prefix+cont, i==len(ch)-1)
+for i,r in enumerate(roots):
+    render(r, "", i==len(roots)-1)
+PY
+}
+
+# ------------------------------------------------------------------ whoami
+# swarm whoami  — who am I in the graph? Prints my own agent id. Identity comes
+# from SWARM_AGENT_ID, which herdr bakes into this pane's environment at spawn
+# time (inherited by every shell in the pane — it cannot be lost). Empty means
+# I was NOT spawned by `swarm`, i.e. I am the operator's own coordinator: the
+# root of the graph. `--id` prints the bare id (empty for root) for scripting.
+cmd_whoami() {
+  local raw=""
+  [ "${1:-}" = "--id" ] && { echo "${SWARM_AGENT_ID:-}"; return 0; }
+  if [ -n "${SWARM_AGENT_ID:-}" ]; then echo "$SWARM_AGENT_ID"
+  else echo "operator (root — you were started directly, not spawned by swarm)"; fi
+}
+
+# ------------------------------------------------------------------ parent
+# swarm parent  — who delegated to me / approves my work? Prints my parent's id,
+# or "operator" if I am a root. Resolves my own registry entry and reads its
+# parent field.
+cmd_parent() {
+  init_swarm_paths
+  local me="${SWARM_AGENT_ID:-}"
+  if [ -z "$me" ]; then echo "operator (you are a root — the human is your parent)"; return 0; fi
+  local f="$AGENTS_DIR/$me.json"
+  if [ ! -e "$f" ]; then echo "operator (no registry entry for '$me' in this swarm)"; return 0; fi
+  local p; p="$(json_get "$f" parent)"
+  if [ -n "$p" ]; then echo "$p"; else echo "operator (your parent is the human)"; fi
+}
+
+# ------------------------------------------------------------------ children
+# swarm children [--json]  — the agents THIS agent directly spawned (parent ==
+# my SWARM_AGENT_ID), each with live/dead, last reported state, and last words.
+# Deliberately ONE layer only: you are responsible for your direct children;
+# their children are THEIR job to watch. If a grandchild stalls, that surfaces
+# to you as your child reporting it — you never reach past your own layer.
+# Use this to monitor the work you delegated and re-plan around any that died.
+cmd_children() {
+  init_swarm_paths
+  local as_json=""
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  local me="${SWARM_AGENT_ID:-}"   # empty => I am the operator's coordinator (root)
+  local panes; panes="$(live_panes)"
+  ME="$me" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
+import json,os,sys
+me=os.environ.get("ME",""); ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
+live=set(l for l in os.environ.get("PANES","").splitlines() if l)
+have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+
+last={}
+for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
+    if not fn.endswith(".json"): continue
+    try: r=json.load(open(os.path.join(ud,fn)))
+    except: continue
+    if r.get("id"): last[r["id"]]={"state":r.get("state",""),"summary":r.get("summary","")}
+
+mine=[]
+for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
+    if not fn.endswith(".json"): continue
+    try: a=json.load(open(os.path.join(ad,fn)))
+    except: continue
+    if a.get("parent","")!=me: continue     # DIRECT children only
+    a["live"]=(a.get("pane","") in live) if have_herdr else None
+    rep=last.get(a.get("id"))
+    a["reported"]=rep["state"] if rep else "none"
+    a["last_summary"]=rep["summary"] if rep else ""
+    mine.append(a)
+
+if as_json:
+    out=[{"id":a["id"],"label":a.get("label",""),"task":a.get("task",""),
+          "live":a["live"],"reported":a["reported"],"last_summary":a["last_summary"],
+          "pane":a.get("pane","")} for a in mine]
+    print(json.dumps({"parent":me or "operator","children":out},indent=2)); sys.exit(0)
+
+who = me or "you (operator's coordinator)"
+if not mine:
+    print(f"{who} — no direct children"); sys.exit(0)
+print(f"{who} — direct children:")
+for a in mine:
+    lv = "live" if a["live"] else ("DEAD" if a["live"] is False else "?")
+    print(f"  {a['id']} [{a.get('label','')}]  ({lv}/{a['reported'].upper()})  {a.get('pane','')}")
+    task=a.get("task","")
+    if task: print(f"       task: {task[:80]}")
+    if a["last_summary"]: print(f"       last: {a['last_summary'][:80]}")
+PY
+}
+
+case "${1:-}" in
+  world)   shift; cmd_world "$@";;
+  start)   shift; cmd_start "$@";;
+  spawn)   shift; cmd_spawn "$@";;
+  send)    shift; cmd_send "$@";;
+  updates) shift; cmd_updates "$@";;
+  wait)    shift; cmd_wait "$@";;
+  list)    shift; cmd_list "$@";;
+  status)   shift; cmd_status "$@";;
+  whoami)   shift; cmd_whoami "$@";;
+  parent)   shift; cmd_parent "$@";;
+  graph)    shift; cmd_graph "$@";;
+  children) shift; cmd_children "$@";;
+  close)    shift; cmd_close "$@";;
+  reap)    shift; cmd_reap "$@";;
+  *) cat >&2 <<EOF
+swarm — spawn/send/receive for a coordinating agent (herdr container).
+
+A SWARM is one run, scoped by swarm-id. Start one, export SWARM_ID, then all
+other verbs act within that swarm only.
+
+  swarm world                            print the world doc (what agents read)
+  swarm start [--id <swarm-id>]          mint a swarm; prints its id
+                                         -> export SWARM_ID=<that id>
+  swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]   (new herdr tab)
+  swarm send  <agent-id> "<message>"
+  swarm updates [--id <agent-id>] [--json]
+  swarm wait  <agent-id> [--timeout SEC]
+  swarm list  [--json] [--live-only]     agents in the active swarm (marks DEAD)
+  swarm status [--json]                  reconciled snapshot (restart: read this)
+  swarm whoami                           my own agent id (operator if root)
+  swarm parent                           who delegated to / approves me
+  swarm graph [--json]                   the LIVING tree of work (dead hidden)
+  swarm children [--json]                YOUR direct children (one layer down)
+  swarm close [<id>] [--self]            close <id>+subtree (--self: just <id>); keeps state
+  swarm reap                             prune dead agents in the active swarm
+
+Typical start:
+  SWARM_ID=\$(swarm start); export SWARM_ID
+On restart with SWARM_ID already set:
+  swarm status     # see what's there, then decide: resume / new / clear
+EOF
+     exit 1;;
+esac
