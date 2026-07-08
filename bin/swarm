@@ -52,6 +52,44 @@ cmd_world() {
   cat "$WORLD_DOC"
 }
 
+# REPO_ROOT — the git checkout this install lives in (HERE is the resolved bin/).
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+
+# swarm update [--check]  — update to the latest TAGGED release.
+#   Fetches tags, finds the newest semver tag, checks it out, and re-runs
+#   install.sh. Explicit and safe: it never pulls arbitrary main, only releases
+#   you deliberately tagged. --check just reports whether an update exists.
+cmd_update() {
+  local check_only=""; [ "${1:-}" = "--check" ] && check_only=1
+  have git || die "git not found — needed to update"
+  [ -d "$REPO_ROOT/.git" ] || die "not a git checkout ($REPO_ROOT) — update only works when installed via git clone"
+
+  git -C "$REPO_ROOT" fetch --tags --quiet origin 2>/dev/null || die "could not fetch from origin (network?)"
+  # newest tag by version sort (handles v1.2.10 > v1.2.9)
+  local latest; latest="$(git -C "$REPO_ROOT" tag -l 'v*' --sort=-v:refname | head -1)"
+  [ -n "$latest" ] || die "no release tags found on origin yet (nothing to update to)"
+
+  local current; current="$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || echo '(untagged/dev)')"
+  if [ "$current" = "$latest" ]; then
+    echo "swarm is up to date ($latest)"; return 0
+  fi
+  if [ -n "$check_only" ]; then
+    echo "update available: $current -> $latest  (run 'swarm update')"; return 0
+  fi
+
+  # Refuse to clobber local edits (dev working copy).
+  if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
+    die "you have uncommitted local changes in $REPO_ROOT — commit/stash them before updating"
+  fi
+  echo "updating $current -> $latest ..."
+  git -C "$REPO_ROOT" checkout --quiet "$latest" || die "checkout $latest failed"
+  # Re-run the installer to refresh symlinks/permissions (idempotent).
+  if [ -x "$REPO_ROOT/install.sh" ]; then
+    ( cd "$REPO_ROOT" && ./install.sh ) || die "install.sh failed after update"
+  fi
+  echo "now on $latest"
+}
+
 # Resolve the ACTIVE swarm's dirs from $SWARM_ID. `start` sets SWARM_ID itself
 # (before this runs) so its dirs get created; every other verb requires it.
 SWARM_ID="${SWARM_ID:-}"
@@ -734,6 +772,7 @@ PY
 
 case "${1:-}" in
   world)   shift; cmd_world "$@";;
+  update)  shift; cmd_update "$@";;
   start)   shift; cmd_start "$@";;
   spawn)   shift; cmd_spawn "$@";;
   send)    shift; cmd_send "$@";;
@@ -754,6 +793,7 @@ A SWARM is one run, scoped by swarm-id. Start one, export SWARM_ID, then all
 other verbs act within that swarm only.
 
   swarm world                            print the world doc (what agents read)
+  swarm update [--check]                 update to the latest tagged release
   swarm start [--id <swarm-id>]          mint a swarm; prints its id
                                          -> export SWARM_ID=<that id>
   swarm spawn "<task>" [--label L] [--model M] [--cwd DIR]   (new herdr tab)
