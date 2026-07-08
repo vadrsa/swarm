@@ -389,12 +389,16 @@ PY
 #
 # Durable inbox delivery. Instead of typing the message into the target's live
 # TUI pane (fragile, no delivery guarantee), we write ONE JSON message file to
-# the target's durable inbox and then fire a best-effort "doorbell" — a bare
-# Enter into the pane — to trigger a turn boundary now so the agent's
-# UserPromptSubmit inbox-check hook picks the message up in near-realtime. The
-# inbox FILE is the source of truth: if the pane is missing/unavailable the
-# message is already durably written and will be picked up on the agent's next
-# turn, so a missing doorbell only delays pickup — it never loses a message.
+# the target's durable inbox and then fire a best-effort "doorbell" — a short
+# non-empty prompt ("check inbox") submitted to the pane — to trigger a turn
+# boundary now so the agent's UserPromptSubmit inbox-check hook picks the message
+# up in near-realtime. (A BARE Enter is a no-op in Claude Code: an empty prompt
+# does NOT fire UserPromptSubmit, so the doorbell must submit non-empty text. The
+# doorbell text itself is irrelevant — the hook injects the real message content
+# regardless.) The inbox FILE is the source of truth: if the pane is
+# missing/unavailable the message is already durably written and will be picked
+# up on the agent's next turn, so a missing doorbell only delays pickup — it
+# never loses a message.
 cmd_send() {
   init_swarm_paths
   local id="${1:-}" msg="${2:-}"
@@ -426,15 +430,48 @@ json.dump(rec,open(os.environ["OUT"],"w"))
 PY
   mv -f "$tmp" "$file" || { rm -f "$tmp"; die "failed to write inbox message for $id"; }
 
-  # Doorbell (best-effort): a bare Enter submits an empty prompt, which fires the
-  # UserPromptSubmit inbox-check hook and surfaces the message now. The pane is
-  # ONLY a doorbell here — the message text is never sent to the pane. If the
-  # pane is missing/unavailable we do NOT fail: the file is already durable.
-  if [ -n "$pane" ] && herdr pane send-keys "$pane" Enter >/dev/null 2>&1; then
+  # Doorbell (best-effort): submit a short NON-EMPTY prompt ("check inbox") to the
+  # pane. A bare Enter is a no-op — Claude Code does not fire UserPromptSubmit for
+  # an empty prompt — so we must submit real text for the inbox-check hook to run
+  # and surface the message now. The doorbell text is never the message itself
+  # (the hook injects the durable inbox content regardless). If the pane is
+  # missing/unavailable we do NOT fail: the file is already durable.
+  if [ -n "$pane" ] && ring_doorbell "$pane"; then
     :
   else
     echo "swarm: note: doorbell to $id skipped (pane unavailable); message is durably queued and will be picked up on $id's next turn" >&2
   fi
+}
+
+# Ring the doorbell: submit a short non-empty prompt to the pane so the target's
+# UserPromptSubmit inbox-check hook fires. herdr's send-text delivers via
+# bracketed paste (arrives asynchronously), so we wait until the pasted text has
+# settled in the prompt box before pressing Enter, then confirm the box drained —
+# retrying Enter a bounded number of times. Returns 0 on a submitted doorbell,
+# non-zero if the pane looks unavailable (so the caller can note it and move on).
+ring_doorbell() {
+  local pane="$1" prev="" cur="" i settled=0
+  herdr pane send-text "$pane" 'check inbox' >/dev/null 2>&1 || return 1
+  # Phase 1 — wait for the pasted text to settle (bounded ~4s).
+  for i in $(seq 1 20); do
+    cur="$(herdr pane read "$pane" --source visible --lines 40 2>/dev/null \
+           | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//')"
+    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then settled=1; break; fi
+    prev="$cur"; sleep 0.2
+  done
+  # Phase 2 — submit and confirm the box drained; retry Enter if not (bounded).
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    herdr pane send-keys "$pane" Enter >/dev/null 2>&1 || return 1
+    sleep 0.4
+    cur="$(herdr pane read "$pane" --source visible --lines 40 2>/dev/null \
+           | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//')"
+    [ -z "$cur" ] && return 0
+    sleep 0.3
+  done
+  # Never confirmed an empty box, but we did send text + Enter; treat as rung
+  # (best-effort). The durable inbox guarantees delivery regardless.
+  return 0
 }
 
 # ------------------------------------------------------------------ updates
