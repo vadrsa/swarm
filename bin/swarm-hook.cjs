@@ -49,6 +49,56 @@ const label = process.env.SWARM_AGENT_LABEL || 'claude';
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
 
+// Resolve this swarm's own dir (same rule as updatesDir below): SWARM_DIR is the
+// PROJECT root; the swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID (legacy: if
+// SWARM_ID absent, SWARM_DIR already IS the swarm dir).
+const swarmOwnDir = swarmId ? path.join(swarmDir, 'swarms', swarmId) : swarmDir;
+
+// --------------------------------------------------------- restore-state
+// SessionStart verb (standing agents). On a fresh or post-compaction session,
+// re-inject this agent's goal-status checkpoint so it recovers its working state
+// (Thread C). source=="compact" means we just lost context to compaction — the
+// checkpoint is now the trustworthy record. Bulletproof: any error => no-op.
+if (event === 'restore-state') {
+  try {
+    const stateFile = path.join(swarmOwnDir, 'state', `${id}.json`);
+    if (!fs.existsSync(stateFile)) process.exit(0);
+    let st; try { st = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { process.exit(0); }
+    const src = (payload.source || 'startup');
+    const compacted = src === 'compact';
+    const tasks = Array.isArray(st.tasks) ? st.tasks : [];
+    const taskLines = tasks.map(t =>
+      `  - [${t.status || '?'}] ${t.title || t.id || '?'}${t.blockers && t.blockers.length ? ' (BLOCKED: ' + t.blockers.join('; ') + ')' : ''}`
+    ).join('\n');
+    const ctx = `[swarm continuity] You are the standing agent ${id}${st.role ? ' (' + st.role + ')' : ''}, ` +
+      `resuming ${compacted ? 'AFTER A CONTEXT COMPACTION — your prior working memory was just summarized away, so this checkpoint is your most reliable record' : 'a session'}.\n` +
+      `MISSION: ${st.mission || '(unset)'}\n` +
+      `OVERALL STATUS: ${st.status || '?'} — ${st.progress_summary || ''}\n` +
+      (taskLines ? `CURRENT TASKS:\n${taskLines}\n` : '') +
+      (st.open_threads && st.open_threads.length ? `OPEN THREADS: ${st.open_threads.map(o => o.id + ':' + o.state).join(', ')}\n` : '') +
+      `Re-read your full checkpoint at state/${id}.json before proceeding, and pick up where it says you are.`;
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx },
+    }));
+  } catch { /* never break session start */ }
+  process.exit(0);
+}
+
+// ------------------------------------------------------ precompact-marker
+// PreCompact verb (standing agents). Compaction is about to happen and we CANNOT
+// inject forward from here — so just record that it happened (a marker + a note
+// in the state file if present), and do NOT block (the window is genuinely full).
+// The restore-state hook (SessionStart source=compact) does the actual re-inject.
+if (event === 'precompact-marker') {
+  try {
+    const stateDir = path.join(swarmOwnDir, 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, `${id}.compaction-pending`),
+      JSON.stringify({ ts: Number(payload.ts) || 0, trigger: payload.trigger || payload.matcher || '' }));
+  } catch { /* best effort */ }
+  process.exit(0); // never block compaction
+}
+
 // ------------------------------------------------------------- inbox-check
 // UserPromptSubmit verb. Surfaces this agent's durable inbox (coordinator ->
 // subagent messages, written by `swarm send`) into the model's context at the
