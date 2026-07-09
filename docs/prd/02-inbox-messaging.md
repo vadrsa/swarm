@@ -510,23 +510,49 @@ right after `v0.1.1` — **before** `v0.6.0` — and `tail` showed the wrong end
 different commands, the same trap, and neither failed.
 
 ```
-git tag | tail -1                     → v0.9.0    ← wrong
+git tag | tail -1                     → v0.9.0    ← wrong (lexical)
 git tag --sort=-creatordate | head -1 → v0.11.0   ← right today, by accident
-git tag --sort=-v:refname | head -1   → v0.11.0   ← right by construction
+git tag --sort=-v:refname | head -1   → v0.11.0   ← right today, still wrong
 ```
 
-The middle form is the one to distrust. It orders by **creation time**, which agrees with the
-highest version only while tags are created in version order. Back-tag an old commit, or
-re-create a tag, and it reports a version that is not the highest — exits zero, looks right.
-`cos` had been using it all session to mean *"the latest release."*
+`--sort=-creatordate` orders by **creation time**, which agrees with the highest version only
+while tags are created in version order. Back-tag an old commit, or re-create a tag, and it
+reports a version that is not the highest — exits zero, looks right. `cos` had been using it
+all session to mean *"the latest release."*
 
-**But the trap is in our shells, not in the tool, and that boundary belongs in the record.**
-`git tag` appears **nowhere** in `bin/swarm`. `cmd_update` parses semver into an explicit
-`(major, minor, patch, is_stable, pre)` tuple and sorts on that, carrying the comment *"don't
-trust `-v:refname`."* Verified behaviourally: `swarm update --check` names **v0.11.0**, the
-true highest, while `git tag | tail -1` names `v0.9.0`. **A register entry reading "swarm
-mis-sorts tags" would be false**, and would send the next agent to patch a function that was
-already right. `cos` checked this before letting the finding be written down.
+> **Correction, and it is against this document.** An earlier revision recommended
+> `--sort=-v:refname` as *"right by construction."* **It is not.** `release-mgr` chased
+> product's near-miss *past its own vindication* — instead of stopping at *"I use `sort -V`,
+> I am fine"* — and audited its own release gate. Verified here in a throwaway repository:
+>
+> ```
+> git tag --sort=-v:refname | head -3   →  v0.12.0-rc1
+>                                          v0.11.0-rc1
+>                                          v0.11.0        ← rc outranks its own release
+> ```
+>
+> `sort -V` and `for-each-ref --sort=-version:refname` have the identical defect. **Semver says
+> a pre-release *precedes* its release**, and `RELEASING.md` explicitly supports `vX.Y.Z-rcN`.
+>
+> **There is no correct git sort flag.** Only an explicit parse is right — which is exactly
+> what `bin/swarm:92` does, sorting on `(major, minor, patch, is_stable, pre)` with stable
+> ranking above pre. `swarm update --check` is correct; every shell shortcut around it is not.
+>
+> No release was ever misclassified, because no rc has ever existed. **It was a landmine, not a
+> wound** — found only because a report product had no obligation to send was chased one step
+> past agreement.
+
+**The trap is in our shells, not in the tool — and the tool is the only thing here that is
+right.** `git tag` appears **nowhere** in `bin/swarm`. `cmd_update` parses semver into an
+explicit `(major, minor, patch, is_stable, pre)` tuple and sorts on that, carrying the comment
+*"don't trust `-v:refname`."* That comment is not defensive; it is **correct, and it anticipated
+the pre-release defect three of us then walked into.** Verified behaviourally: `swarm update
+--check` names **v0.11.0**, the true highest, while `git tag | tail -1` names `v0.9.0`.
+
+**A register entry reading "swarm mis-sorts tags" would be false**, and would send the next
+agent to patch a function that was already right. `cos` checked this before letting the finding
+be written down — and `release-mgr` then found that the *shell remedies* three agents had been
+recommending each other were all wrong in the same way the tool had explicitly avoided.
 
 **This is a distinct species, and `cos` counted it as the tenth.** The environment hazard above
 is *a command that never ran the path under test*. `grep -c` counting comments is *a command
