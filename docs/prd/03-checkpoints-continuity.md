@@ -122,12 +122,44 @@ Re-read your full checkpoint at state/<id>.json before proceeding…
 RECONCILE now (argue against yourself…)
 ```
 
-**What it injects, exactly:** `mission`, `status`, `progress_summary`, each task's
-**title** and **blockers**, and each `open_threads` entry's `id:state`. It does **not**
-inject `progress`, `context`, or `work_cache` — which is why a 46 KB checkpoint yields a
-15 KB injection, and why the payload's size tracks task and thread *count* rather than
-file size (measured; see **G18**). The trailing instruction to *"re-read your full
-checkpoint"* exists precisely because the injection is lossy by design.
+**What it injects, exactly** — measured field by field against the installed hook, by adding
+2,000 characters to each and reading the payload delta:
+
+| field | cost | |
+|---|---:|---|
+| `mission` | +2,000 | **injected 1:1** |
+| `role` | +2,000 | **injected 1:1** |
+| `status` | +2,000 | **injected 1:1** |
+| `progress_summary` | +2,000 | **injected 1:1** |
+| `tasks[].title` | +2,000 | **injected 1:1** |
+| `tasks[].blockers` | +2,012 | **injected 1:1** |
+| `open_threads[].state` | +2,000 | **injected 1:1** |
+| `tasks[].progress` | **0** | free |
+| `tasks[].delegated_to` | **0** | free |
+| `context` | **0** | free |
+| `work_cache` | **0** | free |
+
+The free fields are free **without limit**: a checkpoint of 6,000,230 bytes, with two million
+characters in each of `progress`, `context`, and `work_cache`, injects **797 bytes** and
+parses cleanly. The trailing instruction to *"re-read your full checkpoint"* exists precisely
+because the injection is lossy by design.
+
+> **The tool documents the opposite, and that is a defect — not an omission.** `WORLD.md`
+> tells every agent *"its checkpoint is re-injected after a context compaction or restart."*
+> `bin/swarm:365` says the hook *"re-injects the agent's goal-status checkpoint."* The hook's
+> own comment says *"re-inject this agent's goal-status checkpoint."* All three describe the
+> whole file. **Seven fields are injected; five are not.**
+>
+> An agent that reads the contract and reasons carefully concludes that every field costs
+> context on every restart, and economises in the field that reads as most disposable — the
+> `progress` body, which is **free**. Meanwhile it narrates its reconciliation into
+> `progress_summary`, which the ritual asks for and which is **1:1 forever**.
+>
+> That is why every agent that has ever reconciled is 15–46× over the schema's own hint, and
+> the only agent at 1× never reconciled. **The overrun is not a discipline failure. It is
+> correct reasoning from a false premise the tool supplies.** Nothing anywhere in `bin/swarm`,
+> `bin/swarm-hook.cjs`, or `WORLD.md` states the asymmetry (`cos` grepped for it; zero hits;
+> confirmed).
 
 The `source == "compact"` branch changes the framing to tell the agent explicitly
 that its memory was just destroyed and this file now outranks its recollection.
