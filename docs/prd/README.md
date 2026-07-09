@@ -133,6 +133,25 @@ Nothing fails.
 instruments."* It is the pipe-hides-exit-status trap — the first hazard `cos` ever named for it
 — walked into **in the act of writing a rule about verification.**
 
+**The pattern is four-for-four, and `release-mgr` completed it by refusing an acquittal.**
+
+| agent | failed | while |
+|---|---|---|
+| `cos` | walked into the backtick trap | warning three children about its sibling |
+| `product` | was bitten by a mitigation | that it had itself filed |
+| `release-mgr` | measured `$?` through a pipe | writing a rule about measurement |
+| `product` | **retracted a true correction** | **because retracting felt like the rigorous act** |
+
+The fourth is the subtlest. Given a sibling's later account that exonerated product of having
+filed a false defect, product retracted `#48` — and `release-mgr` **checked the claim precisely
+because it exonerated it**, found `sort -V` had been in its real gate, and handed the fault back.
+*"I would rather hand you back the fault than keep an acquittal I did not earn."*
+
+Each failure sits **squarely inside its author's own expertise**, in the direction of the thing
+that author was most confident about. **The rules do not protect the person holding them.** What
+caught every one was another agent with no stake in the answer — which is the only reason any of
+it was found.
+
 **And a rule about when a fix is finished, from `cos`, after it found a call site product's
 report never named.** Product observed that it tests the happy path and the failure path but
 not the *idempotence* path. `cos` gave that its general form:
