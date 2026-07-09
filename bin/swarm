@@ -159,6 +159,7 @@ init_swarm_paths() {
   mkdir -p "$AGENTS_DIR" "$UPDATES_DIR" "$SETTINGS_DIR" "$STATE_DIR" "$INBOX_DIR" \
     || die "cannot create swarm layout under $SWARM_ROOT"
   [ -e "$NAMES_FILE" ] || : > "$NAMES_FILE"
+  seed_names_ledger
 }
 
 # --- agent ids are slugs -------------------------------------------------
@@ -171,7 +172,10 @@ init_swarm_paths() {
 # Uniqueness is for the swarm's whole LIFETIME: a name means exactly one agent,
 # forever. `reap` deletes agents/<id>.json, so agents/ alone cannot answer "was
 # this name ever used?" — the append-only `names` ledger can, and it is never
-# pruned. mint_id() checks the ledger UNION the live registry, then appends.
+# pruned. Two rules keep the ledger complete: init_swarm_paths seeds it from
+# agents/ on every verb (so a record that never went through mint_id is ledgered
+# before reap can delete it), and mint_id checks the ledger UNION the live
+# registry, then appends.
 
 # slugify <text> — lowercase, non-alnum -> '-', collapse runs, strip ends,
 # trim to 30 chars (never ending on a hyphen). Prints "" if nothing survives.
@@ -216,32 +220,71 @@ minted_names() {
   for f in "$AGENTS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done 2>/dev/null || true
 }
 
-# mint_id <base-slug> — claim the first free name in base, base-2, base-3, ...
-# and RECORD it in the ledger. Never returns a name any agent (living, dead, or
-# reaped) has held in this swarm. Check-and-append is serialized by an atomic
-# mkdir lock so two concurrent spawns cannot claim the same name.
-mint_id() {
-  local base="$1"
-  [ -n "$base" ] || base="task"
+# names_lock / names_unlock — serialize check-and-append on the ledger with an
+# atomic mkdir. Every writer takes it, so two concurrent spawns cannot claim the
+# same name and a seed cannot interleave with a mint.
+names_lock() {
   mkdir -p "$SWARM_ROOT"
   local lock="$NAMES_FILE.lock" i=0
   while ! mkdir "$lock" 2>/dev/null; do
     i=$((i+1)); [ "$i" -ge 100 ] && { rmdir "$lock" 2>/dev/null || true; break; }
     sleep 0.1
   done
-  local taken cand n=1 ledgered
+}
+names_unlock() { rmdir "$NAMES_FILE.lock" 2>/dev/null || true; }
+
+# unledgered_names — names agents/ holds that the ledger does not. Read-only, and
+# on the hot path (init_swarm_paths runs it on every verb), so it forks at most
+# once: no basename/grep per registry file, just parameter expansion and a single
+# `grep -vxF -f` of the whole registry against the whole ledger.
+unledgered_names() {
+  local f n registry=""
+  for f in "$AGENTS_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    n="${f##*/}"; registry="$registry${n%.json}"$'\n'
+  done
+  [ -n "$registry" ] || return 0
+  printf '%s' "$registry" | grep -vxF -f "$NAMES_FILE" -- 2>/dev/null || true
+}
+
+# seed_names_ledger — absorb every name agents/ holds into the ledger. Called
+# from init_swarm_paths, i.e. before ANY verb touches the registry, so a record
+# that never went through mint_id (hand-created, restored from a backup, or
+# left by an older layout) is in the ledger before `reap` can delete it. Without
+# this, reap frees such a name and a later spawn re-mints it — lifetime
+# uniqueness violated.
+#
+# Cheap and idempotent: the read-only diff writes nothing in the common case
+# (every registry name already ledgered), so the hot path of `swarm status` and
+# friends stays lock-free and append-free. Only when the diff is non-empty do we
+# take the ledger lock and RE-diff inside it, so a racing seed or mint cannot
+# make us append a name twice.
+seed_names_ledger() {
+  [ -n "$(unledgered_names)" ] || return 0
+  names_lock
+  unledgered_names >> "$NAMES_FILE"   # append-only, re-diffed under the lock
+  names_unlock
+}
+
+# mint_id <base-slug> — claim the first free name in base, base-2, base-3, ...
+# and RECORD it in the ledger. Never returns a name any agent (living, dead, or
+# reaped) has held in this swarm. Check-and-append is serialized by the ledger
+# lock so two concurrent spawns cannot claim the same name.
+mint_id() {
+  local base="$1"
+  [ -n "$base" ] || base="task"
+  names_lock
+  # init_swarm_paths has already absorbed agents/ into the ledger (see
+  # seed_names_ledger), so minted_names' ledger half is authoritative here; the
+  # union is kept as belt and braces for a record written since that seed.
+  local taken cand n=1
   taken="$(minted_names)"
-  ledgered="$({ [ -f "$NAMES_FILE" ] && cat "$NAMES_FILE"; } 2>/dev/null || true)"
   cand="$base"
   while printf '%s\n' "$taken" | grep -qxF -- "$cand"; do
-    # A name we skip because agents/ holds it, but the ledger does not, would be
-    # freed the moment that agent is reaped. Absorb it into the ledger now, so
-    # the ledger alone is a complete record of every name this swarm has used.
-    printf '%s\n' "$ledgered" | grep -qxF -- "$cand" || printf '%s\n' "$cand" >> "$NAMES_FILE"
     n=$((n+1)); cand="$base-$n"
   done
   printf '%s\n' "$cand" >> "$NAMES_FILE"   # append-only: reap must never free a name
-  rmdir "$lock" 2>/dev/null || true
+  names_unlock
   printf '%s\n' "$cand"
 }
 
