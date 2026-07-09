@@ -73,10 +73,30 @@ bodies (durable, never injected). Nothing in the tool enforces or even names thi
 design's intent, discovered by an agent economising under pressure.
 
 **One invariant the schema implies and nothing enforces: a `done` task has no blockers.**
-It has now been violated by two agents independently — `product` (repaired) and `release-mgr`
-(t19, live). **Nothing enforces it, so it re-opens.** `done` reads as *"I am finished"* while a
-blocker records *"someone else is not."* Both statements are true; the schema gives them one
-field. This is the concrete cost G7 predicts: a documented invariant with no instrument.
+It has now been violated by two agents independently — `product` and `release-mgr` — and
+repaired by both. **Nothing enforces it, so it re-opens.** `done` reads as *"I am finished"*
+while a blocker records *"someone else is not."* Both statements are true; the schema gives
+them one field. This is the concrete cost G7 predicts: a documented invariant with no
+instrument.
+
+**And a blocker is a claim about the *present* that nothing ever re-checks (G22).**
+`restore-state` re-injects it verbatim on every restart — `- [blocked] Ask operator about X
+(BLOCKED: Operator must choose A or B)` — to a cold-context agent that has just lost the ability
+to cheaply verify it. `release-mgr` found this by checking its own two blockers instead of
+accepting product's claim that it was owed a decision: **both were stale.** One had been
+overtaken by a code change; the other had been answered by a release that shipped. For hours its
+restore injection asserted two live operator decisions that did not exist.
+
+> *"A stale blocker is not clutter. It is a false statement to the one reader least able to
+> falsify it."* — `release-mgr`
+
+Worse before the schema repair: line 158 emits `[${status}] … (BLOCKED: …)` unconditionally, so
+a resumed agent could read `- [done] … (BLOCKED: operator must choose)` — a task both finished
+and blocked, with no way to know which claim to act on. **The record was incoherent and so was
+its rendering.**
+
+The remedy is a habit with no instrument: **re-verify every blocker at each reconciliation**,
+the way `release-mgr` re-verifies `origin/main` immediately before tagging. It now does.
 If a task is waiting on someone else's decision, it is `blocked` — the work being finished
 is not the same as the task being finished. Nothing validates this (see G7), and product
 violated it twice in its own checkpoint, which is how the defect in **G18** was found: the
