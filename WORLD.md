@@ -34,15 +34,32 @@ idempotent init that prints the swarm root; it is never required.)
 - `swarm send <id> --stdin` (recommended) or `swarm send <id> "<message>"` for
   short, quote-free strings → delivers a message to a subagent's **durable
   file inbox** (`.swarm/inbox/<agent-id>/`), then rings a best-effort
-  "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
-  the file: the message is surfaced into the agent's context (via a
-  UserPromptSubmit hook) on its next turn — even if the agent was busy or the
-  doorbell was missed. **This is durable-async, NOT the old live-keystroke model**
-  (see the reliability note below): a message is *always delivered*, but a busy
-  agent may see it on its next turn rather than instantly.
+  "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed
+  **once the message is accepted**: it is written to the target's inbox before
+  anything else, and it is surfaced into the agent's context on its next turn
+  even if the agent was busy or the doorbell was missed. **Acceptance is not
+  guaranteed** — see backpressure below.
+  **This is durable-async, NOT the old live-keystroke model**
+  (see the reliability note below): an **accepted** message is always delivered,
+  though a busy agent may see it on its next turn rather than instantly. A message
+  that `swarm send` **rejects** was never accepted and was never queued: the sender
+  holds it, and knows.
   **A body over 6000 bytes is rejected** — the guarantee above only holds for a
   message that fits one turn's injection whole. Put large content in a file and
   send the path.
+  **Backpressure.** An agent holding **50 or more unacked messages** stops accepting
+  mail. `swarm send` to it **exits non-zero** with `agent busy, N unacked, try again
+  later`, and **nothing is queued** — the message does not exist anywhere. This
+  applies to the `operator` target too: a full operator inbox is a real signal, not
+  an exemption.
+  A refused sender must **reason about the refusal, not retry it**. Proceed if you
+  can continue without the reply; **escalate** if you cannot. Retrying a full inbox
+  is spinning; the inbox drains only when its owner acks.
+  **You can always dig yourself out.** `swarm inbox ack` reads your *own* inbox and
+  needs no incoming message, and the nag reaches you on your own turn through the
+  hook — a different path from the send cap. A capped agent always sees its unacked
+  ids and can always ack. The only agent that stays full is one that has stopped
+  taking turns, and that is precisely the signal the refused sender is meant to act on.
   **Prefer `--stdin` for anything you did not hand-check.** A positional body is a
   shell word: backticks and `$(...)` are *executed* by your shell, and an apostrophe
   terminates a quoted string — all before `swarm` runs, so it cannot see or recover
@@ -57,19 +74,27 @@ idempotent init that prints the swarm root; it is never required.)
 - `swarm updates [--id X]` → subagent reports, each with a state and a one-line
   summary. Run as the operator, it also shows your inbox. **Reading never
   consumes**, on any path including `--json`: a script may poll it freely.
-- `swarm inbox read [--json]` → your unread messages, each with its **message id**.
-  Non-destructive; safe to run repeatedly.
+- `swarm inbox read [--json]` → your **outstanding** messages — everything unacked,
+  whether or not it has already been delivered to your context — each with its
+  **message id** and a note of which it is. Non-destructive; safe to run repeatedly.
 - `swarm inbox ack <message-id>` → consume mail, **explicitly**. Acknowledgement is
   *cumulative over arrival order*: `ack X` consumes X and everything that arrived
   before it, and prints every id it consumed. It must **name an id that is
   currently outstanding** — acking an unknown or already-acked id is an error, not
   a no-op — and **there is no `ack --all`**.
 
-  For an **agent**, mail is acked automatically the moment the hook injects it:
-  delivery is atomic with the turn, so nothing can be shown and then lost. `read`
-  and `ack` exist for what the 8000-char injection cap *holds back* (and to re-read
-  a message lost to compaction). For the **operator**, who has no hook and no turn,
-  **nothing is ever acked but an explicit `ack`.** That asymmetry is deliberate.
+  Mail is **never acked by being shown**. A message is injected into an agent's
+  context in full exactly once; from then on the hook only *nags* — one line naming
+  the unacked ids — and the message stays outstanding until an explicit `swarm inbox
+  ack`. The same rule holds for the operator, who has no hook and therefore is never
+  shown anything automatically. Rendering is not acknowledging: **only `ack`
+  consumes**, for everyone.
+
+  A message therefore has three states, and its state is where the file lives:
+  `inbox/<id>/` (never delivered), `inbox/<id>/rendered/` (delivered once, still
+  unacked), `inbox/<id>/read/` (acked). **Outstanding = unacked = the first two.** An
+  agent's `rendered/` fills as the hook delivers; the operator's stays empty, because
+  nothing delivers to it — but the definition of outstanding is one definition.
 - `swarm wait <id> [--timeout SEC]` → blocks until the subagent's newest report
   is a stop state, then prints it. Has a timeout (won't hang).
 - `swarm list [--live-only]` → the swarm's roster; each agent marked `live` or
@@ -147,11 +172,14 @@ verified result.
   idle; it is how your parent judges whether you're on track and how you recover
   your working state after a compaction or restart. There is no enforcement — it's
   a duty and a judged artifact, like producing any inspectable result.
-- `swarm send` is **durable**: the message is written to the target's file inbox
-  before anything else, so it is never lost even if the target is busy or its pane
-  is gone. The "doorbell" that surfaces it in near-realtime is best-effort — a
-  busy agent may pick the message up on its next turn instead of instantly, but it
-  *will* pick it up. Do not assume a sent message is seen the same instant.
+- `swarm send` is **durable once it accepts**: an accepted message is written to the
+  target's file inbox before anything else, so it is never lost even if the target is
+  busy or its pane is gone. The "doorbell" that surfaces it in near-realtime is
+  best-effort — a busy agent may pick the message up on its next turn instead of
+  instantly, but it *will* pick it up. Do not assume a sent message is seen the same
+  instant. **Acceptance is not guaranteed**: an oversized body, or a recipient holding
+  50 or more unacked messages, is rejected with a non-zero exit and nothing is queued.
+  **Check the exit status.**
 - **A message is a message, not a payload.** `swarm send` rejects a body over
   **6000 bytes**, because the delivery hook injects at most 8000 chars per turn and
   a message that cannot fit one turn whole cannot be delivered whole. Write large

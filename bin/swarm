@@ -639,12 +639,20 @@ PY
 # up on the agent's next turn, so a missing doorbell only delays pickup — it
 # never loses a message.
 #
+# BUT `send` CAN NOW REFUSE. Two guards reject a message outright — an oversized
+# body, and a recipient already holding UNACKED_CAP unacked messages. Both exit
+# non-zero and write NOTHING. What survives of the old promise is: once `swarm
+# send` RETURNS 0, the message is on disk and cannot be lost. What is gone is
+# "every send eventually delivers". A refused send is a signal to the SENDER,
+# which is the only place it can be acted on.
+#
 # `operator` is a valid target too: it is the human root, WORLD.md's terminal
 # escalation address. It is not an agent — no registry record, no pane, no
 # lifecycle — so it skips exactly two things and nothing else: the registry
-# existence guard, and the doorbell (there is no pane to ring). The message file
-# it receives is byte-for-byte the same shape an agent gets, in inbox/operator/.
-# Every other id still fails hard on a typo.
+# existence guard, and the doorbell (there is no pane to ring). It does NOT skip
+# either rejection guard: a full operator inbox refuses mail exactly as an agent's
+# does. The message file it receives is byte-for-byte the same shape an agent
+# gets, in inbox/operator/. Every other id still fails hard on a typo.
 cmd_send() {
   init_swarm_paths
   local id="" msg="" from_stdin="" have_msg=""
@@ -698,6 +706,57 @@ cmd_send() {
   if [ "$id" != "operator" ]; then
     local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
     pane="$(json_get "$reg" pane)"
+  fi
+
+  # ------------------------------------------------------------ backpressure
+  # A recipient holding UNACKED_CAP or more unacked messages REFUSES new mail.
+  # Non-zero exit, clear error, and NOTHING is written — the same shape as the
+  # oversized-body rejection above, and for the same reason: it is better to tell
+  # the sender now than to queue something the recipient will never look at.
+  #
+  # DELIVERY IS THEREFORE NO LONGER UNCONDITIONALLY GUARANTEED. That is a contract
+  # change, made deliberately (operator ruling, 2026-07-09). Until the ruling that
+  # added rendered/, "unacked" only ever held the remainder the 8000-char injection
+  # cap withheld, and 50 was practically unreachable — rendering acked. Now a
+  # message stays unacked until the agent says so, so the count is real.
+  #
+  # UNACKED = *.json directly under inbox/<id>/ (never rendered) PLUS
+  #           *.json under inbox/<id>/rendered/ (delivered, never acknowledged).
+  # read/ is finished and does not count. Same filter as both readers: a record
+  # with a string `body`. A corrupt file nobody can read must not fill the box.
+  #
+  # THE CAP APPLIES TO `operator` TOO. A full operator inbox is a deliberate
+  # signal, not an oversight: it means the human is not draining escalations, and
+  # a sender that cannot escalate should learn that rather than shout into a queue.
+  #
+  # THE REFUSAL IS THE FEATURE. Do not "fix" it by queuing, retrying, or exempting
+  # anyone. A capped agent is not deadlocked: `swarm inbox ack` reads its OWN inbox
+  # and needs no incoming message, and the hook nags it with its unacked ids on
+  # every one of its own turns — a different path entirely from this check, which
+  # gates only `cmd_send`. It can always ack its way out. The one case that stays
+  # stuck is a dead or wedged agent, and that is a real signal: the refused sender
+  # escalates, which is exactly what a message into a dead agent's box would not do.
+  #
+  # The check is not atomic with the write. Two senders racing at CAP-1 can both
+  # pass and land the box at CAP+1. That is fine: this is backpressure, not a
+  # quota. The box drains on the next ack and the next send is refused.
+  local UNACKED_CAP=50
+  local nunacked
+  nunacked="$(BOX="$INBOX_DIR/$id" python3 - <<'PY'
+import json,os
+box=os.environ["BOX"]; n=0
+for d in (box, os.path.join(box,"rendered")):
+    if not os.path.isdir(d): continue
+    for fn in os.listdir(d):
+        if not fn.endswith(".json"): continue
+        try: r=json.load(open(os.path.join(d,fn)))
+        except Exception: continue      # unreadable: the recipient cannot see it either
+        if isinstance(r.get("body"),str): n+=1
+print(n)
+PY
+)" || die "cannot count $id's unacked messages"
+  if [ "$nunacked" -ge "$UNACKED_CAP" ]; then
+    die "agent busy, $nunacked unacked, try again later ($id holds >= $UNACKED_CAP unacked message(s); nothing was queued). It must run 'swarm inbox ack <id>' to drain. If it cannot, escalate — do not retry."
   fi
 
   # Sender: the calling agent's id if we're a subagent, else "operator"
@@ -1600,7 +1659,12 @@ verb_usage() {
                '' \
                'The body must be <= 6000 bytes: the delivery hook injects at most 8000' \
                'chars per turn, so a larger message could not be delivered whole. Store' \
-               'large content as a file and reference its path in the message.';;
+               'large content as a file and reference its path in the message.' \
+               '' \
+               'DELIVERY IS NOT UNCONDITIONAL. A recipient already holding 50 or more' \
+               'UNACKED messages refuses new mail: send exits non-zero, nothing is queued.' \
+               'The cap applies to `operator` too. A refused send means the recipient is' \
+               'not draining its inbox — ESCALATE, do not retry.';;
     updates) echo "swarm updates [--id <agent-id>] [--json]   (never consumes mail)";;
     inbox)   printf '%s\n' \
                'swarm inbox read [--json]        my unacked messages (never consumes)' \
@@ -1668,6 +1732,8 @@ a collision (even with a reaped agent) gets a -2/-3/... suffix.
   swarm checkpoint --help | --context    goal-status continuity (every agent)
   swarm send  <agent-id|operator> "<message>"   'operator' = the human root (durable file, no pane)
                                          bodies over 6000 bytes are rejected — send a file path
+                                         a recipient holding >= 50 unacked messages REFUSES mail
+                                         (non-zero exit, nothing queued) — escalate, don't retry
   swarm updates [--id <agent-id>] [--json]   agent reports; as operator, also SHOWS its inbox
                                          (reading never consumes; see 'swarm inbox ack')
   swarm inbox read [--json]              my unacked messages (never consumes)

@@ -361,5 +361,124 @@ SWARM_AGENT_ID=leg "$SWARM" inbox ack old-1 >/dev/null 2>&1 \
   && [ "$(nread leg)" = "1" ] && ok "and it can be acked by that id" || bad "legacy message is unackable"
 
 # ---------------------------------------------------------------------------
+case_ "V14 — backpressure: 49 unacked accepts, 50 refuses, nothing is queued"
+fresh v14
+# 49 unacked, all never-rendered. `send` to operator needs no registry entry.
+for i in $(seq 1 49); do plant operator "$((10000+i))" s "m$i"; done
+[ "$(nunacked operator)" = "49" ] && ok "setup: 49 unacked" || bad "setup wrong: $(nunacked operator)"
+printf 'accepted at 49' | "$SWARM" send operator --stdin >/dev/null 2>&1 \
+  && ok "at 49 unacked: send accepted (exit 0)" || bad "at 49 unacked: send refused"
+[ "$(nunacked operator)" = "50" ] && ok "…and the message was written" || bad "nothing written at 49"
+out="$(printf 'refused at 50' | "$SWARM" send operator --stdin 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "at 50 unacked: send refused (exit $rc)" || bad "at 50 unacked: send accepted"
+printf '  error verbatim: %s\n' "$out"
+case "$out" in *"agent busy, 50 unacked, try again later"*) ok "error names the count and the shape";; *) bad "error text mismatch" "$out";; esac
+[ "$(nunacked operator)" = "50" ] && ok "NOTHING was queued on refusal" || bad "refusal queued a message: $(nunacked operator)"
+ls "$SWARM_DIR/inbox/operator"/*.tmp >/dev/null 2>&1 && bad "a .tmp file was left behind" || ok "no partial write left behind"
+# V15 below proves the refused body never appears later.
+
+# ---------------------------------------------------------------------------
+case_ "V15 — the cap counts BOTH unacked states, and read/ does not count"
+fresh v15
+mkdir -p "$SWARM_DIR/agents"
+printf '{"id":"capped","pane":""}' > "$SWARM_DIR/agents/capped.json"
+# Bodies big enough that the 8000-char injection cap withholds most of them, so the
+# box ends up genuinely SPLIT across both unacked states.
+for i in $(seq 1 49); do plant capped "$((20000+i))" s "$(python3 -c "print('b'*1000,end='')")"; done
+# Render some of them: the injection moves a prefix into rendered/. They still count.
+inject capped >/dev/null
+r="$(nrendered capped)"; u="$(nunread capped)"
+[ "$r" -gt 0 ] && [ "$u" -gt 0 ] && ok "split across both states: $r rendered, $u never rendered" \
+  || bad "not a mix: $r rendered, $u unrendered"
+[ "$(nunacked capped)" = "49" ] && ok "unacked still 49 across both states" || bad "unacked = $(nunacked capped)"
+printf 'x' | "$SWARM" send capped --stdin >/dev/null 2>&1 && ok "49 across both states still accepts" || bad "refused at 49"
+[ "$(nunacked capped)" = "50" ] && ok "now 50 unacked" || bad "count wrong"
+printf 'REFUSED-BODY-MARKER' | "$SWARM" send capped --stdin >/dev/null 2>&1 && bad "50 accepted" || ok "50 refuses"
+# Acked mail does not count: drain one, and a send is accepted again.
+oldest="$(SWARM_AGENT_ID=capped "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')"
+SWARM_AGENT_ID=capped "$SWARM" inbox ack "$oldest" >/dev/null 2>&1
+[ "$(nread capped)" = "1" ] && ok "one message acked into read/" || bad "ack failed"
+[ "$(nunacked capped)" = "49" ] && ok "read/ does not count toward the cap" || bad "read/ counted: $(nunacked capped)"
+printf 'accepted after ack' | "$SWARM" send capped --stdin >/dev/null 2>&1 && ok "the box accepts mail again" || bad "still refusing after drain"
+# The REFUSED message never appears — not now, not later.
+grep -rl "REFUSED-BODY-MARKER" "$SWARM_DIR/inbox/capped" >/dev/null 2>&1 \
+  && bad "the refused body was queued after all" || ok "the refused body never appears (nothing queued)"
+
+# ---------------------------------------------------------------------------
+case_ "V16 — the cap applies to 'operator' identically, and to an agent target"
+fresh v16
+for i in $(seq 1 50); do plant operator "$((30000+i))" s "m$i"; done
+out="$(printf 'to the human' | "$SWARM" send operator --stdin 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "operator target refuses at 50 (exit $rc)" || bad "operator target accepted at 50"
+case "$out" in *"agent busy, 50 unacked"*) ok "same error shape for operator";; *) bad "operator error differs" "$out";; esac
+[ "$(nunacked operator)" = "50" ] && ok "nothing queued for the operator" || bad "operator got a queued message"
+# An unknown id still fails on the registry guard, not the cap.
+out="$(printf 'x' | "$SWARM" send nosuchagent --stdin 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && case "$out" in *"unknown agent: nosuchagent"*) ok "unknown id still fails the registry guard";; *) bad "wrong error" "$out";; esac
+
+# ---------------------------------------------------------------------------
+case_ "V17 — self-lockout is escapable: ack needs no incoming message"
+fresh v17
+mkdir -p "$SWARM_DIR/agents"; printf '{"id":"stuck","pane":""}' > "$SWARM_DIR/agents/stuck.json"
+for i in $(seq 1 50); do plant stuck "$((40000+i))" s "m$i"; done
+printf 'x' | "$SWARM" send stuck --stdin >/dev/null 2>&1 && bad "capped agent accepted mail" || ok "capped agent refuses mail"
+# It can still SEE its unacked ids — on its own turn, through the hook (a different
+# path from the send cap), and through its own `inbox read`. No incoming message needed.
+ctx="$(inject stuck)"
+[ -n "$ctx" ] && ok "the hook still surfaces its inbox to it (nag/injection path is not gated)" || bad "capped agent is blind"
+n="$(SWARM_AGENT_ID=stuck "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$n" = "50" ] && ok "'swarm inbox read' works on its OWN box with no incoming message" || bad "inbox read shows $n"
+# Ack its way out, one message, and mail flows again.
+first="$(SWARM_AGENT_ID=stuck "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')"
+SWARM_AGENT_ID=stuck "$SWARM" inbox ack "$first" >/dev/null 2>&1
+[ "$(nunacked stuck)" = "49" ] && ok "ack drops it to 49 unacked" || bad "ack did not drain"
+printf 'you are back' | "$SWARM" send stuck --stdin >/dev/null 2>&1 && ok "it can receive again" || bad "still refusing at 49"
+
+# ---------------------------------------------------------------------------
+case_ "V18 — the nag's id round-trips: read finds it, ack consumes it"
+# The failure this defends: the nag names an id that `swarm inbox read` — the exact
+# verb the nag recommends — cannot show. Announced and unfindable. So take the id
+# STRAIGHT OUT OF THE NAG LINE and feed it to both verbs.
+fresh v18
+plant rt 1 a "one"; plant rt 2 b "two"
+inject rt >/dev/null                        # both -> rendered/
+nag="$(inject rt)"
+ids="$(printf '%s' "$nag" | sed -n 's/.*still UNACKED: \(.*\) — re-read.*/\1/p')"
+[ -n "$ids" ] && ok "the nag yields parseable ids: $ids" || bad "cannot parse ids out of the nag" "$nag"
+first="$(printf '%s' "$ids" | cut -d, -f1 | tr -d ' ')"
+SWARM_AGENT_ID=rt "$SWARM" inbox read 2>/dev/null | grep -q "id $first" \
+  && ok "'swarm inbox read' shows the id the nag named" || bad "the nag named an id 'read' cannot show: $first"
+SWARM_AGENT_ID=rt "$SWARM" inbox ack "$first" >/dev/null 2>&1 \
+  && ok "'swarm inbox ack <that id>' succeeds" || bad "the nag named an id 'ack' rejects: $first"
+last="$(printf '%s' "$ids" | cut -d, -f2 | tr -d ' ')"
+SWARM_AGENT_ID=rt "$SWARM" inbox ack "$last" >/dev/null 2>&1
+[ -z "$(inject rt)" ] && ok "acking every named id silences the nag" || bad "still nagging"
+
+# ---------------------------------------------------------------------------
+case_ "V19 — the count and the list agree across all three states; reading moves nothing"
+fresh v19
+plant agree 1 a "acked"; plant agree 2 b "rendered one"; plant agree 3 c "rendered two"
+inject agree >/dev/null                     # all three -> rendered/
+plant agree 4 d "never rendered"
+SWARM_AGENT_ID=agree "$SWARM" inbox ack a-1 >/dev/null 2>&1
+[ "$(nunread agree)" = "1" ] && [ "$(nrendered agree)" = "2" ] && [ "$(nread agree)" = "1" ] \
+  && ok "on disk: 1 never-rendered, 2 rendered-unacked, 1 acked" || bad "state $(nunread agree)/$(nrendered agree)/$(nread agree)"
+n="$(SWARM_AGENT_ID=agree "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$n" = "3" ] && [ "$n" = "$(nunacked agree)" ] && ok "reader lists exactly the $n unacked (no counted-but-unlistable)" || bad "list=$n count=$(nunacked agree)"
+d="$(SWARM_AGENT_ID=agree "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(sum(1 for r in json.load(sys.stdin) if r["delivered"]))')"
+[ "$d" = "2" ] && ok "and marks exactly the 2 already-delivered" || bad "delivered flag count = $d"
+ctx="$(inject agree)"
+case "$ctx" in *"never rendered"*) ok "the hook injects only the never-rendered body";; *) bad "wrong body injected";; esac
+case "$ctx" in *"b-2"*"c-3"*) ok "…and names both rendered-unacked ids in the nag";; *) bad "nag lost an id" "$ctx";; esac
+# Reading three times leaves both dirs byte-identical.
+fresh v19b
+plant nd 1 a "x"; plant nd 2 b "y"
+inject nd >/dev/null
+before="$(find "$SWARM_DIR/inbox/nd" -name '*.json' | sort | tr '\n' ' ')"
+for i in 1 2 3; do SWARM_AGENT_ID=nd "$SWARM" inbox read >/dev/null 2>&1; SWARM_AGENT_ID=nd "$SWARM" inbox read --json >/dev/null 2>&1; done
+after="$(find "$SWARM_DIR/inbox/nd" -name '*.json' | sort | tr '\n' ' ')"
+[ "$before" = "$after" ] && ok "3× 'inbox read' moves nothing (inbox/ and rendered/ unchanged)" || bad "read moved files"
+
+# ---------------------------------------------------------------------------
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
