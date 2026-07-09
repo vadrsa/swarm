@@ -274,16 +274,28 @@ def emit_hook_output(obj):
         return False
 
 
+def next_delivery(root, name, parent_of):
+    """The queue head as it would be delivered: (fn, ctx). ctx is None for an
+    undeliverable head (ruling R2), the whole result is None on an empty queue.
+    The ONE definition of deliverability — deliver_once injects with it and the
+    stop re-ring rings by it, so they cannot disagree (ruling R7)."""
+    sel = select_next(root, name)
+    if not sel:
+        return None
+    fn, rec, _ = sel
+    return fn, build_delivery(fn, rec,
+                              relation(rec.get("from", "?"), name, parent_of),
+                              name)
+
+
 def deliver_once(root, name, parent_of, emit):
     """Deliver at most ONE message: emit it, and move it to delivered/ ONLY
     after the emit reports the bytes drained. On a failed emit the file stays
     put and is offered whole again next turn — the safe direction to fail."""
-    sel = select_next(root, name)
-    if not sel:
+    nd = next_delivery(root, name, parent_of)
+    if not nd:
         return False
-    fn, rec, _ = sel
-    ctx = build_delivery(fn, rec,
-                         relation(rec.get("from", "?"), name, parent_of), name)
+    fn, ctx = nd
     if ctx is None:
         # Undeliverable (ruling R2): emit nothing, move nothing. The file
         # stays visible in `ps` q= — and it blocks the queue behind it, which
@@ -577,13 +589,17 @@ def cmd_event(kind):
         pass
     # >>> THE ONE UNPROVEN MECHANISM (design §6.3): the stop re-ring. <<<
     # One-per-turn needs the queue to keep draining after the agent goes idle:
-    # on Stop, if messages wait, ring our OWN pane's doorbell (same primitive
-    # as send's). If this proves unreliable, later messages stall until the
-    # next natural turn — degradation, never loss: the queue files are durable
-    # and `deliver` picks them up whenever the next turn comes.
+    # on Stop, ring our OWN pane's doorbell (same primitive as send's) — but
+    # only if the head is DELIVERABLE (ruling R7): ringing for a head that
+    # build_delivery refuses would loop forever (ring, empty turn, Stop, still
+    # queued, ring...) burning tokens with nobody watching. If the ring proves
+    # unreliable, later messages stall until the next natural turn —
+    # degradation, never loss: the queue files are durable and `deliver` picks
+    # them up whenever the next turn comes.
     if kind == "stop":
         try:
-            if select_next(root, name):
+            nd = next_delivery(root, name, parents_of(load_agents(root)))
+            if nd and nd[1] is not None:
                 rec = read_json(agent_rec_path(root, name))
                 if rec and rec.get("pane"):
                     ring_doorbell(rec["pane"])

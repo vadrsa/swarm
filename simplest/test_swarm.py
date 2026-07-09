@@ -406,13 +406,66 @@ class TestSubtree(unittest.TestCase):
 
 
 class TestReRingDecision(Base):
-    """The stop re-ring's DECISION is pure: ring iff messages wait. The ring
-    itself is a live-pane behavior, exempt per the brief."""
+    """The stop re-ring's DECISION is pure and shared with delivery: ring iff
+    the queue HEAD is deliverable (ruling R7) — never for a head that
+    build_delivery refuses, which would self-ring forever. The ring itself is
+    a live-pane behavior, exempt per the brief."""
 
-    def test_ring_iff_queue_non_empty(self):
-        self.assertIsNone(sw.select_next(self.root, "a"))   # empty -> no ring
+    def test_ring_iff_head_deliverable(self):
+        self.assertIsNone(sw.next_delivery(self.root, "a", {}))  # empty -> no ring
         msg(self.root, "a", "x", 1000, "hi")
-        self.assertIsNotNone(sw.select_next(self.root, "a"))  # waiting -> ring
+        nd = sw.next_delivery(self.root, "a", {})
+        self.assertIsNotNone(nd[1])                              # deliverable -> ring
+
+    def test_no_ring_for_undeliverable_head(self):
+        d = sw.q_dir(self.root, "a")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "1000-evil.json"), "w") as f:
+            json.dump({"to": "a", "from": "F" * 9000, "ts": 1000, "body": "x"}, f)
+        msg(self.root, "a", "p", 2000, "stuck behind the head")
+        nd = sw.next_delivery(self.root, "a", {})
+        self.assertIsNotNone(nd)          # queue is non-empty...
+        self.assertIsNone(nd[1])          # ...but the head must not ring
+
+    def test_stop_event_rings_iff_head_deliverable_process_level(self):
+        # regression for ruling R7, end to end: a real `swarm event stop`
+        # against a fake herdr that logs its argv. Undeliverable head + queued
+        # mail behind it -> ZERO send-text; deliverable head -> exactly one.
+        bindir = os.path.join(self.root, "fakebin")
+        os.makedirs(bindir)
+        log = os.path.join(self.root, "herdr.log")
+        with open(os.path.join(bindir, "herdr"), "w") as f:
+            f.write('#!/usr/bin/env bash\necho "$@" >> "%s"\necho "{}"\n' % log)
+        os.chmod(os.path.join(bindir, "herdr"), 0o755)
+        os.makedirs(os.path.join(self.root, "agents"))
+        with open(sw.agent_rec_path(self.root, "kid"), "w") as f:
+            json.dump({"name": "kid", "parent": "operator", "pane": "p1"}, f)
+        env = dict(os.environ, SWARM_DIR=self.root, SWARM_AGENT_ID="kid",
+                   PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+
+        def stop():
+            subprocess.run([SWARM, "event", "stop"], env=env, input=b"{}",
+                           capture_output=True, timeout=60)
+
+        def sent_texts():
+            try:
+                with open(log) as f:
+                    return [l for l in f if l.startswith("pane send-text")]
+            except OSError:
+                return []
+
+        d = sw.q_dir(self.root, "kid")
+        os.makedirs(d, exist_ok=True)
+        evil = os.path.join(d, "1000-evil.json")
+        with open(evil, "w") as f:
+            json.dump({"to": "kid", "from": "F" * 9000, "ts": 1000,
+                       "body": "x"}, f)
+        msg(self.root, "kid", "boss", 2000, "waiting behind")
+        stop()
+        self.assertEqual(sent_texts(), [])   # undeliverable head: no ring
+        os.unlink(evil)                      # now the head is the real message
+        stop()
+        self.assertEqual(len(sent_texts()), 1)  # deliverable head: one ring
 
 
 if __name__ == "__main__":
