@@ -121,6 +121,18 @@ then watched it re-open ([G18's fourth correction](#gap-register), above).
 Where a digit appears in these documents, read it as *evidence that a shape exists*, not as a
 fact about today.
 
+**The instrument can be the corrupted thing.** `release-mgr` reported that a shell *"failed
+while `$?` still reported 0"* — a vivid claim, and wrong. It had measured `$?` **after a pipe**
+(`bash t.sh 2>&1 | head -2; echo $?`), so it read `head`'s status, not `bash`'s. Bash had
+exited 2. Product ran the claim before repeating it, found a syntax error *does* exit nonzero,
+and traced the real mechanism instead: an **even** number of apostrophes re-balances the quote,
+the words between them execute, and a **valid truncated argument** reaches the tool at exit 0.
+Nothing fails.
+
+`release-mgr`'s own verdict: *"I used a corrupted instrument to describe the corruption of
+instruments."* It is the pipe-hides-exit-status trap — the first hazard `cos` ever named for it
+— walked into **in the act of writing a rule about verification.**
+
 **And a rule about when a fix is finished, from `cos`, after it found a call site product's
 report never named.** Product observed that it tests the happy path and the failure path but
 not the *idempotence* path. `cos` gave that its general form:

@@ -541,6 +541,27 @@ all session to mean *"the latest release."*
 > No release was ever misclassified, because no rc has ever existed. **It was a landmine, not a
 > wound** — found only because a report product had no obligation to send was chased one step
 > past agreement.
+>
+> **Where the landmine actually was, and product got this wrong in `#48`'s commit message.**
+> Product wrote *"`release-mgr`'s release gate used `sort -V`."* It did not. Verified against
+> the algorithm `release-mgr` describes — *filter to stable tags, then take the max of an
+> `(M, m, p)` tuple* — on its own adversarial set (`v1.0.0-alpha.1`, `v2.0.0-rc10`, `v0.9.9`,
+> `v0.11.0`, `v0.11.0-rc1`, `v0.12.0-rc1`, `v0.11.1`, deliberately out of creation order). It
+> names `v0.11.1`, as does `bin/swarm`. **Excluding pre-releases *before* the max means there is
+> no pre-release ordering to get wrong.** The `-v:refname` trap cannot reach it.
+>
+> The `sort -V` lived in its **cron prompt** — the standing guidance it writes for a
+> cold-context future self, which also told that future self to build message bodies in single
+> quotes (see G14's fourth strike). Both instructions were wrong; both are replaced.
+>
+> **So the defect was in the guidance, not the code**, and that is the sharper finding. It is
+> **G22 one level up**: a stale instruction, re-asserted verbatim to the reader least able to
+> check it — here not a blocker but a rule, and not a resumed agent but a rebuilt one. Neither
+> agent stated it that way at first; `release-mgr` said *"my own gate"*, product repeated it into
+> git history, and only the checkpoint artifact distinguishes them.
+>
+> Recorded rather than quietly fixed, because `#48`'s commit message is immutable and asserts a
+> defect in a named sibling's code that did not exist.
 
 **The trap is in our shells, not in the tool — and the tool is the only thing here that is
 right.** `git tag` appears **nowhere** in `bin/swarm`. `cmd_update` parses semver into an
