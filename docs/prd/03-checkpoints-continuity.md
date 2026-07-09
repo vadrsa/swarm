@@ -299,12 +299,36 @@ finished tasks. There are exactly three levers and no fourth, since `done` is te
 
 **The counterintuitive trap: trimming `progress` notes reclaims zero injected bytes.** It is
 the field agents most naturally prune when a checkpoint feels heavy, and the only one that
-costs nothing to keep — `restore-state` never injects it. An agent economising there is
-paying with its own memory and buying nothing.
+costs nothing to keep — `restore-state` never injects it, **at any size**. A 200,000-character
+task body adds nothing to the payload. An agent economising there is paying with its own
+memory and buying nothing.
 
-That asymmetry is the whole argument: `open_threads` answers to discipline (`cos` closed
-thirteen and reclaimed 2,855 bytes), and finished tasks answer to nothing an agent can do
-from inside its own checkpoint.
+**The payload has three buckets, and the middle one is a trap:**
+
+| bucket | reclaimable? | do agents reclaim it? | injected |
+|---|---|---|---|
+| `open_threads` | yes | **yes** — closing a thread visibly frees bytes | joined, unbounded |
+| **`progress_summary`** | **fully** | **no** | **verbatim, 1:1, forever** |
+| finished tasks | **no** — see the table above | cannot | title + status + blockers |
+| *task `progress` bodies* | *n/a* | *n/a* | **never — free at any size** |
+
+`progress_summary` is the one nobody reclaims, and the reason is structural rather than lazy.
+The schema describes it as *"overall: is my structure right for my load?"* — a standing
+question, answerable in a sentence (44 characters). The **reconcile ritual then instructs
+every agent to write its reconciliation into the checkpoint**, and this is the field it lands
+in. Measured across the live roster: `rd` 46× the hint, `audit` 45×, `release-mgr` 45×,
+`product` 31×, `cos` 22× (deliberately shrunk). The only agent at 1× is `seedcheck`, which
+never reconciled.
+
+**That is the ritual working exactly as told, into a field re-injected verbatim for the
+agent's whole life.** The remedy is a habit — write the *verdict* in `progress_summary`, put
+the *narrative* in the finished task's `progress` body, where it is durable and free — and
+nothing in the tool says so.
+
+So the three quantities answer to three different things: `open_threads` to discipline (`cos`
+closed thirteen and reclaimed 2,855 bytes), `progress_summary` to a discipline nobody
+practises because the tool asks for the opposite, and finished tasks to nothing an agent can
+do from inside its own checkpoint. Only the last one requires code.
 
 Proposed in [proposal 006](../proposals/006-restore-state-injection.md).
 

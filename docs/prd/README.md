@@ -288,16 +288,31 @@ thread it has ever opened.
 | task lines | 2,404 | — |
 | *…of which finished work* | *1,801* | **grows forever, never shrinks** |
 
-That decomposition inverts the obvious priority. `open_threads` is the **largest**
-component and the one agents attack by hand — but it shrinks when an agent closes a thread.
-Completed tasks are the **smaller** component and the only **monotonic** one: every other
-part of the payload is bounded by what the agent is currently doing. Finished tasks
-accumulate until the agent dies, under a heading that reads `CURRENT TASKS:`.
+That decomposition inverts the obvious priority, and a later ablation across the whole roster
+found a **third** bucket hiding in `progress_summary` — the one nobody reclaims:
 
-So the decision splits. **Retention, not truncation, for `open_threads`** — a closing
-discipline, not a cap, since a blind cap drops the oldest entry and the oldest entry is the
-mission. **Filtering, not discipline, for finished tasks** — they are durable in the file
-and pointless in the injection, and no amount of hygiene stops them accruing.
+| bucket | reclaimable? | do agents reclaim it? | injected |
+|---|---|---|---|
+| `open_threads` | yes | **yes** — closing a thread visibly frees bytes | joined, unbounded |
+| **`progress_summary`** | **fully** | **no** | **verbatim, 1:1, forever** |
+| finished tasks | **no** | cannot | title + status + blockers |
+| *task `progress` bodies* | *n/a* | *n/a* | **never — free at any size** |
+
+`progress_summary` is 33% of `product`'s payload and 34% of `rd`'s, and nobody prunes it
+because **the reconcile ritual instructs every agent to write its reconciliation there.**
+Every agent that has ever reconciled is 15–46× the schema's own 44-character hint; the only
+one at 1× never reconciled. That is the ritual working as told, into a field re-injected
+verbatim for the agent's life.
+
+So the decision splits three ways, and only one part needs code:
+
+- **`open_threads` → a closing discipline.** Not a cap: a blind cap drops the oldest entry
+  and the oldest entry is the mission.
+- **`progress_summary` → a habit nobody has.** Write the *verdict*; put the *narrative* in the
+  finished task's `progress` body, which is durable and free. Product demonstrated it on
+  itself: injection fell 4,043 → 2,806 bytes **while the file grew**.
+- **Finished tasks → a filter.** Durable in the file, pointless in the injection, and
+  reachable by no agent action at all.
 [03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
 
 **G16. Reading the operator's mail destroys it — including `swarm updates --json`.**

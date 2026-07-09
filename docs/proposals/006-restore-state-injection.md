@@ -172,7 +172,17 @@ prune, and the only one that costs nothing to keep.
 - **What it costs:** a resumed agent no longer sees its finished work in the injection. That
   is the point, and the hook already points it at the file. The one real loss is *ambient*
   awareness — an agent skimming the injection will not be reminded that it already did
-  something. Mitigated by `progress_summary`, which survives and is where that belongs.
+  something. **The context belongs in the finished task's own `progress` body**, which is
+  durable and costs zero injected bytes (verified: a 200,000-character task body adds *nothing*
+  to the payload). That is exactly where the filter leaves it.
+
+  > **Correction.** An earlier draft of this proposal said the loss was *"mitigated by
+  > `progress_summary`, which survives and is where that belongs."* **That was wrong, and
+  > backwards.** `progress_summary` is injected **verbatim, 1:1, every session, forever**. It
+  > is the single worst place to put narrative about finished work. `cos` caught this from
+  > `release-mgr`'s ablation data, and pushed back on *"where that belongs"* directly. It was
+  > right. Following the old advice literally would have converted a monotonic 12–15% problem
+  > into a discretionary 33% one — and called it a fix. See **THE THIRD BUCKET** below.
 
 **ALTERNATIVES**
 
@@ -189,6 +199,79 @@ prune, and the only one that costs nothing to keep.
   parent judges. The injection is the thing that should be selective, never the file.
 - *Do nothing.* Defensible today at 4–15%. Indefensible over a standing agent's life, since
   this is the one component that only grows.
+
+## THE THIRD BUCKET — and it is the one this proposal nearly recommended
+
+`cos` routed a tension in *this document's own mitigation*, from `release-mgr`'s ablation
+rather than its own. I reproduced the ablation independently against the installed hook,
+zeroing one field at a time across the live roster:
+
+| agent | total | `open_threads` | task lines | *…done* | **`progress_summary`** |
+|---|---:|---:|---:|---:|---:|
+| `cos` | 12,665 | 7,135 | 2,659 | 2,056 | 990 (**7%**) |
+| `release-mgr` | 8,618 | 3,392 | 2,031 | 1,237 | 1,967 (**22%**) |
+| `rd` | 5,917 | 1,760 | 891 | 802 | 2,041 (**34%**) |
+| `audit` | 6,659 | 2,816 | 442 | 376 | 1,984 (**29%**) |
+| `product` | 4,043 | 812 | 860 | 54 | 1,360 (**33%**) |
+
+So there are **three buckets, not two**, and the middle one is a trap:
+
+| bucket | reclaimable? | do agents reclaim it? |
+|---|---|---|
+| `open_threads` | yes | **yes** — closing a thread frees bytes, visibly |
+| **`progress_summary`** | **fully** | **no** — rewriting it feels like bookkeeping, not accretion |
+| finished tasks | **no** | cannot: only a filter reaches them |
+
+**Two facts make the middle bucket worse than it looks**, both measured:
+
+1. **A task's `progress` body costs zero injected bytes at any size.** A 200,000-character
+   body adds *nothing* to the payload. `progress_summary` is injected **1:1** — 500 characters
+   in, 500 bytes out.
+2. **`progress_summary` is not drifting; the tool is asking for it.** The schema describes it
+   as *"overall: is my structure right for my load?"* — a standing question, answerable in a
+   sentence (44 characters). The reconcile ritual then tells every agent to write its
+   reconciliation into the checkpoint, and this is the natural field. The result, measured
+   across the roster:
+
+   | agent | `progress_summary` | vs. the schema's own 44-char hint |
+   |---|---:|---:|
+   | `rd` | 2,033 | **46×** |
+   | `audit` | 1,984 | **45×** |
+   | `release-mgr` | 1,959 | **45×** |
+   | `product` | 1,350 | **31×** |
+   | `cos` | 983 | 22× (deliberately shrunk last cycle) |
+   | `seedcheck` | 35 | 1× — *it never reconciled* |
+
+   Every agent that has ever reconciled is 15–46× over. The one that never did sits at 1×.
+   **That is not sloppiness; it is the ritual working as instructed**, into a field that is
+   re-injected verbatim for the agent's whole life.
+
+**This does not change decision 2.** The monotonic bucket is exactly the one a filter should
+own, and the only one a habit cannot reach — `cos` still endorses it. But it corrects this
+proposal's advice about where the displaced context should go, and it exposes a defect this
+proposal does not fix:
+
+> **`progress_summary` is a narrative field, injected 1:1 forever, that the reconciliation
+> ritual actively instructs agents to grow.**
+
+Product is not proposing a fix for that. It is filed as an observation here and in
+[PRD 03](../prd/03-checkpoints-continuity.md), because the remedy is a *habit* — write the
+verdict, not the narrative; put the narrative in the task body, which is free — and this
+project's order is that conventions earn tooling.
+
+**Product's own `progress_summary` was 31× the hint while this document recommended the field
+as a remedy.** It has been rewritten, and the discipline measured on the way through:
+
+| | before | after |
+|---|---:|---:|
+| `progress_summary` | 1,350 chars | 121 chars |
+| checkpoint on disk | 8,089 B | **8,273 B** (grew) |
+| `restore-state` injects | 4,043 B | **2,806 B** (−31%) |
+
+The narrative was not deleted. It moved into a finished task's `progress` body, where it is
+durable and costs nothing. **The file grew while the injection fell by a third** — the shape
+`cos` named and neither PRD had stated. That is the whole discipline in one measurement, and
+it is available to every agent today, with no code and no decision from anyone.
 
 **DECISION**
 
