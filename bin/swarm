@@ -761,9 +761,12 @@ PY
 
 # ------------------------------------------------------------------ checkpoint
 # swarm checkpoint --help        — print the goal-status state-file schema.
-# swarm checkpoint --context     — read THIS agent's own transcript and print its
-#                                  current context-window occupancy (tokens + pct),
-#                                  so the agent can drop it into its state file.
+# swarm checkpoint --context     — read THIS agent's own transcript (resolved by
+#                                  id via state/<id>.transcript, the pointer the
+#                                  hook records) and print its context-window
+#                                  occupancy, so the agent can drop it into its
+#                                  state file. Never falls back to a glob: the
+#                                  newest .jsonl on disk is usually a sibling's.
 # Every agent writes its own state/<id>.json (it's a plain JSON file it fully
 # controls); this verb is a convenience: the schema reference + the verified
 # context-usage reader. It does not write the file for the agent.
@@ -795,30 +798,64 @@ check ("am I structured right — delegate more? wrap up before context runs out
 then write status/blockers to reflect it. Bump seq each time.
 
   swarm checkpoint --context   # prints the "context" block for your state file
+
+--context prints {"tokens_used":<n>,"transcript":"<path>"} for YOUR OWN transcript,
+resolved by your agent id from the pointer swarm-hook records (state/<id>.transcript).
+If no hook has fired yet it prints {} and explains why on stderr — it will never
+guess, because the newest transcript on disk is usually a sibling agent's.
 EOF
       ;;
     --context )
-      # Read the caller's OWN transcript (path from env, set by the launcher/hook
-      # context, or discovered from the newest transcript for this session). The
-      # occupancy = cache_read + cache_creation + input from the last usage block.
-      CLAUDE_TRANSCRIPT="${CLAUDE_TRANSCRIPT_PATH:-}" python3 - <<'PY'
-import json,os,sys,glob
-tp=os.environ.get("CLAUDE_TRANSCRIPT","")
-# Fallback: newest transcript under ~/.claude/projects for this cwd's project.
-if not tp or not os.path.exists(tp):
-    cands=sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")),
-                 key=lambda p: os.path.getmtime(p), reverse=True)
-    tp=cands[0] if cands else ""
-WINDOWS={"opus":1000000,"sonnet":1000000,"haiku":200000}
+      # Read the CALLING agent's OWN transcript. Resolution is deterministic and
+      # by-identity — never "newest .jsonl on the machine":
+      #   1. $CLAUDE_TRANSCRIPT_PATH, if the caller explicitly set it (escape hatch).
+      #   2. state/<my-id>.transcript — the pointer swarm-hook records from the
+      #      transcript_path Claude puts on EVERY hook payload. This is the normal path.
+      # There is deliberately NO glob fallback. Every agent in a project shares one
+      # ~/.claude/projects/<slug>/ dir, so the newest .jsonl there is routinely a
+      # SIBLING's — the old fallback silently reported another agent's token count.
+      # A wrong number that looks right is worse than no number: if we cannot prove
+      # the transcript is ours, we report `{}` (unknown) and say why on stderr.
+      # The occupancy = cache_read + cache_creation + input from the last usage block.
+      init_swarm_paths
+      CLAUDE_TRANSCRIPT="${CLAUDE_TRANSCRIPT_PATH:-}" \
+      SWARM_AGENT_ID="${SWARM_AGENT_ID:-}" STATE_DIR="$STATE_DIR" python3 - <<'PY'
+import json,os,sys
+tp=os.environ.get("CLAUDE_TRANSCRIPT","").strip()
+me=os.environ.get("SWARM_AGENT_ID","").strip()
+why=""
+if tp and not os.path.exists(tp):
+    why="CLAUDE_TRANSCRIPT_PATH is set but does not exist"; tp=""
+if not tp:
+    # The pointer the hook records for THIS agent, by id. No id => not a swarm
+    # subagent (e.g. the operator's root shell): nothing to resolve, and guessing
+    # would hand back some agent's transcript at random.
+    if not me:
+        why="SWARM_AGENT_ID is unset (not a swarm subagent)"
+    else:
+        ptr=os.path.join(os.environ["STATE_DIR"], me+".transcript")
+        try:
+            with open(ptr) as fh: tp=fh.read().strip()
+        except OSError:
+            why=f"no transcript recorded yet for '{me}' (no hook has fired); {ptr} is absent"
+        else:
+            if not tp:
+                why=f"{ptr} is empty"
+            elif not os.path.exists(tp):
+                why=f"recorded transcript for '{me}' no longer exists: {tp}"; tp=""
+if not tp:
+    # HONEST UNKNOWN. Same empty-object shape the no-usage case has always
+    # returned, so `"context": <this>` stays schema-valid for the state file.
+    print(f"swarm checkpoint --context: transcript unknown — {why}", file=sys.stderr)
+    print(json.dumps({})); sys.exit(0)
 last=None
-if tp and os.path.exists(tp):
-    with open(tp) as fh:
-        for line in fh:
-            try: rec=json.loads(line)
-            except: continue
-            u=(rec.get("message") or {}).get("usage") or rec.get("usage")
-            if isinstance(u,dict) and any(k in u for k in ("input_tokens","cache_read_input_tokens")):
-                last=u
+with open(tp) as fh:
+    for line in fh:
+        try: rec=json.loads(line)
+        except: continue
+        u=(rec.get("message") or {}).get("usage") or rec.get("usage")
+        if isinstance(u,dict) and any(k in u for k in ("input_tokens","cache_read_input_tokens")):
+            last=u
 if not last:
     print(json.dumps({})); sys.exit(0)
 used=(last.get("cache_read_input_tokens",0)+last.get("cache_creation_input_tokens",0)
