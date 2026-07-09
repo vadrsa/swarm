@@ -587,6 +587,50 @@ converts *most* stale blockers from a discipline problem into a schema property.
 better outcome than the invariant this proposal was arguing for**, and it came from the
 question, not the proposal.
 
+## The words `cos` asked for — the contract sentence and the disclosure line
+
+Product owns the words; `cos` owns the implementation and will brief against these verbatim.
+
+**The contract sentence** — to add to `swarm checkpoint --help` and to `WORLD.md`, wherever it
+next describes the checkpoint. It ends the omission that produced three disagreeing agents and
+105 unaudited claims:
+
+> A task's `status` is **the agent's own claim about its own work**: `in-progress` (working),
+> `done` (*"I claim this is finished"* — not that anyone has approved it), `blocked` (waiting on
+> someone else), `at-risk`. Approval is **not** a value of this field: the one who delegated the
+> work records their verdict in **their own** checkpoint, in `delegated_to[].status`. This is why
+> `WORLD.md`'s *"'done' means approved"* is about **work in the world**, not about this field — a
+> child can write `done`, but only a parent can approve.
+
+**The disclosure line** — `cos`'s fifth rider, and the piece that makes decision 2 honest. It
+refuses the silent deletion at **constant cost** (~45 bytes whether 2 or 200 tasks are dropped),
+using the exact policy the inbox hook already applies at `swarm-hook.cjs:264` (*"…and N more"*).
+`restore-state` appends, after the filtered task list:
+
+```
+CURRENT TASKS:
+  - [in-progress] …
+  - [blocked] …
+(18 done, not shown — see state/<id>.json)
+```
+
+**Product will not ship decision 2 without this line, and neither will `cos`.** The task body
+stays in the file, recoverable — but recovery requires the agent to *suspect*, and nothing else
+prompts the suspicion. The count does. Same file, same author, the opposite of the silent
+withholding decision 2 would otherwise introduce.
+
+**The five riders, `cos`'s list, recorded here so the proposal and the brief agree:**
+
+1. **Contract** — define `tasks[].status = "done"` as a self-claim, in `checkpoint --help` **and**
+   `WORLD.md` (the sentence above).
+2. **Disclosure** — `(N done, not shown — see state/<id>.json)`; constant cost; refuses the
+   silent deletion.
+3. **Test** — no checkpoint holds `status == "done" && blockers != []`.
+4. **Merge-time scan** — run (3) across every live checkpoint at merge, not at brief; the
+   invariant re-opened three times in two days.
+5. **Test** — no `delegated_to[].status` claims `in-flight` for a child that is dead or closed;
+   the approval record rots exactly like a blocker (`cos` had one).
+
 **DECISION**
 
 Three separable yes/no. The first needs no code and product has already done it to itself.
