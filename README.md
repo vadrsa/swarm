@@ -83,7 +83,6 @@ through. It surfaces only real blockers to you.
 Under the hood the agent uses the verbs directly, e.g.:
 
 ```sh
-SWARM_ID=$(swarm start); export SWARM_ID
 id=$(swarm spawn "build the importer" --model opus --label importer)   # -> "importer"
 swarm wait "$id"          # blocks until it reports done/question/blocked
 swarm graph               # see the whole living tree
@@ -97,9 +96,10 @@ words. A name identifies one agent for the swarm's whole lifetime — a repeat g
 
 ## State
 
-Runtime state lives in a `.swarm/` directory in your project (one subdir per
-swarm run). It's a paper trail, safe to delete between runs. **Add `.swarm/` to
-your project's `.gitignore`** so it isn't committed.
+One swarm per project: runtime state lives directly in your project's `.swarm/`
+directory (`agents/`, `updates/`, `inbox/`, `state/`, `settings/`, `names`). It's
+a paper trail, safe to delete between runs. **Add `.swarm/` to your project's
+`.gitignore`** so it isn't committed.
 
 ## How it stays reliable
 
