@@ -71,6 +71,10 @@ its entire purpose.
 
 `mint_id(base)`:
 
+0. **Seed the ledger from `agents/`** — `init_swarm_paths` ledgers any registry row
+   whose name the ledger lacks. Every verb calls it, so a name is recorded before
+   anything can delete the record that carries it. (Added by PR #24; see the defect
+   below.)
 1. Take an **atomic `mkdir` lock** on `names.lock` (up to 100 tries at 100ms, then
    proceed anyway). This serializes check-and-append, so two concurrent spawns
    cannot claim the same name.
@@ -78,10 +82,26 @@ its entire purpose.
    is belt-and-braces: a hand-created or pre-ledger registry row still blocks its
    name.
 3. Walk `base`, `base-2`, `base-3`, … until one is not taken.
-4. **While walking, absorb into the ledger** any skipped name that `agents/` holds
-   but the ledger does not. Without this, that name would be freed the moment its
-   agent was reaped — so after absorption the ledger alone is a complete record.
-5. Append the winner. Release the lock. Print it.
+4. Append the winner. Release the lock. Print it.
+
+**The ledger was, until PR #24, incomplete — and the "one agent, forever" guarantee
+did not actually hold.** Absorption used to happen *inside* the collision loop, so it
+only ran for a candidate that collided. A registry row that never passed through
+`mint_id` — hand-created, restored from a backup, or left by an older layout — was
+never absorbed. It still blocked its name at mint time (because `taken` unions
+`agents/`), but the instant `reap` deleted that row the name was **silently freed**,
+and a later spawn re-minted it: two different agents, same id, in one swarm's history.
+
+Absorbing at mint time could never have closed this, and the reasoning is worth
+keeping: `mint_id` runs on **spawn**, which is *after* the `reap` that already dropped
+the name. The fix had to move earlier than spawn — into the path every verb takes.
+
+This is a gap the PRDs missed. These documents asserted the guarantee held because
+`WORLD.md` and three code comments said so; the code disagreed with all four, and
+engineering found it. Recorded here rather than quietly corrected, because the
+register's whole premise is that *"where the code and the docs disagree, that
+disagreement is recorded."* The docs were not wrong about the intent — they were wrong
+that the intent was implemented.
 
 A **confirmed-failed spawn keeps its name burned**: `cmd_spawn` deletes
 `agents/<id>.json` on failure but never touches the ledger, because that id's
@@ -97,7 +117,9 @@ reintroduce the bug.
 
 - A name identifies **exactly one agent for the swarm's entire lifetime**. Not one
   live agent — one agent, ever. Including dead ones. Including reaped ones.
-  Including ones whose spawn failed.
+  Including ones whose spawn failed. *(True as of PR #24. Before it, a registry row
+  that had never passed through `mint_id` lost its name on `reap` — the guarantee was
+  documented in four places and implemented in none of the cases that mattered.)*
 - An id is always informative: derived from an explicit label, or from the task's
   meaningful words. Never `a1`, never `claude`, never empty.
 - A label that cannot produce a slug is an error at spawn time, not a silent

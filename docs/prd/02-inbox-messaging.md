@@ -217,6 +217,36 @@ macOS pays a Python startup.
 come from the sender's clock. All agents are on one machine today, so this is
 sound; it would not survive distribution.
 
+**G14 — delivery is guaranteed; *integrity of the body* is not, and nothing says
+so.** The durability claim covers the message from the moment `swarm send` receives
+it. It says nothing about the shell that invoked `swarm send`, and that is where a
+message can be silently mutilated.
+
+Every example this product ships shows a double-quoted body — `WORLD.md` twice, the
+usage string, and the help text. In a double-quoted shell string, backticks and `$`
+are evaluated. Since every agent writes markdown, and markdown names a verb or a flag
+with backticks, an agent sending `` the `wait` verb blocks `` transmits `the  verb
+blocks`: the word is deleted, and `wait` is *executed* as a command.
+
+This is not hypothetical. It happened to `cos` — the agent that writes the most shell
+in the graph — inside a message explaining an engineering decision, and it ate the two
+subjects of the sentence. `cos` caught it and resent a correction. A reader who
+received only the first copy would have read a grammatical sentence that had quietly
+lost its referents.
+
+`cmd_send` is **not** at fault: it passes the body to Python as an environment
+variable under a quoted heredoc, so nothing is evaluated inside the tool. By the time
+`swarm` runs, the word is already gone and nothing downstream can recover or even
+detect it. The defect is that the documentation teaches the habit that destroys the
+message.
+
+The irony worth recording: `spawn` already solved this. It writes an agent's task to a
+**file** rather than a command line, with a comment explaining that a quote-heavy
+prompt re-parsed through a pane shell breaks. That reasoning was never carried across
+to `send`. Proposed fix in [proposal 004](../proposals/004-send-quoting-hazard.md);
+the durable answer is a `--stdin`/file body, since no quoting style is safe for all
+message bodies (single quotes break on an apostrophe).
+
 ## Open product questions
 
 1. **Should the operator be *notified*, not just addressable?** *(Narrowed by

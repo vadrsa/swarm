@@ -67,10 +67,20 @@ separate log.
 ### Seeding
 
 `swarm spawn` writes a well-formed checkpoint before the agent's first turn. The
-mission is `--role` if given; else `<slug>: <first 100 chars of task>`; else the
-task truncated. `tasks[]` starts with one entry `t1` holding the delegated task,
-`status: "in-progress"`, `progress: "just spawned"`. Overall `status: "on-track"`,
-`progress_summary: "seeded at spawn; not yet reconciled"`.
+mission is `--role` if given; else it is derived from the task: **the task's first
+sentence**, reproduced byte-for-byte when it fits, and otherwise cut at a **word
+boundary** with the elision marked. `tasks[]` starts with one entry `t1` holding the
+delegated task, `status: "in-progress"`, `progress: "just spawned"`. Overall
+`status: "on-track"`, `progress_summary: "seeded at spawn; not yet reconciled"`.
+
+*Until PR #23 the seed was a blind `task[:100]` / `task[:120]` slice.* That is worse
+than cosmetic, and the mechanism is instructive: the restore hook re-injects `MISSION`
+and `tasks[0].title` into the agent's context on **every** `SessionStart`, so an agent
+inherited the mid-word truncation after every compaction and restart, forever, unless
+it noticed and hand-repaired its own checkpoint. A seed defect is not a one-time
+blemish — it is a permanent input to the continuity mechanism. (Observed directly: the
+agent maintaining these PRDs was restored with the mission `"…(the swarm tool: a CLI
++ h"` and had to repair it by hand.)
 
 Seeding matters for a mechanical reason: the restore hook always has a file to
 inject, and the agent always starts from a valid envelope rather than inventing
