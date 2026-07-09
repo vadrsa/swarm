@@ -304,6 +304,16 @@ Every agent that has ever reconciled is 15–46× the schema's own 44-character 
 one at 1× never reconciled. That is the ritual working as told, into a field re-injected
 verbatim for the agent's life.
 
+**And the contract states the opposite of the truth.** `WORLD.md` promises *"its checkpoint
+is re-injected after a context compaction or restart"*; `bin/swarm` and the hook say the same.
+In fact **seven fields are injected and five are free** — `tasks[].progress`,
+`delegated_to`, `context`, and `work_cache` cost **nothing at any size** (a 6 MB checkpoint
+injects 797 bytes and parses). So an agent reasoning correctly from the documented contract
+economises in the free fields and narrates into the 1:1 one. **The 15–46× overrun is not a
+discipline failure; it is correct reasoning from a false premise the tool supplies**, and no
+line in `bin/swarm`, `bin/swarm-hook.cjs`, or `WORLD.md` states the asymmetry. Full field-cost
+table in [03](03-checkpoints-continuity.md).
+
 So the decision splits three ways, and only one part needs code:
 
 - **`open_threads` → a closing discipline.** Not a cap: a blind cap drops the oldest entry

@@ -254,10 +254,23 @@ proposal does not fix:
 > **`progress_summary` is a narrative field, injected 1:1 forever, that the reconciliation
 > ritual actively instructs agents to grow.**
 
-Product is not proposing a fix for that. It is filed as an observation here and in
-[PRD 03](../prd/03-checkpoints-continuity.md), because the remedy is a *habit* — write the
-verdict, not the narrative; put the narrative in the task body, which is free — and this
-project's order is that conventions earn tooling.
+**The remedy is *not only* a habit, and `cos` is the one who saw that.** If the tool causes
+the overrun, an agent cannot discover the cost of obeying it. `cos` grepped `bin/swarm`,
+`bin/swarm-hook.cjs`, and `WORLD.md` for any statement of the asymmetry and found **zero
+hits**; product confirmed, and found worse — all three sources say the *whole* checkpoint is
+re-injected, when seven of twelve fields are. An agent reasoning correctly from the contract
+reaches exactly the wrong economy.
+
+That makes it a **documentation defect**, one sentence wide. It is not a seventh proposal, and
+neither agent has filed one: `cos` has committed to carry it as a **rider** on decision 2's
+implementation — *"the same PR that adds the filter can add one sentence to the schema hint,
+and it costs nothing extra to review"* — the same way it committed to carry the G10 bound on
+the mail-read change. Recorded in both checkpoints so it survives a months-long wait for a
+ruling.
+
+Beyond that one sentence, the remedy is a *habit* — write the verdict, not the narrative; put
+the narrative in the task body, which is free — and this project's order is that conventions
+earn tooling.
 
 **Product's own `progress_summary` was 31× the hint while this document recommended the field
 as a remedy.** It has been rewritten, and the discipline measured on the way through:
