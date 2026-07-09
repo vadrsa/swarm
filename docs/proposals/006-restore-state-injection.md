@@ -15,11 +15,12 @@ workaround for one agent's misuse of `status`, and that agent was product.
 
 Three changes, smallest first. Only the second touches code.
 
-1. **Repair the schema, by convention, now — and re-check it immediately before (2) ships.**
-   A task carrying an unresolved blocker is `blocked`, not `done`. Product corrected its own
-   two entries; `release-mgr` later produced the same state independently and corrected its
-   own. **The invariant re-opens because nothing enforces it** (G7), so it is decision 2's
-   *precondition*, not its tidy companion — see the correction under EVIDENCE.
+1. **Repair the schema, by convention, now — and re-check it at the moment (2) merges.**
+   A task carrying an unresolved blocker is `blocked`, not `done`. **Three agents have produced
+   the state independently** — `product` (repaired), `release-mgr` (repaired), `cos` (live) —
+   none coordinating, each shortly after arguing the invariant to someone else. **The invariant
+   re-opens because nothing enforces it** (G7), on a timescale of hours, so it is decision 2's
+   *precondition* and wants a **test**, not a convention. See the corrections under EVIDENCE.
 2. **Filter the restore injection to `status !== "done"`.** One predicate, no special case.
    Nothing durable is lost: task `progress` bodies are never injected anyway, and the hook
    already tells the agent *"Re-read your full checkpoint at `state/<id>.json`."*
@@ -143,6 +144,38 @@ tasks were not done; *my work* was done and the *task* was waiting on a decision
 > Re-simulated against its corrected file: **32 tasks → 4 kept, 28 dropped, zero live decisions
 > lost.** The filter is safe on `release-mgr` *because it repaired the data*, which is exactly
 > the ordering this correction imposes.
+>
+> ### Third occurrence — the ordering constraint is load-bearing, not cautious
+>
+> Two days after `cos` found the trap in product's file and refused to spring it, **`cos`'s own
+> checkpoint has it.** Verified against the live roster:
+>
+> ```
+> cos t37   status=done
+>           blockers=["operator decision: `swarm send --stdin`/`--body-file`, or
+>                      explicitly accept the hazard and document the incantation"]
+>
+> filter simulation: 38 tasks → 3 kept, and t37 is DROPPED —
+>                    an open operator decision on G14, gone from its continuity injection.
+> ```
+>
+> **Three agents. Three independent occurrences. No coordination.** `product` t5/t6 (repaired),
+> `release-mgr` t19 (repaired), `cos` t37 (live). Each arrived at the same encoding alone, and
+> each was the agent who had most recently argued the invariant to someone else.
+>
+> That settles the question product got wrong. *"Nobody else produces that state"* was not merely
+> a snapshot mistaken for a property — **the state is what the schema invites.** `done` reads as
+> *"I am finished."* A blocker records *"someone else is not."* Both are true, and there is one
+> field.
+>
+> So the ordering is not caution. **Decision 1 must land before decision 2, and the
+> implementation must verify the scan returns zero across every checkpoint at *merge* time, not
+> at brief time.** The invariant re-opens on a timescale of hours.
+>
+> `cos` said the invariant *"wants a test, not just a PRD line, or it will rot back in."* **It has
+> rotted back in three times in two days.** The evidence is now strong enough that product would
+> carry the test as a rider on decision 2 rather than trust the convention — which is `cos`'s own
+> recommendation, made before it became the third example of why.
 >
 > The methodological error is worth keeping. Product measured a set, found it empty but for
 > itself, and wrote *"nobody else produces that state"* — present tense, universal. A scan of a
@@ -363,9 +396,13 @@ Three separable yes/no. The first needs no code and product has already done it 
 2. **Code:** `restore-state` injects only `status !== "done"` tasks. Yes/no.
    *(Product recommends yes. `cos` will brief and judge it.)*
 
-> **Ordering constraint, added after the trap re-opened.** **(1) must land before (2)**, and
-> the implementation must verify the scan `status == "done" AND blockers != []` returns **zero
-> across every checkpoint** before the predicate goes in. Shipping (2) against the roster as it
+> **Ordering constraint — load-bearing, after the trap re-opened twice.** **(1) must land before
+> (2)**, and the implementation must verify the scan `status == "done" AND blockers != []` returns
+> **zero across every checkpoint, at merge time rather than at brief time.** Three agents have now
+> produced the state independently (`product`, `release-mgr`, `cos`); it re-opens on a timescale of
+> hours, so a scan run when the work is briefed proves nothing about the moment the predicate
+> ships. Carry the check as a **test**, not a convention — `cos`'s own recommendation, made before
+> it became the third example of why. Shipping (2) against the roster as it
 > stands today would silently drop a pending operator decision from `release-mgr`'s continuity
 > injection. The convention is not hygiene that makes the filter tidy — it is the filter's
 > precondition, and nothing enforces it.

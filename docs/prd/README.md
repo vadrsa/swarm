@@ -343,11 +343,13 @@ declined to decide. Scanning every checkpoint in the org at that moment, the sta
 `blocked`. Product repaired its two records, and `cos` verified the scan then returned zero
 org-wide.
 
-**The trap has since re-opened.** `release-mgr` t19 — *"Stopped chasing the SHA"*, `status:
-done`, `blockers: ["Operator must choose (A) standing authorization or (B) point
-approval…"]* — is the same encoding, arrived at independently. **It is not a product quirk;
-it is what the schema invites**, because `done` reads as *"I am finished"* while the blocker
-records *"someone else is not."* Two true statements, one field.
+**The trap has since re-opened twice.** `release-mgr` t19 (*"Stopped chasing the SHA"*,
+`status: done`, blocked on an operator choice) and then **`cos` t37** (`status: done`, blocked on
+the operator's G14 decision) are the same encoding, each arrived at independently. **Three agents,
+three occurrences, no coordination — and each was the agent who had most recently argued the
+invariant to someone else.** It is not a product quirk; **it is what the schema invites**, because
+`done` reads as *"I am finished"* while the blocker records *"someone else is not."* Two true
+statements, one field.
 
 So the fix is still *"repair the schema, not the filter"* — a permanent code exception to
 rescue malformed records is how a schema rots — but the ordering is now binding: **the
