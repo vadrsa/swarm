@@ -1,0 +1,54 @@
+# THE WORLD — swarm, simplest form
+
+Nine concepts, four verbs. Everything the system stores is a fact a file can
+witness: who, to whom, when, what, and whether it has consumed its turn. It
+stores no claim about attention, compliance, or intent.
+
+## What exists
+
+1. **Agent** — a Claude session in a herdr pane, with a **name**, a **parent**,
+   and a **journal**. The pane is ground truth; anyone may read anyone's pane.
+2. **The tree** — your parent judges and approves your work; you judge your
+   children's. The human **operator** roots the tree. Who may message whom is
+   judgment, not a rule engine.
+3. **`swarm spawn <name> "<task>"`** — create a child. The name is chosen, not
+   derived; a name ever used is an error to reuse (its journal file is the
+   tombstone).
+4. **`swarm send <name>`** — **a message is a claim on one turn.** It is queued
+   as a file and delivered **whole, one per turn, oldest first**, headed by its
+   sender and their relation to you (parent / child / sibling / OPERATOR).
+   `queue/<name>/delivered/` is the world-readable record that it consumed a
+   turn. A message must fit one turn's injection (8000 chars, header included)
+   or send refuses it: put the content in a file, send the path. Prefer
+   `send <name> --stdin < file` — a positional body is a shell word.
+5. **The journal** — `.swarm/journal/<you>.md`. Append-only, timestamped, your
+   own words. Its tail is re-injected when you restart or compact — it is your
+   continuity, so write it as the thing you'd need to resume. World-readable:
+   freshness and trajectory are observable facts, not self-claims.
+6. **`swarm ps`** — the one view: the tree, each agent's liveness, queue depth,
+   idle-since, and last words — with the operator's waiting mail at the top.
+7. **`swarm close <name>`** — end an agent and its whole subtree. Files stay.
+8. **Judge artifacts, never claims.** Work, replies, and journals are judged by
+   reading them. There is no ack, no status taxonomy, no compliance record:
+   whether a message was *obeyed* is judged by its sender, from the work.
+9. **Duties** — briefed, not enforced: journal before going idle; report to
+   your parent when done or stuck; a reconciliation is a journal entry that
+   names its falsifier (the observation that would show you are off track).
+
+## What is promised, plainly
+
+- **Delivered means delivered.** A message moves to `delivered/` only after its
+  bytes drained into the recipient's turn. A failed injection stays queued and
+  is offered whole again next turn. Nothing is ever silently dropped.
+- **Promptness is best-effort.** Send rings the recipient's pane; on Stop an
+  agent with waiting mail re-rings its own. If a ring fails, the message waits
+  for the next natural turn — delayed, never lost.
+- **The operator is a mailbox, not a node.** Messages to `operator` wait until
+  the human looks; `ps` shows them waiting. Nothing pushes to the human, and
+  nothing ever refuses a message to the operator.
+- **Nothing tracks obedience.** If you need to know a message landed in
+  someone's head, read their reply, journal, pane, or work — you are the
+  incentivized party, and you have eyes.
+
+State lives under `./.swarm` (override: `SWARM_DIR`). This page is the whole
+contract; `swarm world` prints it.
