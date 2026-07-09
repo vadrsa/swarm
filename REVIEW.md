@@ -129,3 +129,76 @@ caveat are sub-facts of the message concept, not new concepts — neither will *
 agent that knows concept 4. Plumbing (`agents/`, `event/`, `settings/`, the env vars) is set
 up for the agent and never needs understanding to act correctly. The 27 → 9 claim holds for
 the artifact as built.
+
+---
+
+# ADDENDUM — targeted re-check of rulings R1–R6 (2026-07-09)
+
+**Scope:** the five amended behaviors at `simplest-impl` HEAD `780b4ef`, per `simplest`'s
+request. The original review above examined `d98213c` and stays true of it. Commit
+provenance confirmed: `780b4ef` is code-identical to the implementer-reported `5bdf2eb`
+(`git diff 5bdf2eb 780b4ef -- simplest/swarm simplest/test_swarm.py` is empty; the amend only
+evicts two `.pyc` files, adds `.gitignore`, and commits this REVIEW.md). **Method unchanged:**
+their amended suite re-run under my own hand — **38/38 pass**; my original 22-test suite
+re-run — exactly the 3 finding-demonstration tests now fail; plus a new 10-test targeted
+suite, **10/10 pass**:
+`/private/tmp/claude-501/-Users-vadrsa-git-swarm/760d36ec-d7c8-451c-a899-e32d20eb57c5/scratchpad/addendum_tests.py`
+
+Because my finding-2 and finding-3 tests died on the *removed API* (`delivery_parts` gone,
+`build_delivery` re-signatured) — an incidental reason — I did not accept those failures as
+proof; each ruling below was re-verified against the new behavior directly.
+
+## Per-item verdicts
+
+1. **R1, trailer gone / delivered whole at any depth — PASS.** `grep -c 'more waiting' swarm`
+   → 0. Executed: a boundary message (head+body = exactly 8000) with **150** messages queued
+   behind it is accepted by send's check and delivered by `deliver_once` at exactly 8000
+   chars, ending at the body's last byte — no truncation marker, no trailer, file moved to
+   `delivered/`. The size check now measures precisely what delivery injects
+   (`send_size_error` = `delivery_head` + body, swarm:227–238), so "delivered whole" is
+   unconditional, not pessimistically approximated. My finding-2 hole is closed by
+   construction, not by widening a margin.
+2. **R2, undeliverable file — PASS, and the blocking call is the right one, with one hazard
+   to own.** Executed: a hand-crafted record whose header alone exceeds the cap → `deliver_once`
+   emits **nothing** (my emit callback would have failed the test if called), moves nothing,
+   and the file stays counted in q=. A good message queued behind it is not delivered — the
+   deliberate block. **Judgment:** consistent. One-per-turn *oldest-first* is the design's
+   ordering promise; silently skipping the head would make delivery order lie, and the old
+   bare-header alternative moved a file to `delivered/` whose content never arrived — the
+   exact class of false claim this design exists to kill. Never-delivered ≠ dropped, and the
+   file is visible. **The hazard (SUSPECT, components demonstrated):** while such a file heads
+   a queue, every Stop sees a non-empty queue and re-rings, and every rung turn delivers
+   nothing — an indefinite self-ring loop burning turns until a human deletes the file. Both
+   components verified (select_next stays non-empty; deliver_once stays False); the live loop
+   itself is pane behavior I did not run. Reachable only by a hand-crafted write. Worth one
+   sentence in WORLD.md or a `ps` marker on an undeliverable queue head; the designer should
+   own it, not the implementer.
+3. **R3, broken stdout — PASS.** Process-level with a real closed-read-end pipe: exit code is
+   now **0** (was 120) and the message file still does not move. The fd-1-to-/dev/null
+   re-point (swarm:265–274) does exactly what the commit claims. My finding-6 test fails
+   precisely on `rc == 120` with rc now 0 — the right reason.
+4. **R4, junk counted not hidden — PASS.** A non-JSON `.json` file in the queue renders as
+   `q=1+1?` at the CLI level (real `swarm ps` subprocess) and via `count_junk` = 1; selection
+   still skips it and delivers the good message. No junk → no suffix. My finding-8
+   "invisible" observation is resolved: the unknown is now shown as an unknown.
+5. **R5, dead compact / reattach — PASS.** Pure-renderer tests: dead agents collapse to ONE
+   shared `dead: a, b` line, names only (no q=, no [DEAD] tokens); a live child of a dead
+   parent reattaches to its nearest **living** ancestor (verified two ways: dead parent at
+   root → child renders at root depth; dead middle of a three-deep chain → leaf renders
+   nested under the live grandparent, and `dead: mid`); herdr-unreachable still renders
+   every agent `[?]` with **no** dead line — liveness is never asserted without ground truth.
+6. **R6, disclosures — PASS.** The deviations table now lists `SWARM_READY_TIMEOUT`
+   (swarm:760), the `help` verb (swarm:911), reserved names `operator`/`delivered`
+   (swarm:695–696), and `LAST_WORDS_CAP` (swarm:34) — all four citations spot-checked against
+   the amended file and exact. The trailer's former deviation entry is marked deleted. The 7
+   new shipped regression tests cover findings 1, 2, 3, 6, 8 and both R5 behaviors.
+
+## Addendum verdict
+
+**PASS.** All five amended behaviors do what the rulings say under execution; the disclosure
+gap is closed. Open items for the designer, unchanged from the original review: finding 5
+(design doc vs brief on `--model`/`--cwd`/`--stdin`), finding 7 (the `agents/` registry
+sentence — R5 fixes the *rendering* consequence; the never-pruned records remain, now
+costing one shared line), and the R2 self-ring hazard above. Concept recount unchanged: 9 —
+R1 removed the one borderline sub-fact; R4's `+M?` suffix is `ps` showing a fact, not a new
+concept. I fixed nothing.
