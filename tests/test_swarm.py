@@ -507,5 +507,43 @@ class TestNameEdges(Base):
                          "refused name must not claim a tombstone")
 
 
+class TestQueuePut(Base):
+    """Regression: cmd_send named the queue file {ts}-{sender}.json and wrote
+    it via tmp+rename, so a same-millisecond same-sender same-recipient
+    collision silently replaced the first message — the drop WORLD.md
+    forbids. queue_put claims the name with O_EXCL and bumps ts until free."""
+
+    def test_same_ms_collision_keeps_both_messages_in_order(self):
+        fn1 = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                       "body": "first"})
+        fn2 = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                       "body": "second"})
+        self.assertNotEqual(fn1, fn2)
+        d = sw.q_dir(self.root, "a")
+        self.assertTrue(os.path.exists(os.path.join(d, fn1)))
+        self.assertTrue(os.path.exists(os.path.join(d, fn2)))
+        # oldest-first order preserved: the first send stays the queue head
+        w = sw.list_waiting(self.root, "a")
+        self.assertEqual([r["body"] for _, _, r in w], ["first", "second"])
+
+    def test_bump_lands_on_the_next_free_millisecond(self):
+        for i in range(3):
+            msg(self.root, "a", "p", 1000 + i, f"pre {i}")
+        fn = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                      "body": "late"})
+        self.assertEqual(fn, "1003-p.json")
+        w = sw.list_waiting(self.root, "a")
+        self.assertEqual([r["body"] for _, _, r in w],
+                         ["pre 0", "pre 1", "pre 2", "late"])
+
+    def test_exhausted_bump_space_raises_never_overwrites(self):
+        for i in range(1000):
+            msg(self.root, "a", "p", 1000 + i, f"pre {i}")
+        with self.assertRaises(FileExistsError):
+            sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                     "body": "one too many"})
+        self.assertEqual(len(sw.list_waiting(self.root, "a")), 1000)
+
+
 if __name__ == "__main__":
     unittest.main()
