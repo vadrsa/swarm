@@ -6,8 +6,8 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #26 (`04f5260`). Newest tag: **`v0.9.0`** — `main` is
-five commits ahead of it, carrying three code fixes (PRs #23, #24, #25). That tag is
+Baseline: `main` through PR #28 (`364e58f`). Newest tag: **`v0.9.0`** — `main` is
+seven commits ahead of it, carrying three code fixes (PRs #23, #24, #25). That tag is
 itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
@@ -45,35 +45,85 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; three more
-(G14, G15, G16) were found later, in use. They are restated in context inside each
-PRD; this is the index. **Severity is product severity** — how badly the thing a user
-was promised fails to happen.
+The onboarding pass that produced these PRDs surfaced thirteen issues; four more
+(G14–G17) were found later, in use. They are restated in context inside each PRD;
+this is the index. **Severity is product severity** — how badly the thing a user was
+promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `04f5260`:** three of the four critical gaps are closed — G2 by
-PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
-half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration
-note (#21), but the guard that was supposed to make the miss impossible still
-cannot fire on a minor bump — and cannot, while the milestone is preserved by
-policy. **G13 is a decided no-op, not an open request** (see its entry). Closed
-gaps are kept below under [Resolved](#resolved), not deleted: a register that
-forgets what was broken cannot show that the same class of thing broke twice.
+**Status as of `364e58f`:** of the original four critical gaps, three are closed — G2
+by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
+half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
+(#21), but the guard that was supposed to make the miss impossible still cannot fire
+on a minor bump — and cannot, while the milestone is preserved by policy. **G13 is a
+decided no-op, not an open request** (see its entry). Closed gaps are kept below under
+[Resolved](#resolved), not deleted: a register that forgets what was broken cannot
+show that the same class of thing broke twice.
 
-Three gaps were added *after* the onboarding pass, all found in use or by running the
-code rather than reading it: **G14** (a message can be silently corrupted by the
-caller's shell), **G15** (`swarm updates` prints unbounded history), and **G16**
-(reading the operator's mail destroys it; the injected inbox header over-counts).
+**A new critical gap now leads the list: G17**, message loss above ~64 KB. It is the
+only entry here where a guarantee `WORLD.md` states in plain words is provably false,
+reproducibly, today.
 
-**And one entry is a correction against this register itself.** PR #24 fixed a case
-where `reap` *could* free a name — a guarantee `WORLD.md`, three code comments, and
-[PRD 05](05-agent-naming.md) all asserted held. It did not. Engineering found it;
-product had asserted it. That is recorded in PRD 05 rather than quietly patched,
-because a register that only catches other people's errors is not being honest about
-where errors come from.
+Four gaps were added *after* the onboarding pass, none of them visible by reading the
+code: **G14** (a message can be silently corrupted by the caller's shell), **G15**
+(`swarm updates` prints unbounded history), **G16** (reading the operator's mail
+destroys it), and **G17** (the delivery hook destroys any message over ~64 KB).
+
+**Two entries here are corrections against this register itself**, and that is the
+point of keeping them:
+
+- PR #24 fixed a case where `reap` *could* free a name — a guarantee `WORLD.md`, three
+  code comments, and [PRD 05](05-agent-naming.md) all asserted held. It did not.
+  Engineering found it; product had asserted it. **Four sources of documentation cannot
+  corroborate one another.**
+- G16 originally carried a second claim — that the inbox header's acknowledgement is
+  *silent* — which was **wrong**, and which `cos` refuted by running the fixture rather
+  than trusting a sibling who had been right three times running. Chasing that refutation
+  is what uncovered G17. Product asserted a defect from reading; engineering disproved it
+  by executing; executing found a real one. The retraction is kept in place.
+
+The method that produced every one of G14–G17: **run the code against a fixture; do not
+assert a guarantee from a document.**
 
 ### Critical — a stated guarantee does not hold
+
+**G17. A message larger than ~64 KB is silently destroyed by the delivery hook.**
+This is the most serious defect in the register, and it was found by chasing a wrong
+claim of product's own (see G16).
+
+`inbox-check` builds the injection, calls `process.stdout.write(...)`, then renames the
+message into `read/`, then `process.exit(0)`. The ordering is deliberate — its comment
+reads *"Emit the injection FIRST, then mark read. If we crashed between the two, the
+messages would be re-injected next turn (safe) — losing one is not."*
+
+**Node defeats that reasoning.** When stdout is a pipe — which is exactly how Claude Code
+invokes hooks — `write()` of more than the pipe buffer returns `false` and *queues* the
+remainder. It does not block, does not throw, and does not finish. `process.exit(0)` then
+discards the queued bytes. The write never happened, and nothing says so.
+
+Measured against the shipping hook, with the exact cliff:
+
+| Body size | Bytes reaching the harness | Result |
+|---:|---:|---|
+| 65,265 | 65,529 | delivered |
+| **65,266** | **65,536** | **destroyed** |
+| 400,000 | 65,536 | destroyed |
+
+Beyond the cliff the harness receives JSON cut mid-string, fails to parse it, and injects
+**nothing** — while the message has already been moved to `read/` and the hook has exited
+`0`. The message is not delayed. It is consumed, never delivered, with a success code and
+no error on any channel. Isolated to `process.exit()`: the same 200 KB write completes in
+full if the process is allowed to exit naturally.
+
+Reachable only by a **single** message over the threshold — the `CAP` guard bounds the
+multi-message case at `8000 + one body`. And `cmd_send` has **no size guard at all**
+(`cos`), so nothing prevents it.
+
+This directly contradicts the product's central promise, that *"the message is surfaced
+into the agent's context on its next turn — even if the agent was busy or the doorbell was
+missed."* Delivery is guaranteed for messages under 64 KB. Above it, guaranteed loss.
+[02](02-inbox-messaging.md)
 
 **G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
 defaults `--cwd "$PWD"`. In the swarm that produced these PRDs, **eleven agents
@@ -220,13 +270,21 @@ script that polls `swarm updates --json` silently consumes the operator's escala
 and leaves nothing in the terminal for the human. Found by `rd`; the fix is held by
 `cos` pending a decision on read semantics.
 
-The same entry covers a second, subtler defect on the agent side: **the injected inbox
-header counts messages the agent is never shown.** The header uses `unread.length` while
-the loop injects `injectedCount`, so a capped delivery announces *"You have 5 new
-message(s)"*, injects three, and marks those three read. Demonstrated against the real
-hook. The product therefore already performs **implicit, silent, cumulative
-acknowledgement** — the behaviour is right, the silence is the bug.
-[02](02-inbox-messaging.md) · [proposal 005](../proposals/005-inbox-read-ack.md)
+> **Retraction.** This entry originally carried a second claim: that the injected inbox
+> header announces more messages than it shows, and that the product therefore performs
+> *silent* cumulative acknowledgement. The first half is literally true — the header is
+> built from `unread.length` while the loop injects `injectedCount` — but the conclusion
+> was wrong, and `cos` disproved it by running the fixture rather than accepting it. The
+> hook emits `…and N more; full messages in inbox/<id>/` whenever anything is withheld,
+> unconditionally. **The acknowledgement is not silent; it is announced.** This document
+> even quoted that line in G10 while the register asserted its absence two sections away.
+>
+> What survives is a copy improvement, not a defect: `Showing 3 of 5 new messages` names
+> what *was* shown rather than only what was withheld. Filed as that, and nothing more.
+>
+> Kept rather than deleted, because the register's premise is that a record which forgets
+> what was wrong cannot show how it was wrong. Product asserted a defect from reading;
+> engineering refuted it by executing. The same method then found G17.
 
 **G15. `swarm updates` prints the entire history of the swarm, every time.**
 `cmd_updates` iterates the event directory, filters only by `--id`, and prints every

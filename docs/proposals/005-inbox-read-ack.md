@@ -5,6 +5,29 @@
 
 ---
 
+> ## Correction, 2026-07-09 — one supporting claim in this proposal was wrong
+>
+> This document repeatedly describes today's cumulative acknowledgement as **silent**, and
+> recommends a header line to fix that "defect." **The acknowledgement is not silent.** The
+> hook unconditionally appends `…and N more; full messages in inbox/<id>/` whenever it
+> withholds anything. `cos` refuted the claim by running the fixture rather than accepting
+> it from a sibling who had been right three times running.
+>
+> **What survives:** the recommendation is unchanged — *adopt the acknowledgement model,
+> reject the notification model, unify nothing.* Every argument for that verdict stands on
+> its own evidence. The observation that the product **already performs implicit cumulative
+> prefix-ack** stands too, and remains the strongest argument for the operator's instinct.
+> What falls is one word: *silent*. The proposed header line is a **copy improvement**, not
+> a defect fix, and should not be carried as a rider on any code change.
+>
+> **What chasing the refutation found:** a real, critical, message-loss defect —
+> **G17**, a message over ~64 KB is destroyed by the delivery hook, silently, with a
+> success exit code. Product asserted a defect from reading; engineering disproved it by
+> executing; executing then found a worse one. That sequence is the argument for the method,
+> and it is why this correction is printed here rather than edited away.
+
+---
+
 **TITLE**
 
 Replace pushing message bodies into an agent's context with a notification the agent
@@ -21,8 +44,12 @@ straightforwardly right and one that is a regression, and they have been bundled
    trades a guarantee the system currently *has* for a saving it does not need, and it
    introduces a failure mode that reconciliation cannot reliably catch.
 3. **Adopt one piece of the diagnosis regardless:** today's 8,000-character cap already
-   performs a silent, implicit cumulative ack. That is a real defect and it should be
-   made explicit — but the fix is a header line, not a new verb.
+   performs an implicit cumulative ack — announced, not silent (see the correction above).
+   That behaviour is *correct*, and it is the reason the operator's instinct is right.
+   Making it explicit needs a verb, not a bug fix.
+4. **Fix G17 first, ahead of all of this.** A message over ~64 KB is destroyed on
+   delivery. It is unrelated to the redesign, it is one line in the hook, and no decision
+   about read/ack semantics matters while the channel loses large messages outright.
 
 The unifying instinct — one read/ack model for agents and the operator — is the part I
 think is wrong. Agents and the operator are not the same kind of recipient, and the
@@ -56,9 +83,9 @@ required from the agent to receive it. Delivery is **atomic with the turn**. The
 step at which the agent can fail to collect its mail, because collection is not something
 the agent does.
 
-**3. Today's cap already performs a silent cumulative ack — the task description missed
-this.** The hook injects messages until the running total exceeds 8,000 characters, then
-marks read **exactly the prefix it injected** (`for i = 0; i < injectedCount; i++`). The
+**3. Today's cap already performs a cumulative ack — the task description missed this.**
+The hook injects messages until the running total exceeds 8,000 characters, then marks
+read **exactly the prefix it injected** (`for i = 0; i < injectedCount; i++`). The
 remainder stays unread and is re-offered next turn.
 
 I did not infer this. I ran the shipping hook against a synthetic inbox of five 2,600-character
@@ -68,13 +95,18 @@ messages:
 HEADER:          [swarm inbox] You have 5 new message(s) from other agents:
 bodies injected: 3
 still unread:    2      moved to read/: 3
+…and 2 more; full messages in inbox/tester/
 ```
 
 So the system **already** acknowledges a prefix and leaves a suffix — exactly the semantics
-the proposal wants to introduce. It just does it invisibly, and points the agent at a
-directory (`…and 2 more; full messages in inbox/<id>/`) rather than giving it a verb.
-**The proposal's cumulative-ack model is not a new idea for this system; it is a
-description of what the code already does, minus the honesty.**
+the proposal wants to introduce — and it *tells the agent so*, pointing at a directory
+rather than giving it a verb. **The proposal's cumulative-ack model is not a new idea for
+this system; it is a description of what the code already does, without a verb to name it.**
+
+*(An earlier draft of this proposal said "minus the honesty" and called the ack silent.
+That was wrong; the `…and N more` line ships. See the correction at the top. The
+substantive point — that cumulative ack already exists and works — is what matters, and it
+is unaffected.)*
 
 **4. The `injectedCount > 0` guard means the cap is not a cap.** Same method, one 20 KB
 message followed by a 100-byte one:
@@ -89,6 +121,13 @@ The oversized message is injected **in full, 2.5× over the cap**, because the l
 least one. So "capped at 8k" is false for the case that matters most and true only where
 truncation would have been harmless. Any context-economy argument built on that cap is
 built on a number the code does not honour.
+
+**This escape hatch is the delivery vehicle for G17.** The `CAP` guard bounds the
+*multi-message* case at `8000 + one body`, which can never reach the 64 KiB pipe buffer.
+Only a **single** message over the threshold gets there — and it gets there precisely
+because the loop refuses to withhold the first one. `cos` found the other half: `cmd_send`
+has **no size guard at all**, so nothing upstream prevents it. An oversized body is queued,
+injected whole, truncated by the pipe, and destroyed.
 
 **5. Context economy is real but small.** Measured across the five messages actually in my
 inbox today: **16,302 characters, roughly 4,076 tokens**. A notification would be about 20.
@@ -125,8 +164,16 @@ another turn" to "an agent that takes a turn and doesn't feel like reading."**
 
 ## What the crash-safety story actually becomes
 
-Today: emit, then rename. A crash between them re-injects next turn. **Fails safe by
-re-showing.**
+Today, *as designed*: emit, then rename. A crash between them re-injects next turn.
+**Fails safe by re-showing.**
+
+Today, *as built*: that ordering assumes the emit either happened or didn't. **It can
+half-happen.** `process.stdout.write()` to a pipe queues its overflow and
+`process.exit(0)` discards it, so above ~64 KB the hook renames a message it never
+delivered — and the failure is not a crash, so the "crash between the two" reasoning never
+engages. See G17. **The current design's fail-safe property is real for small messages and
+inverted for large ones**, which is worth holding in mind before replacing it with a
+different one.
 
 Proposed, per the task: `read` prints, `ack` renames. Between them sits an *agent decision*
 and a second process invocation. The window is no longer microseconds inside one process;
@@ -200,18 +247,23 @@ them again, exactly as the cap does today.
 
 **DECISION**
 
-Three separable yes/no answers. The first is the urgent one.
+Four separable yes/no answers. **The first is not part of your redesign and outranks all
+of it.**
 
+0. **Fix G17 now** — do not `process.exit()` before stdout drains; add a size guard to
+   `send`; truncate an oversized injection with a pointer to the file rather than emitting
+   it whole. Yes/no. *(Product recommends yes, immediately. Every message over ~64 KB is
+   currently destroyed. No read/ack semantics matter while that is true.)*
 1. **Operator mailbox: make acknowledgement explicit and cumulative** (`swarm updates`
    becomes non-destructive; add `swarm inbox ack <id>`). Yes/no.
 2. **Agents: keep injecting message bodies** rather than switching to notify-and-pull.
    Yes/no. (Product recommends yes — keep injection.)
 3. **Add `swarm inbox read`/`ack` as verbs available to both**, governing only what the
-   injection cap leaves behind, and make the cap's cumulative ack visible in the injected
-   header instead of silent. Yes/no.
+   injection cap leaves behind. Yes/no. *(The header line is a separate copy nit; do not
+   bundle it.)*
 
-If you want one answer rather than three: **adopt the acknowledgement model, reject the
-notification model.**
+If you want one answer rather than four: **fix the message loss, adopt the acknowledgement
+model, reject the notification model.**
 
 **IF NO** — i.e. you adopt the redesign wholesale
 
@@ -225,21 +277,27 @@ the record shows where the disagreement was.
 
 ---
 
-## The one thing I would fix today regardless of this decision
+## The one thing to fix today regardless of this decision
 
-The injected header says:
+Not the header. **G17.**
 
-> `[swarm inbox] You have 5 new message(s)… …and 2 more; full messages in inbox/<id>/`
+A message over ~64 KB never reaches the agent. The hook writes it to a pipe, Node buffers
+the overflow, `process.exit(0)` throws the buffer away, the harness parses truncated JSON
+and injects nothing, and the message — already renamed into `read/` — is gone. Exit code 0.
+No error anywhere. The cliff is exact: 65,265 bytes of body is delivered; 65,266 is
+destroyed.
 
-It reports **5 new messages**, injects **3**, marks **3** read, and points the agent at a
-directory. An agent reading that reasonably believes it has seen five messages. It has seen
-three, and the two it did not see are the two it was never told it was missing — the count
-in the header is of *unread*, not of *injected*.
+This is independent of everything above, it is one line in the hook, and it falsifies the
+sentence `WORLD.md` uses to describe the whole feature: *"the message is surfaced into the
+agent's context on its next turn — even if the agent was busy or the doorbell was missed."*
 
-That is a real, present bug, it costs one line, and it is independent of everything above:
+**How it was found is the argument for how product should work.** I filed a defect
+(the header's acknowledgement is silent) that I had reasoned out from reading the source.
+`cos` did not accept it from a sibling who had been right three times running; it ran the
+fixture, found the `…and N more` line I had myself quoted two paragraphs earlier in
+[PRD 02](../prd/02-inbox-messaging.md), and told me. Chasing *why* I had been wrong is what
+put me back in front of the hook with a synthetic inbox — and that is where G17 was.
 
-> `[swarm inbox] Showing 3 of 5 new messages (2 remain — they will be shown next turn).`
-
-It is also the strongest evidence for the operator's underlying intuition. The system
-already does implicit, silent, cumulative acknowledgement. Making it explicit is right.
-Making it *pull-based* is the part that costs a guarantee.
+The system already does implicit cumulative acknowledgement, and announces it. Making it
+explicit is right. Making it *pull-based* is the part that costs a guarantee. And none of
+it matters until the channel stops eating large messages.

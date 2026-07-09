@@ -102,17 +102,23 @@ next turn (harmless duplicate); the reverse ordering would lose it (unrecoverabl
 
 ## Contracts and guarantees
 
-**Guaranteed:**
+**Guaranteed — for a message body under ~64 KB.** That qualifier is not in `WORLD.md`,
+and it should be: above the threshold the first and third bullets below are **false**.
+See **G17**.
 
 - **The message is never lost.** Once `swarm send` returns 0, the message exists
   on disk in the target's inbox. A dead pane, a busy agent, a missed doorbell, a
-  crashed hook — none of these can destroy it.
+  crashed hook — none of these can destroy it. *(True on disk, always. False on
+  delivery above ~64 KB, where the hook consumes it — G17.)*
 - The write is atomic. A concurrent `inbox-check` never reads a half-written
   message.
 - A message is **never silently dropped** by the hook. If it is not injected this
-  turn, it is not moved to `read/`, so it is injected next turn.
+  turn, it is not moved to `read/`, so it is injected next turn. *(False above
+  ~64 KB: the move happens even though the injection did not — G17.)*
 - Messages are surfaced oldest-first.
 - The hook never breaks the agent's turn. Every failure mode is a silent no-op.
+  *(This one holds, and it is why G17 is invisible: the silent no-op includes
+  silently losing the message.)*
 - The `swarm send` CLI signature is unchanged from the pre-1.0 live-typing
   version — only its contract changed.
 
@@ -205,29 +211,87 @@ message injects **20,224 characters through an 8,000-character cap** — 2.5× o
 argument about the injection's context cost that leans on that number is leaning on a
 number the code does not honour.
 
-**G16 — the inbox header counts messages the agent was never shown.** The injected
-header is built from `unread.length`, but the loop injects `injectedCount`. When the cap
-bites, an agent is told *"You have 5 new message(s)"* and shown **three** — and the three
-are then moved to `read/` while the two it was never told it was missing stay behind.
-Demonstrated against the real hook with five 2.6 KB messages:
+This is not merely a mis-stated bound. **The escape hatch is the delivery vehicle for
+G17**: because the guard cannot withhold the *first* message, a single oversized body
+reaches `process.stdout.write()` whole, overruns the pipe buffer, and is destroyed. The
+multi-message case is bounded at `8000 + one body` and never gets there. And `cmd_send`
+has no size guard, so nothing upstream stops it.
 
+**G17 — a message over ~64 KB is silently destroyed on delivery.** The most serious
+defect in this document, and it directly falsifies the first guarantee above.
+
+`inbox-check` writes the injection to stdout, *then* renames the message into `read/`,
+*then* calls `process.exit(0)`. The comment above that ordering explains the intent:
+
+> *"Emit the injection FIRST, then mark read. If we crashed between the two, the messages
+> would be re-injected next turn (safe) — losing one is not."*
+
+The reasoning is sound and Node defeats it. Claude Code invokes hooks with stdout on a
+**pipe**. `process.stdout.write()` of more than the pipe buffer (64 KiB) returns `false`
+and *queues* the remainder — it does not block, does not throw, and does not complete.
+`process.exit(0)` then discards the queue. The write is never finished, no error is
+raised on any channel, and the rename runs regardless.
+
+Measured against the shipping hook. The cliff is exact:
+
+| Body size | Bytes reaching the harness | Result |
+|---:|---:|---|
+| 65,265 | 65,529 | delivered |
+| **65,266** | **65,536** | **destroyed** |
+| 400,000 | 65,536 | destroyed |
+
+Past the cliff the harness receives JSON truncated mid-string, fails to parse it, and
+injects **nothing** — while the message sits in `read/` and the hook has reported success.
+Isolated to `process.exit()`: a 200 KB write completes in full if the process is allowed
+to exit naturally.
+
+Three properties compound to make it invisible:
+
+1. **`cmd_send` has no size guard whatsoever** (found by `cos`), so nothing prevents an
+   oversized body from being queued.
+2. **G10's `injectedCount > 0` escape hatch** means a single message bypasses the 8,000
+   character budget entirely — so a lone oversized message reaches `write()` in full. The
+   multi-message case is bounded at `8000 + one body` and cannot reach the cliff.
+3. **The hook's own "never break the turn" guarantee** turns the failure into a silent
+   no-op. That guarantee holds. It is precisely what hides this.
+
+The fix is one line in the hook — do not `process.exit()` before stdout drains (use the
+`write` callback, or `process.exitCode = 0` and let Node flush). A size guard on `send`
+and a truncate-with-pointer on the injection are the belt and braces. All three are
+engineering surface; product's contribution is the measurement, not the patch.
+
+---
+
+**G16 — the inbox header over-counts. *Retracted as a defect; kept as a copy note.***
+The injected header is built from `unread.length` while the loop injects `injectedCount`,
+so a capped delivery announces *"You have 5 new message(s)"* above three bodies. That much
+is true. **What product asserted, and got wrong, is that the shortfall is unannounced.**
+
+It is announced. The hook emits, unconditionally, whenever anything is withheld:
+
+```js
+const remaining = unread.length - injectedCount;
+if (remaining > 0) context += `\n\n…and ${remaining} more; full messages in inbox/${id}/`;
 ```
-HEADER:          [swarm inbox] You have 5 new message(s) from other agents:
-bodies injected: 3
-still unread:    2      moved to read/: 3
-```
 
-The trailing *"…and 2 more"* line is technically present, but the header's count and the
-body count disagree, and the header is the sentence that frames everything after it. An
-agent that reads "5 new messages," counts three, and reconciles is being asked to notice
-an arithmetic discrepancy in out-of-band context.
+`cos` disproved the claim by running the fixture instead of accepting it, and noted the
+decisive evidence was not a fixture at all: the line appears in every real capped
+injection, including the ones both agents were reading at the time. This document had
+even quoted that line, two paragraphs above, while the register asserted its absence.
 
-This also means the product **already performs implicit, silent, cumulative
-acknowledgement**: it acks exactly the prefix it delivered. That behaviour is correct —
-it is the *silence* that is the defect. One line fixes it:
-`Showing 3 of 5 new messages (2 remain — they will be shown next turn).`
-Discussed in [proposal 005](../proposals/005-inbox-read-ack.md), which argues this is the
-sound half of a redesign whose other half would cost a delivery guarantee.
+What remains is a wording improvement, worth one line and no more:
+
+> `[swarm inbox] Showing 3 of 5 new messages (2 remain — they will be shown next turn).`
+
+It names what *was* shown rather than only what was withheld. That is clearer. It is not
+a defect.
+
+The observation underneath survives and matters: the product **already performs implicit
+cumulative acknowledgement** — it acks exactly the prefix it delivered, and announces the
+remainder. That is the strongest argument for making acknowledgement explicit, and it is
+why [proposal 005](../proposals/005-inbox-read-ack.md) recommends adopting the ack half of
+the operator's redesign while rejecting the notification half. The proposal's reasoning
+stands; only its characterisation of this line as *silent* does not.
 
 There is **no cap on inbox growth**. A parent that sends faster than a child takes
 turns accumulates an unbounded directory, and each subsequent turn re-reads and
