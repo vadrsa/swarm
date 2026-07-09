@@ -40,6 +40,40 @@ function readStdinJSON() {
 const event = (process.argv[2] || 'stop').toLowerCase();
 const payload = readStdinJSON() || {};
 
+// ------------------------------------------------------------------- dbg
+// Every catch in this file swallows, by design: the prime directive is "best
+// effort — never break the agent's turn". The cost was that a RUNTIME failure of
+// the core subagent->coordinator channel (state records, inbox delivery) was
+// invisible: exit 0, empty stderr, nothing recorded, nothing said.
+//
+// dbg() is the diagnostic seam. Three rules keep it safe:
+//   1. It NEVER throws and NEVER changes control flow. Callers still swallow and
+//      still exit 0. This is a print, not an error path.
+//   2. It writes to STDERR only. stdout carries the harness's
+//      `hookSpecificOutput` JSON (SessionStart / UserPromptSubmit context
+//      injection) — a stray byte there corrupts inbox delivery for every agent.
+//   3. It is SILENT unless SWARM_DEBUG is set. Silent-by-default is deliberate:
+//      this stderr lands in the agent's own human-watched pane. A failure of the
+//      shared channel (disk full, .swarm unmounted) is swarm-wide and already
+//      visible via `swarm status`; logging it unconditionally turns one silent
+//      fault into N panes of noise without adding diagnostic power.
+//
+// Logs the OPERATION and the ERROR only — never message bodies or transcript
+// text. Those are agent-private and this terminal is shared.
+//
+// It reads env directly rather than closing over `id` (declared below), so there
+// is no temporal-dead-zone hazard if a future caller is added above that line: a
+// hook that threw a ReferenceError out of its own logger would break every agent
+// in the swarm at once.
+function dbg(op, err) {
+  if (!process.env.SWARM_DEBUG) return;
+  try {
+    const who = process.env.SWARM_AGENT_ID || '?';
+    const msg = (err && (err.code || err.message)) || String(err);
+    process.stderr.write(`[swarm-hook] ${event} ${who}: ${op}: ${msg}\n`);
+  } catch { /* a failing logger must never break the turn */ }
+}
+
 // SWARM_DIR IS the swarm dir — one swarm per project, flat layout beneath it.
 const swarmDir = process.env.SWARM_DIR || '';
 const id = process.env.SWARM_AGENT_ID || 'unknown';
@@ -71,7 +105,7 @@ if (transcriptPath) {
     const tmp = `${ptr}.tmp`;
     fs.writeFileSync(tmp, transcriptPath + '\n');
     fs.renameSync(tmp, ptr); // atomic: a concurrent reader never sees a partial path
-  } catch { /* best effort — never break the agent's turn */ }
+  } catch (e) { dbg('write transcript pointer', e); /* best effort — never break the agent's turn */ }
 }
 
 // --------------------------------------------------------- restore-state
@@ -105,7 +139,7 @@ if (event === 'restore-state') {
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx },
     }));
-  } catch { /* never break session start */ }
+  } catch (e) { dbg('restore-state injection', e); /* never break session start */ }
   process.exit(0);
 }
 
@@ -120,7 +154,7 @@ if (event === 'precompact-marker') {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(path.join(stateDir, `${id}.compaction-pending`),
       JSON.stringify({ ts: Number(payload.ts) || 0, trigger: payload.trigger || payload.matcher || '' }));
-  } catch { /* best effort */ }
+  } catch (e) { dbg('write compaction marker', e); /* best effort */ }
   process.exit(0); // never block compaction
 }
 
@@ -191,18 +225,18 @@ if (event === 'inbox-check') {
 
     // Mark surfaced messages read by moving them into read/ (atomic rename).
     const readDir = path.join(inboxDir, 'read');
-    try { fs.mkdirSync(readDir, { recursive: true }); } catch { /* best effort */ }
+    try { fs.mkdirSync(readDir, { recursive: true }); } catch (e) { dbg('mkdir inbox/read', e); }
     for (let i = 0; i < injectedCount; i++) {
       const fn = unread[i].fn;
-      try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch { /* best effort */ }
+      try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch (e) { dbg('mark inbox message read', e); }
     }
-  } catch { /* never break the turn */ }
+  } catch (e) { dbg('inbox delivery', e); /* never break the turn */ }
   process.exit(0);
 }
 
 // This swarm's updates/ dir, directly beneath the swarm root.
 const updatesDir = path.join(swarmDir, 'updates');
-try { fs.mkdirSync(updatesDir, { recursive: true }); } catch { process.exit(0); }
+try { fs.mkdirSync(updatesDir, { recursive: true }); } catch (e) { dbg('mkdir updates/', e); process.exit(0); }
 
 // Claude includes the transcript path on every hook payload. We pull the
 // LAST assistant text line as a one-line summary — the "event + summary"
@@ -226,7 +260,7 @@ function lastAssistantText(transcriptPath) {
       text = (text || '').replace(/\s+/g, ' ').trim();
       if (text) return text;
     }
-  } catch { /* best effort */ }
+  } catch (e) { dbg('read transcript', e); /* best effort */ }
   return '';
 }
 
@@ -260,19 +294,52 @@ const fullText = lastAssistantText(transcriptPath);
 const summary = fullText.slice(0, 300);
 
 // Newest state already recorded for THIS agent (used to tell "idle after done"
-// from a real block on a Notification event). Reads the same drop dir readers use.
+// from a real block on a Notification event).
+//
+// Answered from FILENAMES ALONE — zero file reads, zero JSON.parse. Every record
+// is written as `${id}-${ts}-${state}.json`, so the only three fields this
+// function needs are already in the name. The previous implementation read and
+// parsed every file in updates/ on every notification; since PR #16 flattened
+// the layout to one `.swarm/` per project, that dir accumulates every event from
+// every agent that has ever run in the repo, forever. The read was O(n) in a
+// monotonically growing n. It is now O(n) in *directory entries* with no I/O per
+// entry — the dir can grow without the hot path caring.
+//
+// Parsing rule — parse from the RIGHT, never `split('-')[0]`:
+//   agent ids are slugs and routinely contain hyphens (`release-mgr`,
+//   `fix-spawn-seed`), but `ts` is always digits and `state` is always one of
+//   done|idle|blocked|question — neither ever contains a hyphen. So the last two
+//   `-`-separated segments are unambiguous, and everything to their left is the
+//   id verbatim. A left-to-right split would corrupt every hyphenated id.
+//
+// Tie-break is bit-identical to the old code: same `readdirSync` iteration
+// order, same `>=`, so when two records share a ts the later-visited one wins.
+//
+// Divergence, deliberate: a file with a VALID name but a CORRUPT body used to be
+// skipped (parse threw) and the agent's state silently fell back to an older
+// record. Now the name is trusted. That is strictly safer — records are written
+// atomically (write .tmp, rename), so the hook itself can never produce a valid
+// name over a bad body; it takes external corruption. Under that corruption the
+// name is the surviving evidence, and falling back to a stale `done` for an
+// agent that is actually `blocked` is exactly the misclassification this
+// function exists to prevent.
 function lastRecordedState() {
   try {
-    let best = null;
+    let bestTs = -1;
+    let bestState = '';
     for (const fn of fs.readdirSync(updatesDir)) {
       if (!fn.endsWith('.json')) continue;
-      let r;
-      try { r = JSON.parse(fs.readFileSync(path.join(updatesDir, fn), 'utf8')); } catch { continue; }
-      if (r.id !== id) continue;
-      if (!best || Number(r.ts || 0) >= Number(best.ts || 0)) best = r;
+      const parts = fn.slice(0, -'.json'.length).split('-');
+      if (parts.length < 3) continue;          // not `id-ts-state` — ignore
+      const state = parts.pop();
+      const ts = parts.pop();
+      if (!/^\d+$/.test(ts)) continue;         // ts must be digits, else not ours
+      if (parts.join('-') !== id) continue;    // rejoin: the id keeps its hyphens
+      const n = Number(ts);
+      if (n >= bestTs) { bestTs = n; bestState = state; }
     }
-    return best ? best.state : '';
-  } catch { return ''; }
+    return bestState;
+  } catch (e) { dbg('scan updates/ for last state', e); return ''; }
 }
 
 // A Notification fires both for a REAL block (permission prompt / the agent
@@ -330,6 +397,11 @@ const tmp = file + '.tmp';
 try {
   fs.writeFileSync(tmp, JSON.stringify(record));
   fs.renameSync(tmp, file); // atomic: readers never see a half-written file
-} catch { /* best effort — never break the subagent */ }
+} catch (e) {
+  // The core subagent->coordinator channel just failed. Still swallow, still
+  // exit 0 — but this is the one worth seeing under SWARM_DEBUG.
+  dbg('write state record', e);
+  try { fs.unlinkSync(tmp); } catch { /* the .tmp may not exist; ignore */ }
+}
 
 process.exit(0);

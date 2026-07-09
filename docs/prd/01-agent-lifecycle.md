@@ -224,12 +224,22 @@ while the agent sits at a permission prompt. The coupling is to another product'
 user-facing copy.
 
 **A `done` immediately followed by an idle notification is normal** and is why
-`lastRecordedState()` exists. But `lastRecordedState()` scans the entire
-`updates/` directory on every notification, which grows without bound. PR #16
-made this sharper rather than milder: with one flat `.swarm/` per project,
-`updates/` now accumulates every event from every agent that has *ever* run in
-that repo, across all time, with no rotation. Not a correctness issue; an O(n)
-read per event where n only ever grows.
+`lastRecordedState()` exists. `lastRecordedState()` still scans the whole
+`updates/` directory on every notification, but since the filename-scan rewrite
+it does so with **zero file reads and zero `JSON.parse`** — the id, timestamp and
+state it needs are all encoded in `${id}-${ts}-${state}.json`, so a `readdir` is
+the entire cost (measured: 500 files, 32.5ms → 0.7ms per call). The hot path no
+longer cares how large the directory gets.
+
+What remains open is the **growth itself**, not the read: `updates/` still has no
+rotation. PR #16 made that sharper rather than milder — with one flat `.swarm/`
+per project it accumulates every event from every agent that has *ever* run in
+that repo, across all time. This is now a disk-footprint and
+`swarm updates`-readability concern rather than a per-event cost. Retention is
+deliberately not implemented: `swarm wait` blocks on an agent's *newest* record,
+`swarm updates` is the only history surface, and there is still no archive verb
+(see below), so any prune rule risks deleting a record a live reader needs.
+Pruning wants a product decision about what history is for, not a hook patch.
 
 **Nothing distinguishes a finished swarm from an abandoned one.** Previously a
 swarm was a run with an id, so at least the runs were separable on disk. Now the
