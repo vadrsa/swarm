@@ -94,10 +94,10 @@ compatibility). Two things follow from this that trip people up:
 
 Newest first. One entry per breaking release. Ideally every breaking change ships
 in a MAJOR, so that `swarm update`'s `--major` guard stops users on the way in.
-That has not always held: v0.6.0 below is a breaking change that shipped as a
-MINOR, and the guard therefore never fired for it. Where a note's version is not
-`X.0.0`, it is recording exactly that kind of miss — read it before updating past
-it, because nothing in the tooling will make you.
+That has not always held: v0.9.0 and v0.6.0 below are both breaking changes that
+shipped as MINORs, and the guard therefore never fired for either. Where a note's
+version is not `X.0.0`, it is recording exactly that kind of miss — read it before
+updating past it, because nothing in the tooling will make you.
 
 <!-- Template:
 ### vX.0.0 — <title>
@@ -105,6 +105,58 @@ it, because nothing in the tooling will make you.
 **Migrate:** <exact steps a user must take, e.g. finish/close active swarms,
 delete old .swarm/ dirs, re-run install>.
 -->
+
+### v0.9.0 — one swarm per project; agent ids are label-derived slugs
+
+> **This breaking change shipped as a MINOR, and `swarm update` will not warn
+> you about it.** The `--major` guard only fires when the version's major
+> component increments. It did not increment here — v0.8.0 → v0.9.0 is a minor
+> bump — so `swarm update` carries users straight across this break with no
+> prompt and no pointer to this note. If you are updating from v0.8.0 or
+> earlier, this note is your only warning; follow **Migrate** below by hand.
+>
+> (For the record: this was classified MAJOR against the criteria above and
+> released as a MINOR by operator decision, to keep the 1.0 milestone
+> unspent — the same override that produced v0.6.0.)
+
+**Breaking:** two changes, either of which alone would be breaking.
+
+*One swarm per project* (`swarm swarms`, `--id`, and `SWARM_ID` are gone):
+- The **`swarm swarms` verb is removed.** A project has exactly one swarm.
+- **`--id <swarm-id>` is removed** from `list`, `status`, and `graph`, and
+  `swarm start --id` is gone — `start` is now an idempotent init that every
+  verb performs on first use, so it is never required.
+- **`swarm status` no longer returns exit code 3** ("SWARM_ID set but no such
+  swarm"). The condition is unreachable under auto-init; the code is retired,
+  not reused.
+- **`SWARM_ID` is ignored**, not an error: it prints a one-line note to stderr
+  and leaves stdout and the exit code untouched. This is deliberate — live
+  agents carry `SWARM_ID` baked into their pane environment and cannot be
+  changed in place, so erroring would break every running agent's `swarm`
+  verbs the moment the CLI is updated.
+- **The `.swarm/` layout is flattened**: `.swarm/swarms/<swarm-id>/{agents,state,
+  inbox,settings,updates}` and `.swarm/swarms/<swarm-id>/names` move to
+  `.swarm/{agents,state,inbox,settings,updates}` and `.swarm/names`. **A swarm
+  started on an older version cannot continue on this one** — the new CLI reads
+  the flat layout and reports `(no agents)` against an old nested tree, silently
+  orphaning `list`/`graph`/`send`/`wait` for every live agent.
+
+*Agent ids are label-derived slugs* (the `a1`/`a2` id scheme is gone):
+- `swarm spawn` **prints a slug, not `aN`** — `--label fix-send-race` yields the
+  agent `fix-send-race`. Any caller parsing the old id format breaks. The id is
+  the filename everywhere: `agents/<id>.json`, `state/<id>.json`, `inbox/<id>/`,
+  `settings/<id>.*`, and the `id` field in `updates/*.json` records.
+- A name belongs to **one agent for the swarm's entire lifetime**, including
+  across `reap`. Uniqueness lives in a new append-only `names` ledger that
+  `reap` never prunes.
+
+**Migrate:** finish or `swarm close` any active swarm **before** upgrading — its
+agents live in the old nested layout and this version cannot see them. Old
+`.swarm/swarms/` dirs are harmless to leave on disk but are not read; nothing
+migrates them. New swarms started on v0.9.0 get the flat layout automatically.
+Unset `SWARM_ID` in any shell profile or wrapper that exports it (harmless if
+you don't, but it prints a note on every verb). Update any script that parses
+`swarm spawn`'s output for an `aN`-style id.
 
 ### v0.6.0 — durable inbox messaging replaces live-pane `swarm send`
 
