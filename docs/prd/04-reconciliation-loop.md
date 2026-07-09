@@ -131,21 +131,25 @@ Per the design decisions recorded in PR #13:
 
 ## Edge cases and known limitations
 
-**G2 — top-layer escalation has no destination.** The loop's escape hatch is
-`swarm send` to the parent. For every agent directly under the operator — where
-scope and direction decisions actually live — the parent is the operator, and
-`swarm send operator` fails with `unknown agent: operator`. The operator has no
-registry row, no pane, no inbox.
+**G2 — top-layer escalation had no destination. Closed by PR #20 (`1892806`).**
+The loop's escape hatch is `swarm send` to the parent, and for every agent
+directly under the operator — where scope and direction decisions actually live —
+the parent *is* the operator. `swarm send operator` used to fail with
+`unknown agent: operator`, so the loop terminated, at the top, in an instruction
+that could not be followed: an agent that correctly reconciled, correctly found a
+gap beyond its authority, and correctly formatted an escalation had nowhere to put
+it. The operator is now an addressable, durable mailbox
+([PRD 02](02-inbox-messaging.md)), and WORLD.md was updated in the same commit, so
+the chain terminates at something real.
 
-So the loop terminates, at the top, in an instruction that cannot be followed. An
-agent that correctly reconciles, correctly finds a gap beyond its authority, and
-correctly formats an escalation has nowhere to put it. It falls back to printing
-prose into a terminal — which is the failure mode the durable inbox
-([PRD 02](02-inbox-messaging.md)) was built to eliminate, reintroduced at the one
-layer where the stakes are highest.
-
-Every agent is nonetheless briefed, at spawn and on every restore, to escalate
-this way. The instruction is unconditional; the capability is not.
+**The loop's terminal case is now *stored*, not yet *observed*.** The operator's
+mailbox has no doorbell and no hook — an escalation waits for a human to run
+`swarm updates`. So the loop's guarantee at the top layer is weaker than at every
+other layer: a child's escalation to an agent parent is injected into that
+parent's context on its next turn; an escalation to the operator is injected into
+nothing. For a loop whose entire premise is that a misalignment gets *acted on*,
+"the message is on disk" is a floor, not the ceiling. See G8 in
+[PRD 02](02-inbox-messaging.md).
 
 **G6 — the survey step has no verb.** Step 3 says: *"read each child state file at
 `state/<child>.json`."* There is no `swarm checkpoint <id>` read mode. `swarm
@@ -180,10 +184,14 @@ stopped taking turns.
 
 ## Open product questions
 
-1. **Where do top-layer escalations go?** This is the same question as "is the
-   operator a node in the graph." Until it is answered, the loop's terminal case
-   is undefined. Of everything in this PRD set, this is the gap with the clearest
-   product consequence.
+1. **What makes a top-layer escalation *land*?** *(Half-answered by PR #20.)*
+   Escalations now have a destination — `inbox/operator/` — so the loop's terminal
+   case is defined. It is not yet *closed*: nothing tells the human an escalation
+   arrived, so the loop's top layer degrades from "the parent sees it next turn" to
+   "the parent sees it next time they poll." The remaining question is whether the
+   operator should be pushed to (notification), passively surfaced to (unread count
+   in `swarm status`), or whether polling is declared the contract and WORLD.md
+   says so plainly. See question 1 in [PRD 02](02-inbox-messaging.md).
 
 2. **Does the loop change behavior, or produce compliant-sounding checkpoints?**
    The mechanism has exactly one defense against ritual — the commit-to-a-falsifier

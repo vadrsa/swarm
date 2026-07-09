@@ -25,8 +25,10 @@ Everything after the write is an optimization on *when* the agent notices.
 coordinate, and how a child escalates upward.
 
 The **operator** can invoke `swarm send` from a shell, and is the sender-of-record
-when `SWARM_AGENT_ID` is unset (the message is attributed to `operator`). But the
-operator cannot *receive* — see gap **G2** below.
+when `SWARM_AGENT_ID` is unset (the message is attributed to `operator`). Since
+PR #20 the operator can also *receive*: `swarm send operator "…"` is the one
+non-agent target, a durable-file-only mailbox with no pane and no doorbell, read
+via `swarm updates`. See **G2** below for what that does and does not guarantee.
 
 ## Current behavior
 
@@ -130,23 +132,45 @@ instantly."* "Delivered" means *written to the inbox*, not *read by the model*.
 
 ## Edge cases and known limitations
 
-**G2 — the operator cannot receive messages.** This is the most consequential gap
-in the product. `swarm send` requires `agents/<id>.json`; the operator has no
-registry row, no pane, and no inbox directory. `swarm send operator "…"` fails
-with `unknown agent: operator`.
+**G2 — the operator could not receive messages. Closed by PR #20 (`1892806`);
+one edge survives.** The operator is now an addressable target. It is *not* an
+agent — no registry row, no pane, no model, no lifecycle, and it never appears in
+`list` or `graph` — so `cmd_send` special-cases exactly two things for the id
+`operator` and nothing else: it skips the `agents/<id>.json` existence guard, and
+it skips the doorbell (there is no pane to ring) along with the warning that a
+missing pane would otherwise print. Every other unknown id still dies
+`unknown agent: <id>`.
 
-Meanwhile WORLD.md instructs *every* agent that when a gap exceeds its authority,
-it must `swarm send` a GOAL/GAP/EVIDENCE/OPTIONS/ASK escalation **to its parent** —
-and the spawn briefing repeats this verbatim to every agent at birth. For every
-agent in the top layer, the parent is the operator. The escalation contract that
-the reconciliation loop depends on is **unimplemented at exactly the layer where
-scope decisions live**, and nothing warns the agent: it discovers this by trying,
-failing, and improvising. (In the current swarm, the standing agent `rd` reported
-having discovered precisely this.)
+The message file the operator receives is byte-for-byte an agent inbox message —
+same keys, same `<ts_ms>-<from>.json` name, same atomic tmp+rename write — in
+`.swarm/inbox/operator/`. The read path reuses `swarm updates` rather than adding
+CLI surface: when `updates` is run *by* the operator (`SWARM_AGENT_ID` unset or
+empty — the same test `cmd_send` uses to name the human root, and suppressed by
+`--id`, which targets a specific agent's reports) it also drains
+`inbox/operator/`. Read semantics mirror the agent inbox hook exactly: surfacing a
+message marks it read by moving it to `inbox/operator/read/` (atomic rename,
+durable audit trail), and it emits *before* it moves, so a crash between the two
+re-shows a message rather than losing one. An empty inbox is a silent no-op.
 
-The consequence is not merely a missing feature. Escalations from the top layer
-have nowhere to go, so they surface as prose in a terminal the operator may not be
-watching — which is the failure mode the durable inbox was built to eliminate.
+The mark-read is deliberately **best-effort and never fatal** — a failed `makedirs`
+or `os.replace` is swallowed, so an unwritable inbox re-shows its messages on the
+next `swarm updates` rather than erroring or dropping them. The bias is
+consistently toward *showing a message twice* over *losing it once*.
+
+The `--json` shape depends on who asks, never on whether mail exists: agents and
+`--id` keep the historical bare array; the operator gets
+`{"updates":[…],"inbox":[…]}` with `inbox` possibly empty, so a poller sees one
+stable schema either way.
+
+**The surviving edge: the operator is a mailbox, not a node.** It has no pane, no
+doorbell, and no hook. An agent's inbox is *surfaced into its context* by a
+`UserPromptSubmit` hook on its next turn; the operator's inbox is surfaced only
+when a human types `swarm updates`. So G8 below — delivery is guaranteed to the
+inbox, not to the recipient — applies to the operator more sharply than to any
+agent: it is the one recipient in the graph with nothing that will ever tell it
+mail has arrived. An escalation from the top layer is now durably *stored* rather
+than lost, which is a real improvement over failing with `unknown agent`; it is
+not yet durably *seen*.
 
 **G8 — delivery to the inbox is not delivery to the agent.** An agent that has
 finished its work and gone permanently idle never takes another turn. Its
@@ -195,12 +219,18 @@ sound; it would not survive distribution.
 
 ## Open product questions
 
-1. **Give the operator an inbox?** The narrow fix for G2 is a `inbox/operator/`
-   directory plus a way for the human to read it (`swarm inbox`, or surfacing it in
-   `swarm status`). The broader question is whether the operator should be a first-
-   class node in the graph — with a registry row, a checkpoint, and an address —
-   or whether WORLD.md should stop telling top-layer agents to send messages to it.
-   Doing neither leaves the escalation contract a fiction.
+1. **Should the operator be *notified*, not just addressable?** *(Narrowed by
+   PR #20, which answered the first half of this question and made the second half
+   the live one.)* The operator now has `inbox/operator/` and reads it with `swarm
+   updates` — it is addressable. It is still not *reachable*: nothing pushes, so an
+   escalation waits on the human to poll. Every agent gets its inbox injected by a
+   hook; the operator, the one recipient who cannot be hooked, is the one recipient
+   with no push. The options are a real notification (terminal bell, `herdr`
+   notice, OS notification), a passive surface (unread count in `swarm status`, or
+   in the shell prompt), or an explicit decision that polling is the contract and
+   WORLD.md should say so. Doing none of them leaves an escalation durably stored
+   where nobody is looking — a quieter failure than `unknown agent: operator`, and
+   therefore a more dangerous one.
 
 2. **Should `swarm send` report whether the doorbell rang?** Today it exits 0 for
    both "delivered and the agent is reading it now" and "delivered to a pane that

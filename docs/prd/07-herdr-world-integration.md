@@ -48,7 +48,12 @@ That immutability is a double edge, and it is the reason PR #16 could not simply
 retire `SWARM_ID`. A running agent's pane env is fixed for its lifetime, so an
 agent spawned under the old model carries a `SWARM_ID` that the new CLI must
 tolerate. It does — ignoring it with a note on stderr rather than erroring — but
-ignoring is not the same as migrating (gap **G12**).
+ignoring is not the same as migrating: such an agent's verbs keep working while
+silently resolving to the *new* root, where its own state does not live. That was
+gap **G12**, and it was closed by the operator sequencing the cutover by hand
+(close every live agent → advance the checkout → start fresh), not by any code.
+Nothing in the tool enforces or states that sequence, so the next state-schema
+change presents the same hazard to the next person.
 
 The `SWARM_DIR` semantics were a real bug once (PR #6): the hook wanted the
 swarm's own directory, the CLI wanted the project root, and children inherited the
@@ -142,7 +147,8 @@ to the document, which is itself a pointer to the CLI.
 - The CLI tolerates a stale `SWARM_ID` in a pre-cutover agent's pane environment
   (ignored with a note, never an error), so its verbs do not hard-fail. Note this
   is *tolerance*, not compatibility: such an agent still resolves state to the
-  wrong root (**G12**). The hook's old legacy-`SWARM_DIR` fallback is removed.
+  wrong root (**G12**, closed by sequencing the cutover by hand, not by code). The
+  hook's old legacy-`SWARM_DIR` fallback is removed.
 - No daemon, no background process, no persistent connection. State on disk
   survives every restart, including the coordinator's.
 

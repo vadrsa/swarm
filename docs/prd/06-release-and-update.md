@@ -132,10 +132,20 @@ leaves `.swarm/` state and PATH edits alone.
 
 ## Edge cases and known limitations
 
-### G1 — the breaking change shipped as a minor release, and the guard never fired
+### G1 — breaking changes ship as minor releases, and the guard never fires
 
 This is the most serious defect in the product, and it is worth stating the
 evidence rather than the conclusion.
+
+**It has now happened twice, and the second time it was a decision, not an
+accident.** v0.6.0 (PR #10) and v0.9.0 (PR #16) are both breaking; both were
+classified MAJOR against this document's own criteria; both were released as
+MINORs — the second, per its migration note, *"by operator decision, to keep the
+1.0 milestone unspent."* A one-off miss is a process bug. A repeated, deliberate
+one means the policy the guard implements is not the policy the project follows.
+PRs #18 and #21 made the *record* of this honest (see below); neither changed the
+mechanism, and no mechanism change is possible while the intent is to keep
+shipping breaks below `1.0.0`.
 
 PR #10 (`feat!: durable inbox messaging replaces live-pane swarm send (BREAKING)`)
 replaced `swarm send`'s mechanism. Its own PR body says:
@@ -159,12 +169,18 @@ v0.6.0 -> feat!: durable inbox messaging replaces live-pane swarm send (#10)
 
 Two independent failures follow.
 
-**First, the repository documents a release that does not exist.** There is no
-`v1.0.0` tag; the newest is `v0.8.0`. A user who reads `RELEASING.md` looking for
-what changed, or an agent who reads it to classify its own PR, is reading a
-migration note for a phantom version. The document is authoritative by design —
-this is the document that defines what breaking *means* — and it is wrong about
-what shipped.
+**First, the repository documented a release that does not exist. Fixed by
+PR #18 (`42a9fbe`).** There is no `v1.0.0` tag, and never was. The
+`### v1.0.0` heading was corrected to `### v0.6.0` — the tag that actually
+contains the change (`git tag --contains 8e192a4`) — and the note now records
+explicitly that no v1.0.0 was ever cut, so a reader who remembers the old heading
+is not left wondering. PR #21 later added the parallel `### v0.9.0` note for the
+one-swarm-per-project break, which had shipped to `main` with no note at all.
+
+Each note now carries its own warning that `swarm update` will not stop a user
+crossing it, and the section preamble states the general rule: *where a note's
+version is not `X.0.0`, it is recording exactly that kind of miss.* The record is
+now honest. What the record describes is still broken.
 
 **Second, and materially: the `--major` guard is keyed on the tag, not on the
 change.** `cmd_update` compares `target_major` to `major_of_current`. Going
@@ -187,11 +203,26 @@ every safety mechanism intact and none of them engaged.
 The guard was built to make this impossible. It did not fire because nothing
 connects a PR's self-declared semver classification to the tag that a different
 actor later applies. The mechanism is sound; the process around it has no
-interlock. (`0ver` — staying below `1.0.0` while pre-1.0 — is a legitimate choice,
-and PR #14 notes "pre-1.0, no users." But then `RELEASING.md`'s major-guard
-machinery and its `v1.0.0` migration note are both describing a policy the project
-is not following, and the guard is inert for every release it will ever make until
-someone tags a `1.x`.)
+interlock.
+
+**And the project has now stated, in `RELEASING.md` itself, that it intends to
+keep overriding it** — v0.9.0's note records that the release was classified MAJOR
+and shipped MINOR to keep the 1.0 milestone unspent, *"the same override that
+produced v0.6.0."* Staying below `1.0.0` while pre-1.0 (`0ver`) is a legitimate
+choice, and PR #14 notes "pre-1.0, no users." But it cannot coexist with a guard
+that keys on the major component: **under `0ver`, `crosses_major` can never be
+true, so `--major` is unreachable and the guard is inert for every release this
+project will ever make until someone tags a `1.x`.** The migration notes are
+carrying the entire safety burden, and a note only protects a user who reads it
+before running `swarm update` — which is precisely the user the guard existed to
+stop needing.
+
+Two coherent resolutions exist, and this document currently describes neither:
+gate on the *declared classification* rather than the tag's major component (so a
+`feat!:`/MAJOR-classified change requires `--major` regardless of what it is
+tagged), or drop the pretense, tag `1.0.0`, and let semver mean what the guard
+assumes. What is not coherent is a guard whose triggering condition the release
+process is committed to never producing.
 
 ### Other limitations
 
@@ -203,8 +234,11 @@ fire on every run.
 **`swarm update` from an untagged commit reports `from (untagged/dev)`** and
 `major_of_current` is empty, so `crosses_major` is never set — meaning **a dev
 checkout can be moved across a major boundary without `--major`**. The guard
-requires a current tag to compare against. Today `main` is `v0.8.0-1-g09022aa`,
-i.e. untagged, i.e. exactly this case.
+requires a current tag to compare against. `main` currently sits exactly on
+`v0.9.0`, so it does not hit this case today; any commit merged on top of it will,
+until the next tag. Under the `0ver` policy above the distinction is moot — the
+guard cannot fire from a tagged commit either — but the two failures are
+independent and would need fixing separately.
 
 **There is no CHANGELOG.** `cmd_update` prints *"Review the CHANGELOG/RELEASING
 notes"* when it blocks a major. There is no `CHANGELOG`. The PR bodies are the
@@ -219,9 +253,10 @@ note for a version that is never tagged, which is how the current state arose.
 carried across a bad release must `git checkout` by hand in a directory the
 installer chose for them.
 
-**A pre-release is not sticky.** A user on `v0.9.0-rc1` running plain `swarm update`
-(no `--pre`) is moved to the newest *stable* tag, which may be `v0.8.0` — i.e. an
-apparent downgrade. The sort key ranks stable above pre for the *same* version, but
+**A pre-release is not sticky.** A user on `v0.10.0-rc1` running plain `swarm
+update` (no `--pre`) is moved to the newest *stable* tag, which would be `v0.9.0` —
+i.e. an apparent downgrade. The sort key ranks stable above pre for the *same*
+version, but
 across versions the newest stable simply wins. Whether this is correct is a
 judgment call nobody has made.
 
