@@ -6,8 +6,8 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #38 (`cac6f1a`). Newest tag: **`v0.9.0`** — `main` is well
-ahead of it, carrying four code fixes (PRs #23, #24, #25, #31). That tag is
+Baseline: `main` through PR #41 (`4ee90a6`). Newest tag: **`v0.9.0`** — `main` is well
+ahead of it, carrying five code changes (PRs #23, #24, #25, #31, #40). That tag is
 itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
@@ -45,14 +45,14 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; six more
-(G14–G19) were found later, in use. They are restated in context inside each PRD;
+The onboarding pass that produced these PRDs surfaced thirteen issues; eight more
+(G14–G21) were found later, in use. They are restated in context inside each PRD;
 this is the index. **Severity is product severity** — how badly the thing a user was
 promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `cac6f1a`:** of the original four critical gaps, three are closed — G2
+**Status as of `4ee90a6`:** of the original four critical gaps, three are closed — G2
 by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
 half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
 (#21), but the guard that was supposed to make the miss impossible still cannot fire
@@ -65,12 +65,14 @@ show that the same class of thing broke twice.
 (PR #31). It was the only entry where a guarantee `WORLD.md` states in plain words was
 provably false. It is now under [Resolved](#resolved), with its verification.
 
-Six gaps were added *after* the onboarding pass, none of them visible by reading the
+Eight gaps were added *after* the onboarding pass, none of them visible by reading the
 code: **G14** (a message can be silently corrupted by the caller's shell), **G15**
 (`swarm updates` prints unbounded history), **G16** (reading the operator's mail
 destroys it), **G17** (the delivery hook destroyed any message over ~64 KB — resolved),
-**G18** (`restore-state`'s injection grows every cycle, uncapped), and **G19** (the
-injection frames a directive exactly like a peer's opinion).
+**G18** (`restore-state`'s injection grows every cycle, uncapped), **G19** (the injection
+frames a directive exactly like a peer's opinion), **G20** (a message written before the `id`
+field existed can never be acknowledged), and **G21** (`SWARM_AGENT_ID` selects the code path
+under test — a test that never ran the path looks like a passing check).
 
 **Three entries here are corrections against the people who wrote them**, and that is
 the point of keeping them:
@@ -92,7 +94,7 @@ the point of keeping them:
   injected. The fix was right; the reasoning for it was not, and the **real** unbounded
   quantity turned out to be task and thread *count*. Both errors were caught the same way.
 
-The method that produced every one of G14–G19, and caught every error in this list:
+The method that produced every one of G14–G21, and caught every error in this list:
 **run the code against a fixture; do not assert a guarantee from a document — including
 your own, and including one a trusted sibling hands you.**
 
@@ -326,6 +328,69 @@ So the decision splits three ways, and only one part needs code:
   reachable by no agent action at all.
 [03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
 
+**G21. `SWARM_AGENT_ID` selects the code path under test, and every agent has it set by
+construction.** Found by `cos`; verified here. `bin/swarm:505` injects
+`--env SWARM_AGENT_ID=<id>` into every spawned agent, and that same variable selects the
+operator-vs-agent read path in `cmd_updates` and `cmd_inbox`. Same command, same fixture,
+only the environment differs:
+
+```
+SWARM_AGENT_ID=cos     → agent path     exit 0, valid JSON
+env -u SWARM_AGENT_ID  → operator path  exit 0, valid JSON
+```
+
+**Both exit 0. Both print well-formed output. Only one touches the path under test.** An
+agent cannot exercise the operator path in-process without `env -u SWARM_AGENT_ID` — the
+variable that selects the operator path is the one variable that makes it an agent.
+
+It has bitten three agents in a week, each differently: `release-mgr` reported a version-
+decision fact to the operator from a test that never ran the operator path; `cos`'s
+implementation child failed 13 of 51 tests to environment leakage; `cos` itself twice nearly
+filed defects against its own child.
+
+`release-mgr` named it best, and the register keeps its words: *"Not an empty result from a
+failed command, but an **unchanged** result from a command that never ran the code path under
+test. It looks like a passing check."*
+
+That is strictly more dangerous than a failing check. An empty result looks wrong. **An
+unchanged result looks right, exits zero, and prints well-formed output.** It is the false
+negative that passes review — and it is the exact counterpart of the absence claim: *a test
+that never ran the path is an absence claim wearing the costume of a positive one.*
+[02](02-inbox-messaging.md)
+
+**G20. A message written before PR #40 can never be acknowledged.** The `id` field is new.
+`cmd_send` now stamps `id: "<from>-<ts>"` on every message (`bin/swarm:688`), and both
+readers — the Node hook and `cmd_inbox` — display `rec.id`. A message written by the *older*
+`cmd_send` has no such field.
+
+Verified against the shipped binary, on **both** code paths (agent and operator, per G21):
+
+```
+$ swarm inbox read
+--- from operator (15:03:40) [id ?] ---
+
+$ swarm inbox ack operator-1783595020254     # the filename-derived id
+swarm: no outstanding message with id 'operator-1783595020254'
+swarm: outstanding ids: ?
+
+$ swarm inbox ack '?'
+swarm: no outstanding message with id '?'
+```
+
+**Nothing acks it.** Not the filename-derived id, not the literal `?` the tool itself prints.
+The message is permanently outstanding, and the error message offers `?` as though it were a
+claimable id. This directly breaks the implementation's own stated rule — *"`read` prints ids.
+You cannot ack what you were never shown"* — because what you are shown is not an id.
+
+**Not currently biting, and that is `cos`'s doing.** Every one of the 13 outstanding messages
+org-wide carries an id; all 93 legacy messages were consumed by the old auto-ack before the
+cutover, so they sit harmlessly in `read/`. The hazard fires on hand-planted mail, on a
+mailbox restored from a backup, and on the old `.swarm/` directories that the v0.11.0 note
+says are harmless to leave on disk. The fix is one line: derive the id from the filename when
+the field is absent — the filename **is** the id, reordered (`<ts>-<from>.json` ↔
+`<from>-<ts>`). Not in `RELEASING.md`'s migration note.
+[02](02-inbox-messaging.md)
+
 **G19. The injection renders a directive and a peer's opinion identically, and calls the
 operator an agent.** The header is unconditional — *"You have N new message(s) **from other
 agents**"* (`swarm-hook.cjs:237`) — and the operator is not an agent; it has no registry entry,
@@ -337,8 +402,14 @@ in arrival order. A settling message presents as *finished*; an opening one pres
 Nothing in the arrangement rewards reading the short procedural one first — which, in the
 incident recorded under G16, was the operator commissioning an implementation.
 
-`from == "operator"` is already on every record and is a clean discriminator. The fix is small
-and belongs with the `swarm inbox read`/`ack` work now in flight.
+`from == "operator"` is already on every record and is a clean discriminator.
+
+**Half-fixed by PR #40, and the surviving half is the one that matters.** The *capped* header
+is now honest — `Showing 2 of 5 new messages (3 remain…)`. The *uncapped* header is unchanged
+and still reads **"You have N new message(s) from other agents"** (`swarm-hook.cjs:261`).
+Verified on the shipped hook with one operator directive and one peer message, nothing
+withheld. That is exactly the shape of the incident under G16: nothing was capped, so the
+honest header never fires, and the operator is still announced as an agent.
 [02](02-inbox-messaging.md)
 
 **G16. Reading destroys — and *rendering* is recorded as *receipt*.** Two faces of one
@@ -359,9 +430,27 @@ replayed the exact message pair through the real hook: 6,965 chars injected agai
 cap, both bodies present, nothing withheld, both auto-acked.
 
 **Nothing was lost and nothing was truncated. The agent had the text and did not act.**
-Under explicit cumulative acknowledgement the directive would have stayed outstanding and
-re-surfaced every turn until claimed by id. Today the system recorded consumption on the
-strength of having *rendered* the message. **Shown is not understood.**
+The system recorded consumption on the strength of having *rendered* the message.
+**Shown is not understood.**
+
+> **Shipped, and the incident is not covered.** PR #40 delivers explicit cumulative ack —
+> but the hook still renames an *injected* message into `read/` the moment the write drains
+> (`swarm-hook.cjs:318–324`). Explicit ack governs only what the cap **holds back**, which is
+> faithful to the operator's directive (*"governing what the injection cap holds back"*) and
+> is **not the case that motivated it**: in the incident, nothing was withheld.
+>
+> Replayed on the shipped hook — the same two messages, 6,965 chars under an 8,000 cap:
+> both injected, **both auto-acked, zero left outstanding.** One turn later
+> `swarm inbox read` reports *"no unread messages."* A directive that is *shown* is still
+> consumed by being shown, and the agent cannot find it again without knowing to look in
+> `read/`.
+>
+> So `cos`'s own argument — **"a message that stays outstanding is a message that keeps
+> asking"** — now holds for the operator's mailbox and for the capped remainder, and not for
+> the injected prefix. Whether the injected prefix *should* stay outstanding is a live product
+> question: it trades a real re-surfacing guarantee against re-injecting the same bodies every
+> turn until claimed, which is the context cost this register spends most of its length on.
+> Product has not proposed an answer; the brake is at five undecided.
 
 This is also the clearest argument *against* notify-and-pull, and it is why the operator
 rejected that half: the failure was not a missing body, it was a missing action. Replacing

@@ -437,6 +437,30 @@ to `send`. Proposed fix in [proposal 004](../proposals/004-send-quoting-hazard.m
 the durable answer is a `--stdin`/file body, since no quoting style is safe for all
 message bodies (single quotes break on an apostrophe).
 
+## Testing this file's claims
+
+Every measurement in this document was produced by running the shipped code against a
+fixture. **That method has a hole, and it is worth stating before anyone reproduces the
+numbers.**
+
+`SWARM_AGENT_ID` selects which read path executes (**G21**). It is set in every spawned
+agent's environment by construction (`bin/swarm:505`), so an agent testing the *operator*
+path gets the *agent* path instead — silently, at exit 0, with well-formed output. To
+exercise the operator path from inside an agent:
+
+```sh
+env -u SWARM_AGENT_ID SWARM_DIR=<fixture>/.swarm swarm inbox read
+```
+
+Every claim above about the operator's mailbox was verified this way, on **both** paths. The
+claims about `[id ?]` and unackable legacy mail (**G20**) reproduce identically on each,
+which is how they were confirmed to be defects in the reader rather than artifacts of the
+environment.
+
+`release-mgr`'s formulation is the one to hold onto: *"Not an empty result from a failed
+command, but an **unchanged** result from a command that never ran the code path under test.
+It looks like a passing check."*
+
 ## Open product questions
 
 1. **Should the operator be *notified*, not just addressable?** *(Narrowed by
