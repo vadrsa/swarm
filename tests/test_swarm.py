@@ -483,5 +483,29 @@ class TestReRingDecision(Base):
         self.assertEqual(len(sent_texts()), 1)  # deliverable head: one ring
 
 
+class TestNameEdges(Base):
+    """Regression: NAME_RE anchored with $ let 'abc\\n' pass (Python's $
+    matches before a trailing newline), claiming journal/'abc\\n'.md — a
+    DISTINCT tombstone that renders identically to abc's. \\Z closes it."""
+
+    def test_trailing_newline_names_fail_the_regex(self):
+        import re
+        for bad in ("abc\n", "abc-\n"):
+            self.assertIsNone(re.match(sw.NAME_RE, bad),
+                              f"{bad!r} must not validate")
+        self.assertIsNotNone(re.match(sw.NAME_RE, "abc"))
+
+    def test_spawn_refuses_trailing_newline_name_before_tombstone(self):
+        # a real `swarm spawn` process: the refusal must land BEFORE the name
+        # is claimed, so no journal/'abc\n'.md tombstone ever exists
+        env = dict(os.environ, SWARM_DIR=self.root, HERDR_ENV="1")
+        p = subprocess.run([SWARM, "spawn", "abc\n", "task"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("bad name", p.stderr)
+        self.assertFalse(os.path.isdir(os.path.join(self.root, "journal")),
+                         "refused name must not claim a tombstone")
+
+
 if __name__ == "__main__":
     unittest.main()

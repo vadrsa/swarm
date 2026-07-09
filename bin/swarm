@@ -32,7 +32,7 @@ import time
 TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
-NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}$"
+NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 
 # ---------------------------------------------------------------- primitives
 
