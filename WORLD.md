@@ -39,6 +39,11 @@ idempotent init that prints the swarm root; it is never required.)
   doorbell was missed. **This is durable-async, NOT the old live-keystroke model**
   (see the reliability note below): a message is *always delivered*, but a busy
   agent may see it on its next turn rather than instantly.
+- `swarm send operator "<message>"` → the one non-agent target: the **human root**,
+  every escalation's last stop. It has no pane and no doorbell, so the message is
+  durable-file-only (`.swarm/inbox/operator/`); the human reads it by running
+  `swarm updates`. Send up to it exactly like any other id. Every other unknown id
+  is still an error.
 - `swarm updates [--id X]` → subagent reports, each with a state and a one-line
   summary. Your inbox.
 - `swarm wait <id> [--timeout SEC]` → blocks until the subagent's newest report
@@ -179,7 +184,9 @@ What you can see vs. whom you can talk to are different:
   and its subtree. **When it falls short**, tell the child what's missing
   (`swarm send`) so it fixes it. **When you can't decide** — it's a scope or
   direction call above your authority — escalate the decision up to your parent
-  (who may escalate further, up to the operator).
+  (who may escalate further). A root agent's parent is the human: `swarm send
+  operator "…"`, an addressable target like any other. The chain terminates at a
+  real mailbox, so an escalation never has nowhere to go.
 
 ## Watching your own layer
 

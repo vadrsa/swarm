@@ -564,13 +564,24 @@ PY
 # missing/unavailable the message is already durably written and will be picked
 # up on the agent's next turn, so a missing doorbell only delays pickup — it
 # never loses a message.
+#
+# `operator` is a valid target too: it is the human root, WORLD.md's terminal
+# escalation address. It is not an agent — no registry record, no pane, no
+# lifecycle — so it skips exactly two things and nothing else: the registry
+# existence guard, and the doorbell (there is no pane to ring). The message file
+# it receives is byte-for-byte the same shape an agent gets, in inbox/operator/.
+# Every other id still fails hard on a typo.
 cmd_send() {
   init_swarm_paths
   local id="${1:-}" msg="${2:-}"
   [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"'
-  # Validate the target exists (and get its pane for the doorbell).
-  local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
-  local pane; pane="$(json_get "$reg" pane)"
+  # Validate the target exists (and get its pane for the doorbell). The operator
+  # has neither: it is a durable-file-only mailbox.
+  local pane=""
+  if [ "$id" != "operator" ]; then
+    local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
+    pane="$(json_get "$reg" pane)"
+  fi
 
   # Sender: the calling agent's id if we're a subagent, else "operator"
   # (a human/root coordinator that has no agent id of its own).
@@ -601,7 +612,13 @@ PY
   # and surface the message now. The doorbell text is never the message itself
   # (the hook injects the durable inbox content regardless). If the pane is
   # missing/unavailable we do NOT fail: the file is already durable.
-  if [ -n "$pane" ] && ring_doorbell "$pane"; then
+  #
+  # The operator has no pane BY DESIGN, so it gets no doorbell and no warning —
+  # a missing pane is not an anomaly there. The human reads it with `swarm
+  # updates`.
+  if [ "$id" = "operator" ]; then
+    :
+  elif [ -n "$pane" ] && ring_doorbell "$pane"; then
     :
   else
     echo "swarm: note: doorbell to $id skipped (pane unavailable); message is durably queued and will be picked up on $id's next turn" >&2
@@ -641,15 +658,30 @@ ring_doorbell() {
 
 # ------------------------------------------------------------------ updates
 # swarm updates [--id X] [--json]   — read inbound hook records.
+#
+# `updates` is the "what came in for me" verb, so when the OPERATOR runs it
+# (SWARM_AGENT_ID unset/empty — the same test cmd_send uses to name the human
+# root) it ALSO drains inbox/operator/: the escalations agents sent up. Agents
+# get their inbox injected by the inbox-check hook; the operator has no hook, so
+# this is its read path. No new verb, no new surface.
+#
+# Read semantics mirror the agent hook EXACTLY: surfacing a message marks it read
+# by MOVING it to inbox/operator/read/ (atomic rename, durable audit trail). Emit
+# first, then move — a crash between the two re-shows a message (safe) rather
+# than losing it. An --id filter targets a specific AGENT's reports, so it
+# suppresses the operator inbox. An empty inbox is a silent no-op.
 cmd_updates() {
   init_swarm_paths
   local only_id="" as_json=""
   while [ $# -gt 0 ]; do
     case "$1" in --id) only_id="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac
   done
-  python3 - "$UPDATES_DIR" "$only_id" "${as_json:-}" <<'PY'
+  # The operator (no SWARM_AGENT_ID) also drains its own inbox; agents never do.
+  local op_inbox=""
+  if [ -z "${SWARM_AGENT_ID:-}" ] && [ -z "$only_id" ]; then op_inbox="$INBOX_DIR/operator"; fi
+  python3 - "$UPDATES_DIR" "$only_id" "${as_json:-}" "$op_inbox" <<'PY'
 import json,os,sys
-d,only,as_json = sys.argv[1],sys.argv[2],sys.argv[3]
+d,only,as_json,op = sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
 recs=[]
 for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
     if not fn.endswith(".json"): continue
@@ -657,14 +689,49 @@ for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
     except: continue
     if only and r.get("id")!=only: continue
     recs.append(r)
+
+# Unread operator mail = *.json directly under inbox/operator/ (read ones live in
+# read/). Same layout, same filter, same sort as the agent inbox-check hook.
+mail=[]
+if op and os.path.isdir(op):
+    for fn in sorted(os.listdir(op)):
+        if not fn.endswith(".json"): continue
+        try: r=json.load(open(os.path.join(op,fn)))
+        except: continue
+        if isinstance(r.get("body"),str): mail.append((fn,r))
+    mail.sort(key=lambda x: int(x[1].get("ts") or 0))
+
+def mark_read():
+    """Move surfaced messages into read/ (atomic rename). Best-effort, never fatal."""
+    if not mail: return
+    rd=os.path.join(op,"read")
+    try: os.makedirs(rd,exist_ok=True)
+    except OSError: return
+    for fn,_ in mail:
+        try: os.replace(os.path.join(op,fn),os.path.join(rd,fn))
+        except OSError: pass
+
 if as_json:
-    print(json.dumps(recs,indent=2)); sys.exit(0)
-if not recs:
+    # Shape depends on WHO asks, never on whether mail happens to exist:
+    #   agents / --id  -> the historical bare array of update records
+    #   operator       -> {"updates":[...], "inbox":[...]}  (inbox may be [])
+    # A poller therefore sees one stable schema, empty inbox or not.
+    print(json.dumps({"updates":recs,"inbox":[r for _,r in mail]},indent=2) if op
+          else json.dumps(recs,indent=2))
+    sys.stdout.flush(); mark_read(); sys.exit(0)
+
+import datetime
+if not recs and not mail:
     print("(no updates)"); sys.exit(0)
 for r in recs:
-    import datetime
     t=datetime.datetime.fromtimestamp(r.get("ts",0)/1000).strftime("%H:%M:%S")
     print(f"[{t}] {r.get('id')} {r.get('label','')} {r.get('state','').upper()}: {r.get('summary','') or '(no summary)'}")
+if mail:
+    print(f"\n[swarm inbox] {len(mail)} new message(s) to operator:")
+    for _,r in mail:
+        t=datetime.datetime.fromtimestamp(int(r.get("ts") or 0)/1000).strftime("%H:%M:%S")
+        print(f"\n--- from {r.get('from','?')} ({t}) ---\n{r.get('body','')}")
+sys.stdout.flush(); mark_read()
 PY
 }
 
@@ -1221,8 +1288,8 @@ a collision (even with a reaped agent) gets a -2/-3/... suffix.
   swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
                                          prints the agent's id = slugify(L)
   swarm checkpoint --help | --context    goal-status continuity (every agent)
-  swarm send  <agent-id> "<message>"
-  swarm updates [--id <agent-id>] [--json]
+  swarm send  <agent-id|operator> "<message>"   'operator' = the human root (durable file, no pane)
+  swarm updates [--id <agent-id>] [--json]   agent reports; run as operator, also drains its inbox
   swarm wait  <agent-id> [--timeout SEC]
   swarm list  [--json] [--live-only]     agents in this swarm (marks DEAD)
   swarm status [--json]                  reconciled snapshot (restart: read this)
