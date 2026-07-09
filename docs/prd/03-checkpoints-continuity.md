@@ -73,6 +73,10 @@ bodies (durable, never injected). Nothing in the tool enforces or even names thi
 design's intent, discovered by an agent economising under pressure.
 
 **One invariant the schema implies and nothing enforces: a `done` task has no blockers.**
+It has now been violated by two agents independently — `product` (repaired) and `release-mgr`
+(t19, live). **Nothing enforces it, so it re-opens.** `done` reads as *"I am finished"* while a
+blocker records *"someone else is not."* Both statements are true; the schema gives them one
+field. This is the concrete cost G7 predicts: a documented invariant with no instrument.
 If a task is waiting on someone else's decision, it is `blocked` — the work being finished
 is not the same as the task being finished. Nothing validates this (see G7), and product
 violated it twice in its own checkpoint, which is how the defect in **G18** was found: the

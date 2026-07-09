@@ -74,7 +74,7 @@ frames a directive exactly like a peer's opinion), **G20** (a message written be
 field existed can never be acknowledged), and **G21** (`SWARM_AGENT_ID` selects the code path
 under test — a test that never ran the path looks like a passing check).
 
-**Three entries here are corrections against the people who wrote them**, and that is
+**Four entries here are corrections against the people who wrote them**, and that is
 the point of keeping them:
 
 - PR #24 fixed a case where `reap` *could* free a name — a guarantee `WORLD.md`, three
@@ -93,6 +93,12 @@ the point of keeping them:
   misleading about the payload, which is 3× smaller because `progress` fields are not
   injected. The fix was right; the reasoning for it was not, and the **real** unbounded
   quantity turned out to be task and thread *count*. Both errors were caught the same way.
+- **G18, again, and this one is product's alone.** Product wrote *"nobody else produces that
+  state"* after an exhaustive scan that really was exhaustive. `release-mgr` has since produced
+  it. **A scan of a live system is a snapshot, not a property**, and shipping proposal 006's
+  filter on the strength of that sentence would silently drop a pending operator decision from a
+  sibling's continuity injection. The absence claim in its most seductive costume: a complete
+  enumeration over a population that had not finished arriving.
 
 The method that produced every one of G14–G21, and caught every error in this list:
 **run the code against a fixture; do not assert a guarantee from a document — including
@@ -252,12 +258,29 @@ cycle before anyone noticed this was structural rather than a personal hygiene f
 **A schema defect sits underneath it.** The naive fix — drop `status == "done"` tasks —
 would silently delete continuity entries, because a `done` task can carry a live blocker.
 `cos` found this by testing the fix against the live roster before proposing it, and
-declined to decide. Scanning every checkpoint in the org, the state occurs **twice, both in
-`product`**, and `product`'s own `t9` encodes the same situation correctly as `blocked`. So
-the trap existed only because one agent misused `status`; repairing the data (done, this
-cycle) makes the simple filter correct and loses nothing. **A permanent code exception to
-rescue two malformed records is how a schema rots.** Proposed in
-[006](../proposals/006-restore-state-injection.md).
+declined to decide. Scanning every checkpoint in the org at that moment, the state occurred
+**twice, both in `product`**, whose own `t9` encoded the same situation correctly as
+`blocked`. Product repaired its two records, and `cos` verified the scan then returned zero
+org-wide.
+
+**The trap has since re-opened.** `release-mgr` t19 — *"Stopped chasing the SHA"*, `status:
+done`, `blockers: ["Operator must choose (A) standing authorization or (B) point
+approval…"]* — is the same encoding, arrived at independently. **It is not a product quirk;
+it is what the schema invites**, because `done` reads as *"I am finished"* while the blocker
+records *"someone else is not."* Two true statements, one field.
+
+So the fix is still *"repair the schema, not the filter"* — a permanent code exception to
+rescue malformed records is how a schema rots — but the ordering is now binding: **the
+convention must land before the predicate, and the implementation must verify the scan
+returns zero before shipping the filter.** Simulated against the live roster today, decision
+2 alone would silently drop a pending operator decision from `release-mgr`'s injection.
+
+Product's original wording — *"nobody else produces that state"* — was **true when measured
+and false as an inference.** A scan of a live system is a snapshot; it licenses *"nobody else
+produced it as of this measurement"* and nothing more. Recorded rather than quietly amended,
+because it is the absence claim in its most seductive costume: an enumeration that really was
+exhaustive, over a population that had not finished arriving.
+[006](../proposals/006-restore-state-injection.md)
 
 Those fields only ever grow. Nothing in `bin/swarm` or the hook prunes, caps, or ages
 them; the seed writes `"open_threads":[]` and it is append-only by convention thereafter.

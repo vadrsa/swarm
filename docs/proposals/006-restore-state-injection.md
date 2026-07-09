@@ -71,7 +71,7 @@ against the live roster before proposing it, found this, and declined to decide 
 your call about your own semantics, and I am not going to rename your task states from the
 outside."* Correct on both counts.
 
-**3. But the trap has exactly one source, and it is product.** Scanning every checkpoint in
+**3. But the trap had exactly one source, and it was product.** Scanning every checkpoint in
 the org for `status == "done" AND blockers != []`:
 
 ```
@@ -81,10 +81,48 @@ product t6   'OPERATOR TASK: adversarially review…'   blockers=['operator: 3 s
 count: 2      agents affected: ['product']
 ```
 
-**Nobody else produces that state.** And product's own `t9` — also awaiting an operator
-decision — is correctly marked `blocked`. So the file contained two encodings of one
-situation, and the incoherent one was mine. Those tasks were not done; *my work* was done
-and the *task* was waiting on a decision. That is what `blocked` means.
+And product's own `t9` — also awaiting an operator decision — was correctly marked `blocked`.
+So the file contained two encodings of one situation, and the incoherent one was mine. Those
+tasks were not done; *my work* was done and the *task* was waiting on a decision. That is what
+`blocked` means.
+
+> ### Correction — the trap has re-opened, and this section was a snapshot presented as a property
+>
+> The sentence *"nobody else produces that state"* was **true when measured and false as an
+> inference.** Re-run today, the same scan returns:
+>
+> ```
+> release-mgr t19  'Stopped chasing the SHA — reshaped the ask…'
+>                  status=done  blockers=['Operator must choose (A) standing
+>                  authorization or (B) point approval…']
+>
+> count: 1      agents affected: ['release-mgr']
+> ```
+>
+> A second agent has independently arrived at the same encoding — work finished, task awaiting
+> an operator decision, marked `done` while carrying a live blocker. **It is not a product
+> quirk. It is what the schema invites**, because `done` reads as *"I am finished"* and the
+> blocker records *"someone else is not."* Two true statements, one field.
+>
+> Simulated against `release-mgr`'s live checkpoint: shipping decision 2 as a plain
+> `status !== "done"` filter **today** would silently drop that task — and with it, a pending
+> operator decision — from its continuity injection. Exactly the failure `cos` refused to cause
+> when it declined to rename product's task states from the outside.
+>
+> **This imposes an ordering the proposal did not state: decision 1 must land before decision
+> 2.** The convention is not optional hygiene that happens to make the filter tidy; it is the
+> filter's *precondition*. Ship them together, or ship the convention first and verify the scan
+> returns zero before the predicate goes in.
+>
+> Product has told `release-mgr` and `cos`. Product has **not** edited `release-mgr`'s
+> checkpoint: renaming another agent's task states from outside is precisely what `cos` declined
+> to do to product, and it was right.
+>
+> The methodological error is worth keeping. Product measured a set, found it empty but for
+> itself, and wrote *"nobody else produces that state"* — present tense, universal. A scan of a
+> live system is a **snapshot**. It licenses *"nobody else produced it as of this measurement"*
+> and nothing more. This is the absence claim again, in its most seductive costume: an
+> enumeration that really was exhaustive, over a population that had not finished arriving.
 
 **4. Repair the schema and the compound predicate evaporates.** Simulated against
 product's checkpoint:
@@ -291,12 +329,20 @@ it is available to every agent today, with no code and no decision from anyone.
 Three separable yes/no. The first needs no code and product has already done it to itself.
 
 1. **Convention:** a task with an unresolved blocker is `blocked`, not `done`. Yes/no.
-   *(Product has applied it to itself; `cos` verified the invariant now holds org-wide.
-   If (2) lands, this invariant becomes load-bearing and wants a **test**, not just this
-   line — `cos`'s point, and it is right: a documented invariant with no instrument is
-   exactly what G7 says rots.)*
+   *(Product applied it to itself; `cos` verified the invariant held org-wide at the time.
+   **It no longer does** — `release-mgr` t19 has since produced the same state. If (2) lands,
+   this invariant becomes load-bearing and wants a **test**, not just this line — `cos`'s
+   point, and it is right: a documented invariant with no instrument is exactly what G7 says
+   rots. The re-opening is the proof.)*
 2. **Code:** `restore-state` injects only `status !== "done"` tasks. Yes/no.
    *(Product recommends yes. `cos` will brief and judge it.)*
+
+> **Ordering constraint, added after the trap re-opened.** **(1) must land before (2)**, and
+> the implementation must verify the scan `status == "done" AND blockers != []` returns **zero
+> across every checkpoint** before the predicate goes in. Shipping (2) against the roster as it
+> stands today would silently drop a pending operator decision from `release-mgr`'s continuity
+> injection. The convention is not hygiene that makes the filter tidy — it is the filter's
+> precondition, and nothing enforces it.
 3. **Copy:** if (2) is declined, rename `CURRENT TASKS:` → `TASKS:`. Yes/no.
    *(Moot if (2) lands — verified above.)*
 
