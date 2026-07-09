@@ -475,6 +475,46 @@ Nothing anywhere asks *"did the whole body arrive?"* — and `exit 0` answers a 
 question. That is the same shape as the sort-order trap below: a correct answer to a question
 nobody asked.
 
+## Ruled, not yet built: the `rendered/` state (operator ruling 1)
+
+The operator ruled that a message is injected in full **once** and thereafter **nagged by id**
+until *explicitly* acked — rendering no longer clears it. That needs **three** states where the
+inbox has two. **Product ruled the encoding; `cos` builds it.**
+
+| directory | meaning | body injected? | counts as *unacked*? |
+|---|---|---|---|
+| `inbox/<id>/*.json` | unseen | **yes**, once | yes |
+| **`inbox/<id>/rendered/*.json`** | **shown once, not acked** | no — nagged by id | **yes** |
+| `inbox/<id>/read/*.json` | explicitly acked | no | no |
+
+**Why a directory and not a flag.** `swarm-hook.cjs:200` says `read/` is a directory
+*specifically* for *"atomic rename; a durable audit trail; no re-injection race."* A
+`rendered: true` flag set in place needs read-modify-write on a file a concurrent reader holds
+— reintroducing exactly the race that comment was written to avoid. The bit becomes the file's
+**location**, set by one atomic rename, never rewritten.
+
+**Why not "move to `read/` only on ack."** It would leave the body in `inbox/`, so the hook
+would **re-inject it every turn** until acked — reintroducing the accretion proposal 006 exists
+to kill, which the operator explicitly rejected. Ruled out on his constraint, not on taste.
+
+**This is additive.** `read/` keeps its exact meaning (consumed); `already_acked()` is untouched;
+`ack` remains the only path into `read/`; and **render is not a read**, so
+`bin/swarm:839`'s *"Reading is NON-DESTRUCTIVE: nothing is moved into `read/` here, on any path"*
+still holds.
+
+> **One requirement, not a side effect: `outstanding := inbox/ ∪ rendered/`, in both readers**
+> (`swarm-hook.cjs:211` and `bin/swarm:950`, which today both define outstanding as *"`*.json`
+> directly under the box"*).
+>
+> Without it, a rendered-unacked message is **invisible to the very verb the nag tells the agent
+> to run**: the nag says *"unacked: `cos-123` — run `swarm inbox ack cos-123`"*, and
+> `swarm inbox read` answers *"no unread messages."* That is **G16 again** — shown but
+> unfindable — and it breaks 005's rule *"you cannot ack what you were never shown,"* which under
+> ruling 1 becomes **"you cannot ack what you cannot re-read."** Whoever builds this must not
+> "simplify" the reader back to one directory.
+
+It costs 005 nothing: `inbox read` still moves nothing, it merely lists two directories.
+
 ## Testing this file's claims
 
 Every measurement in this document was produced by running the shipped code against a
