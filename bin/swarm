@@ -784,6 +784,17 @@ for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
     if only and r.get("id")!=only: continue
     recs.append(r)
 
+# A message written before the id field existed has no `id`. The filename IS the
+# id, reordered: `<ts>-<from>.json` <-> `<from>-<ts>`. Derive it on load, so every
+# reader below sees a claimable id instead of the `?` placeholder — an unackable
+# message is permanently outstanding once reading stopped consuming.
+def with_id(fn,r):
+    if not r.get("id"):
+        stem=fn[:-len(".json")]
+        ts,_,frm=stem.partition("-")
+        if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
+    return r
+
 # Unread operator mail = *.json directly under inbox/operator/ (read ones live in
 # read/). Same layout, same filter, same sort as the agent inbox-check hook.
 mail=[]
@@ -792,7 +803,7 @@ if op and os.path.isdir(op):
         if not fn.endswith(".json"): continue
         try: r=json.load(open(os.path.join(op,fn)))
         except: continue
-        if isinstance(r.get("body"),str): mail.append((fn,r))
+        if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
     mail.sort(key=lambda x: int(x[1].get("ts") or 0))
 
 # Reading is NON-DESTRUCTIVE: nothing is moved into read/ here, on any path.
@@ -895,6 +906,17 @@ import json,os,sys,datetime
 sub,box,me,want,as_json = (os.environ["SUB"],os.environ["BOX"],os.environ["ME"],
                            os.environ["WANT"],os.environ["AS_JSON"])
 
+# A message written before the id field existed has no `id`. The filename IS the
+# id, reordered: `<ts>-<from>.json` <-> `<from>-<ts>`. Derive it on load, so a
+# legacy message can be named — and therefore acked. Without this it displays as
+# `[id ?]` and, since reading no longer consumes, stays outstanding forever.
+def with_id(fn,r):
+    if not r.get("id"):
+        stem=fn[:-len(".json")]
+        ts,_,frm=stem.partition("-")
+        if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
+    return r
+
 # Unread = *.json directly under the box (read ones live in read/). Identical
 # filter and sort to the agent hook, so both readers agree on what "outstanding"
 # and "arrival order" mean.
@@ -904,7 +926,7 @@ if os.path.isdir(box):
         if not fn.endswith(".json"): continue
         try: r=json.load(open(os.path.join(box,fn)))
         except Exception: continue          # unreadable/corrupt: never crash a reader
-        if isinstance(r.get("body"),str): mail.append((fn,r))
+        if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
     mail.sort(key=lambda x: int(x[1].get("ts") or 0))
 
 def ts_of(r):
@@ -935,7 +957,9 @@ def already_acked(mid):
     for f in os.listdir(rd):
         if not f.endswith(".json"): continue
         try:
-            if json.load(open(os.path.join(rd,f))).get("id")==mid: return True
+            # Same id derivation as the unread loader: a legacy message that was
+            # already acked still has no `id` field, and must still be recognised.
+            if with_id(f,json.load(open(os.path.join(rd,f)))).get("id")==mid: return True
         except Exception: continue
     return False
 
