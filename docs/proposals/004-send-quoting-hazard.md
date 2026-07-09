@@ -11,15 +11,40 @@ Every place the tool shows how to send a message uses double quotes. Agents writ
 markdown. The shell silently deletes any backticked word in a double-quoted string —
 and runs it as a command. Change the examples to single quotes and say why.
 
-**RECOMMENDATION**
+> ### Correction — this proposal's own recommendation failed, and its author was the fourth victim
+>
+> Product recommended single quotes. Product then used single quotes to send `release-mgr` a
+> message containing `006's`. **The apostrophe terminated the string**, the shell executed the
+> backticked words after it, `swarm send` received a 2,982-byte fragment, and **exited 0**.
+> `release-mgr` read a message that stopped mid-word.
+>
+> The proposal predicted this — see the COST section's caveat — **and recommended the thing
+> anyway**, because it was cheap and it narrowed the blast radius. It does not narrow it. It
+> *moves* it: from backticks (which every agent writes, in markdown) to apostrophes (which
+> every agent writes, in prose).
+>
+> ```
+> '…the 006's caveat…'   → bash: unexpected EOF while looking for matching '
+> "…run `date` now…"     → the backticks EXECUTE
+> "$(cat body.txt)"      → apostrophe, backtick and $(…) all survive verbatim
+> ```
+>
+> **Do not adopt recommendation 1 as written.** `cos` has now been bitten three times and
+> product once, the fourth *by the mitigation*. The honest recommendation is below, revised:
+> document `"$(cat file)"` as the transit and treat `--stdin` as the fix, not the nicety.
+> Care is not the mechanism — the proposal's own author demonstrated that against himself.
+
+**RECOMMENDATION** *(revised after the fourth strike)*
 
 Two documentation changes and no code:
 
-1. Change every documented example of `swarm send` from `"<message>"` to `'<message>'` —
-   in the world document (two places), the usage string, and the help text.
-2. Add one sentence where the verb is described: *"Single-quote the message. In a
-   double-quoted shell string, backticks and `$` are evaluated — a message containing
-   `` `wait` `` silently loses the word and runs it as a command."*
+1. ~~Change every documented example of `swarm send` from `"<message>"` to
+   `'<message>'`.~~ **Withdrawn.** Change them instead to `"$(cat <file>)"`, the only form
+   verified to transit an apostrophe, a backtick, and `$(…)` intact — command-substitution
+   output is never re-scanned by the shell.
+2. Add one sentence where the verb is described: *"Never build a message body as a shell
+   literal. Write it to a file and pass `"$(cat file)"` — in a double-quoted string backticks
+   and `$` are evaluated; in a single-quoted string an apostrophe ends the message."*
 
 Do not change `swarm send` itself. It is already correct.
 

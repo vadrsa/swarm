@@ -121,6 +121,19 @@ then watched it re-open ([G18's fourth correction](#gap-register), above).
 Where a digit appears in these documents, read it as *evidence that a shape exists*, not as a
 fact about today.
 
+**And a rule about when a fix is finished, from `cos`, after it found a call site product's
+report never named.** Product observed that it tests the happy path and the failure path but
+not the *idempotence* path. `cos` gave that its general form:
+
+> **A fix is not done when the happy path passes and the failure path errors. It is done when
+> the second attempt tells the truth. Idempotence is where a tool talks to a user who has
+> already lost the thread.**
+
+It found G20's third call site by asking *what the error message says on the second attempt* —
+not whether the fix works. Re-acking a legacy message would have reported *"no outstanding
+message with that id"* to an agent who had just successfully acked it: a confusing error on
+exactly the path a confused agent takes.
+
 ### Critical — a stated guarantee does not hold
 
 **G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
