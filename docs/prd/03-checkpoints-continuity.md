@@ -144,8 +144,8 @@ A sharp drop between two checkpoints means a compaction happened.
 
 **G3 — `swarm checkpoint --context` reads the wrong agent's transcript.** The
 reader prefers `$CLAUDE_TRANSCRIPT_PATH`. **`swarm spawn` never sets that
-variable** — the pane environment carries only `SWARM_DIR`, `SWARM_ID`,
-`SWARM_AGENT_ID`, `SWARM_AGENT_LABEL`. So the fallback path always executes:
+variable** — the pane environment carries only `SWARM_DIR`, `SWARM_AGENT_ID`,
+`SWARM_AGENT_LABEL`. So the fallback path always executes:
 
 ```python
 cands = sorted(glob.glob("~/.claude/projects/*/*.jsonl"),

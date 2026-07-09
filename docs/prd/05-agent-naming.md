@@ -128,11 +128,18 @@ updates --id fix-send-race-2` filters on `r.get("id") != only`, an exact match, 
 prefix-sharing agents never bleed into each other. PR #14 verified this explicitly.
 Any future reader that globs by prefix would reintroduce the bug.
 
-**The ledger is per-swarm.** Two different swarms in the same project may both
-have an agent named `csv-importer`. They are different agents, and `agents/`,
-`state/`, `inbox/` are all namespaced under `swarms/<swarm-id>/`, so nothing
-collides. Only the *swarm-id* disambiguates them, which is why `swarm swarms`
-exists.
+**The ledger is per-project, and now that is the same as per-swarm.** Before
+PR #16 a project could hold many swarms, each with its own ledger, so two runs
+could each have a `csv-importer` and only the swarm-id told them apart. Now the
+project *is* the swarm: one ledger, one `agents/`, one `state/`. A name identifies
+one agent for the life of the **repository**, which is a strictly stronger and
+simpler guarantee than the one the feature was designed to give.
+
+The corollary is that the ledger never resets. Every id ever minted in a project
+is burned forever, so a long-lived repo accumulates `csv-importer-2`,
+`csv-importer-3`, … across unrelated work months apart. That is the intended
+trade — a name must only ever mean one agent — but the suffix now encodes repo
+history rather than run history, and nothing surfaces why.
 
 **Derivation is language-dependent.** The filler list is English. A task written in
 another language will yield a slug of its first eight words verbatim — informative,
@@ -163,8 +170,15 @@ failure yields `importer-2` with no explanation of where `importer` went.
    `-2` suffix, at the cost of making an append-only file into a format with a
    schema. Probably not worth it; noted because the question recurs.
 
-4. **Does lifetime uniqueness need to span swarms?** Today it does not, and the
-   reasoning is sound — swarm-ids namespace everything. But an operator reading two
-   swarms' paper trails side by side sees two `cos` agents that are not the same
-   agent. The `swarm swarms` verb is the only thing that disambiguates, and it is
-   not shown in any per-agent record.
+4. ~~**Does lifetime uniqueness need to span swarms?**~~ **Answered by PR #16.**
+   The question was whether an operator reading two swarms' paper trails could tell
+   two `cos` agents apart. There are no longer two swarms to read: uniqueness spans
+   the project, which is the whole world. The concern is resolved by deleting the
+   thing that caused it — noted here because it is a clean example of a product
+   question being closed by simplification rather than by mechanism.
+
+5. **Should the ledger ever be prunable?** It now grows for the life of a
+   repository (see above). A repo that runs swarms weekly for a year carries every
+   name it ever minted, and the `-N` suffixes stop being informative. Against
+   pruning: a freed name can be reused, and the whole feature exists to make that
+   impossible. The tension is real and currently unacknowledged.
