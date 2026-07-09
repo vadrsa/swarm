@@ -190,41 +190,59 @@ def select_next(root, name):
     return fn, rec, len(waiting) - 1
 
 
-def delivery_parts(rec, rel, more):
-    head = (f"[swarm message] from {rec.get('from', '?')} — {rel} — "
+def count_junk(root, name):
+    """Queue files that LOOK like messages but do not parse as one. Counted so
+    `ps` can show them (ruling R4): an honest unknown beats an invisible file.
+    Unreachable via send (atomic JSON writes); a crashed writer could strand one."""
+    d = q_dir(root, name)
+    n = 0
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            p = os.path.join(d, fn)
+            if not fn.endswith(".json") or not os.path.isfile(p):
+                continue
+            r = read_json(p)
+            if not (r and isinstance(r.get("body"), str)):
+                n += 1
+    return n
+
+
+def delivery_head(rec, rel):
+    return (f"[swarm message] from {rec.get('from', '?')} — {rel} — "
             f"sent {fmt_ts(rec.get('ts'))}\n\n")
-    tail = (f"\n\n(one message per turn; {more} more waiting in your queue)"
-            if more else "")
-    return head, tail
 
 
-def build_delivery(fn, rec, rel, more, to):
-    """The exact text injected into the recipient's turn: whole, sender-headed."""
-    head, tail = delivery_parts(rec, rel, more)
-    text = head + rec.get("body", "") + tail
+def build_delivery(fn, rec, rel, to):
+    """The exact text injected into the recipient's turn: whole, sender-headed.
+
+    The injection is head + body, nothing else: no queue-depth trailer (ruling
+    R1 — `ps` shows q=, and the stop re-ring makes a backlog self-draining),
+    so an accepted message is delivered whole unconditionally.
+
+    Returns None when not even a truncation marker fits (a hand-crafted file;
+    send refuses anything that cannot fit whole): the caller must deliver
+    NOTHING and leave the file queued — never delivered ≠ dropped, and a bare
+    header claiming delivery would be the lie WORLD.md forbids (ruling R2).
+    """
+    head = delivery_head(rec, rel)
+    text = head + rec.get("body", "")
     if len(text) > TURN_CAP:
-        # Only a hand-written or pre-limit file can be here: send refuses
-        # anything that cannot fit whole. Truncate rather than blow the cap,
-        # and point at where the full body will sit after delivery.
         note = f"\n[truncated — full body on disk: queue/{to}/delivered/{fn}]"
-        room = TURN_CAP - len(head) - len(note) - len(tail)
+        room = TURN_CAP - len(head) - len(note)
         if room <= 0:
-            return head[:TURN_CAP]
-        text = head + rec.get("body", "")[:room] + note + tail
+            return None
+        text = head + rec.get("body", "")[:room] + note
     return text
 
 
-def send_size_error(fn, rec, rel, to):
+def send_size_error(rec, rel):
     """Refusal reason if this message cannot fit one turn's injection, else None.
 
-    Checked with a pessimistic queue-depth trailer so an accepted message fits
-    whatever the queue looks like on delivery day. One number, no arithmetic
-    for senders to learn: it fits or you send a file path. Measured on the
-    UNtruncated text — build_delivery caps defensively, so its output length
-    can never witness an overflow.
+    Delivery injects exactly head + body, so this check IS the delivery size:
+    an accepted message is delivered whole at any queue depth. One number, no
+    arithmetic for senders to learn: it fits or you send a file path.
     """
-    head, tail = delivery_parts(rec, rel, more=99)
-    n = len(head) + len(rec.get("body", "")) + len(tail)
+    n = len(delivery_head(rec, rel)) + len(rec.get("body", ""))
     if n > TURN_CAP:
         return (f"message too big: delivering it would take {n} chars against "
                 f"the {TURN_CAP}-char turn cap — put it in a file, send the path")
@@ -244,6 +262,15 @@ def emit_hook_output(obj):
         sys.stdout.flush()
         return True
     except OSError:
+        # Point fd 1 at /dev/null so the interpreter's own exit-flush of the
+        # broken pipe cannot fail after our exit(0) — without this, python
+        # dies with status 120 and the "any error -> exit 0" promise is false
+        # (ruling R3). The undelivered bytes are already accounted for: the
+        # caller keeps the message queued.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
         return False
 
 
@@ -254,10 +281,15 @@ def deliver_once(root, name, parent_of, emit):
     sel = select_next(root, name)
     if not sel:
         return False
-    fn, rec, more = sel
+    fn, rec, _ = sel
     ctx = build_delivery(fn, rec,
-                         relation(rec.get("from", "?"), name, parent_of),
-                         more, name)
+                         relation(rec.get("from", "?"), name, parent_of), name)
+    if ctx is None:
+        # Undeliverable (ruling R2): emit nothing, move nothing. The file
+        # stays visible in `ps` q= — and it blocks the queue behind it, which
+        # is deliberate: silently skipping it would hide a file that only a
+        # hand-crafted write can produce.
+        return False
     ok = emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                       "additionalContext": ctx}})
     if ok:
@@ -341,13 +373,20 @@ def record_event(root, name, kind, last_words, ts):
 
 # ------------------------------------------------------------------ ps view
 
-def render_ps(agents, live, queues, events, me_name, op_mail, now):
+def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     """The one view. Pure: every input is a plain value, so it tests offline.
 
     agents:  {name: record}         live:  set of live pane ids, or None (herdr unknown)
     queues:  {name: waiting-count}  events:{name: event fact or None}
     op_mail: [(from, ts)] waiting operator messages, oldest first
+    junk:    {name: unparseable-queue-file count} (ruling R4; may be None)
+
+    Dead agents render compactly — names only, one shared line (ruling R5):
+    the living tree stays one screen however long the swarm's history grows.
+    A live agent under a dead parent reattaches to its nearest living ancestor
+    so hiding the dead never orphans the living.
     """
+    junk = junk or {}
     lines = []
     if op_mail:
         lines.append(f"operator — {len(op_mail)} message(s) waiting for the human "
@@ -357,16 +396,29 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now):
     else:
         lines.append("operator — no waiting mail")
 
+    def is_dead(a):
+        return live is not None and a.get("pane") not in live
+    dead = sorted(n for n, a in agents.items() if is_dead(a))
+    shown_set = {n for n in agents if n not in dead}
+
+    def eff_parent(n):
+        # nearest non-dead ancestor; a chain that leaves the records keeps its
+        # last (unknown) name so the orphan line below can report it
+        p = agents[n].get("parent") or "operator"
+        seen = set()
+        while p in agents and p not in shown_set and p not in seen:
+            seen.add(p)
+            p = agents[p].get("parent") or "operator"
+        return p
+
     kids = {}
-    for n, a in agents.items():
-        kids.setdefault(a.get("parent") or "operator", []).append(n)
+    for n in shown_set:
+        kids.setdefault(eff_parent(n), []).append(n)
     for k in kids:
         kids[k].sort()
 
-    def alive_of(a):
-        if live is None:
-            return "?"
-        return "live" if a.get("pane") in live else "DEAD"
+    def q_of(n):
+        return f"q={queues.get(n, 0)}" + (f"+{junk[n]}?" if junk.get(n) else "")
 
     def walk(name, prefix, is_last):
         a = agents[name]
@@ -374,8 +426,8 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now):
         you = " (you)" if name == me_name else ""
         ev = events.get(name)
         idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
-        q = queues.get(name, 0)
-        lines.append(f"{prefix}{branch}{name}{you} [{alive_of(a)}] q={q} {idle}")
+        alive = "live" if live is not None else "?"
+        lines.append(f"{prefix}{branch}{name}{you} [{alive}] {q_of(name)} {idle}")
         if ev and ev.get("last_words"):
             cont = "   " if is_last else "│  "
             lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
@@ -388,20 +440,23 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now):
         lines.append("(no agents)")
     for i, r in enumerate(roots):
         walk(r, "", i == len(roots) - 1)
-    # An agent whose recorded parent no longer resolves still renders (flat),
-    # so nothing alive can be invisible to the one view.
-    shown = set()
+    # A live agent whose parent chain ends at an unknown name still renders
+    # (flat), so nothing alive can be invisible to the one view.
+    in_tree = set()
 
     def collect(n):
-        shown.add(n)
+        in_tree.add(n)
         for c in kids.get(n, []):
             collect(c)
     for r in roots:
         collect(r)
-    for n in sorted(set(agents) - shown):
+    for n in sorted(shown_set - in_tree):
         a = agents[n]
+        alive = "live" if live is not None else "?"
         lines.append(f"?─ {n} [parent {a.get('parent', '?')} unknown] "
-                     f"[{alive_of(a)}] q={queues.get(n, 0)}")
+                     f"[{alive}] {q_of(n)}")
+    if dead:
+        lines.append(f"dead: {', '.join(dead)}")
     return "\n".join(lines)
 
 
@@ -768,7 +823,7 @@ def cmd_send(argv):
     ts = now_ms()
     rec = {"to": to, "from": sender, "ts": ts, "body": body}
     fn = f"{ts}-{sender}.json"
-    err = send_size_error(fn, rec, relation(sender, to, parents_of(agents)), to)
+    err = send_size_error(rec, relation(sender, to, parents_of(agents)))
     if err:
         die(err)
     write_atomic(os.path.join(q_dir(root, to), fn), json.dumps(rec))
@@ -789,10 +844,12 @@ def cmd_ps(argv):
     agents = load_agents(root)
     live = live_pane_set()
     queues = {n: len(list_waiting(root, n)) for n in agents}
+    junk = {n: count_junk(root, n) for n in agents}
     events = {n: read_json(event_path(root, n)) for n in agents}
     op_mail = [(r.get("from", "?"), int(r.get("ts") or 0))
                for _, _, r in list_waiting(root, "operator")]
-    out = render_ps(agents, live, queues, events, my_name(), op_mail, now_ms())
+    out = render_ps(agents, live, queues, events, my_name(), op_mail, now_ms(),
+                    junk)
     if live is None and agents:
         out += "\n(herdr unreachable — liveness unknown)"
     print(out)
