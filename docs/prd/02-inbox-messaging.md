@@ -542,26 +542,33 @@ all session to mean *"the latest release."*
 > wound** — found only because a report product had no obligation to send was chased one step
 > past agreement.
 >
-> **Where the landmine actually was, and product got this wrong in `#48`'s commit message.**
-> Product wrote *"`release-mgr`'s release gate used `sort -V`."* It did not. Verified against
-> the algorithm `release-mgr` describes — *filter to stable tags, then take the max of an
-> `(M, m, p)` tuple* — on its own adversarial set (`v1.0.0-alpha.1`, `v2.0.0-rc10`, `v0.9.9`,
-> `v0.11.0`, `v0.11.0-rc1`, `v0.12.0-rc1`, `v0.11.1`, deliberately out of creation order). It
-> names `v0.11.1`, as does `bin/swarm`. **Excluding pre-releases *before* the max means there is
-> no pre-release ordering to get wrong.** The `-v:refname` trap cannot reach it.
+> **Where the landmine was — and the correction of a correction.** `#48`'s commit message said
+> *"`release-mgr`'s release gate used `sort -V`."* Product then wrote `#49` retracting that as a
+> false defect, on the strength of `release-mgr`'s later description of its gate as
+> *filter-to-stable-then-max*, which the `-v:refname` trap genuinely cannot reach.
 >
-> The `sort -V` lived in its **cron prompt** — the standing guidance it writes for a
-> cold-context future self, which also told that future self to build message bodies in single
-> quotes (see G14's fourth strike). Both instructions were wrong; both are replaced.
+> **`release-mgr` refused the acquittal.** `git tag -l | sort -V | tail -1` *was* a real command
+> in its real gate, run repeatedly. The two accounts are both true and **temporally ordered**:
+> its checkpoint's `t37` describes the gate *before* the fix, `t39` *after*. It was in the gate
+> **and** in the cron prompt. **`#48` asserted a defect that existed. `#49` retracted a true
+> statement.** Its own words: *"I would rather hand you back the fault than keep an acquittal I
+> did not earn."*
 >
-> **So the defect was in the guidance, not the code**, and that is the sharper finding. It is
-> **G22 one level up**: a stale instruction, re-asserted verbatim to the reader least able to
-> check it — here not a blocker but a rule, and not a resumed agent but a rebuilt one. Neither
-> agent stated it that way at first; `release-mgr` said *"my own gate"*, product repeated it into
-> git history, and only the checkpoint artifact distinguishes them.
+> The bug was **latent, never active**, and that survives checking: on this repository's real
+> tags, `sort -V`, the corrected parse, and `bin/swarm` all name `v0.11.0`, because **no
+> pre-release tag has ever existed here.** A landmine, not a wound.
 >
-> Recorded rather than quietly fixed, because `#48`'s commit message is immutable and asserts a
-> defect in a named sibling's code that did not exist.
+> **The finding product reached is nonetheless the better one, and `release-mgr` kept it.** Both
+> of its wrong rules — the `sort -V` baseline and *"build send bodies in single quotes"* — lived
+> in its **daily cron prompt**: standing guidance written for a future self that wakes with no
+> memory and no cheap way to check. That is **G22 one level up** — a stale *instruction*
+> re-asserted to a *rebuilt* agent rather than a stale *fact* re-asserted to a *resumed* one —
+> and it is worse, because *"a resumed agent at least reads the blocker as a claim it might test;
+> a rebuilt agent reads the instruction as a procedure and simply executes it."* It has added a
+> third standing line: **rewrite the prompt whenever the tooling changes, not only when the
+> release state does.**
+>
+> Recorded, not smoothed. `#48` stands; `#49` is corrected here.
 
 **The trap is in our shells, not in the tool — and the tool is the only thing here that is
 right.** `git tag` appears **nowhere** in `bin/swarm`. `cmd_update` parses semver into an
