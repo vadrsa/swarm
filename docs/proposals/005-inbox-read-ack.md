@@ -21,12 +21,15 @@
 > a defect fix, and should not be carried as a rider on any code change.
 >
 > **What chasing the refutation found:** a real, critical, message-loss defect —
-> **G17**, a message over ~64 KB is destroyed by the *agent* delivery hook, silently, with a
-> success exit code. (The operator's own mailbox is spared, because it is read by Python
-> rather than Node — an accident, not a design, and one that unification would undo. See
-> the cost of unification below.) Product asserted a defect from reading; engineering
+> **G17**, where the *agent* delivery hook destroyed any message over ~64 KB, silently, with
+> a success exit code. (The operator's own mailbox was spared, because it is read by Python
+> rather than Node — an accident, not a design, and one that unification would have undone.
+> See the cost of unification below.) Product asserted a defect from reading; engineering
 > disproved it by executing; executing then found a worse one. That sequence is the argument
 > for the method, and it is why this correction is printed here rather than edited away.
+>
+> **G17 was fixed and installed the same day** (PR #31), so decision 0 below needs no
+> answer. Decisions 1–3 stand.
 
 ---
 
@@ -49,11 +52,10 @@ straightforwardly right and one that is a regression, and they have been bundled
    performs an implicit cumulative ack — announced, not silent (see the correction above).
    That behaviour is *correct*, and it is the reason the operator's instinct is right.
    Making it explicit needs a verb, not a bug fix.
-4. **Fix G17 first, ahead of all of this.** A message over ~64 KB sent to an *agent* is
-   destroyed on delivery. It is unrelated to the redesign, it is one line in the hook, and
-   no decision about read/ack semantics matters while the agent channel loses large
-   messages outright. It is also a reason not to unify: the operator's mailbox is the one
-   inbox G17 cannot reach, and unification would hand it the bug.
+4. **G17 is fixed** (PR #31), so this no longer gates the redesign. It remains a reason
+   not to unify: the operator's mailbox was the one inbox G17 could not reach, spared only
+   because it is read by Python rather than the Node hook. Unification would have handed it
+   the bug. That accident should not be relied on twice.
 
 The unifying instinct — one read/ack model for agents and the operator — is the part I
 think is wrong. Agents and the operator are not the same kind of recipient, and the
@@ -237,7 +239,7 @@ them again, exactly as the cap does today.
   hook is Node, which discards it. Nothing records that dependency and nothing tests it.
   **Unifying the two read paths would carry the agent path's message-loss bug into the
   operator's mailbox** — the one channel where a lost message is an unanswered escalation.
-  Fix G17 first (decision 0), and then unify only if a reason survives that isn't
+  G17 is now fixed, but the lesson stands: unify only if a reason survives that isn't
   "one code path is tidier."
 
 **ALTERNATIVES**
@@ -260,15 +262,15 @@ them again, exactly as the cap does today.
 
 **DECISION**
 
-Four separable yes/no answers. **The first is not part of your redesign and outranks all
-of it.**
+Four items. **The first needs no answer — it is already done.** The rest are separable
+yes/no.
 
-0. **Fix G17 now** — do not `process.exit()` before stdout drains; add a size guard to
-   `send`; truncate an oversized injection with a pointer to the file rather than emitting
-   it whole. Yes/no. *(Product recommends yes, immediately. Every message over ~64 KB sent
-   **to an agent** is currently destroyed — including one you send. Your own mailbox is
-   spared only because it is read by Python, which unification would change. No read/ack
-   semantics matter while that is true.)*
+0. ~~**Fix G17 now**~~ — **DONE, no decision needed.** `cos` fixed and installed it the day
+   it was filed (PR #31, `08f683b`). Both hook writes now wait for stdout to drain, and the
+   `read/` rename is conditional on the write actually succeeding. Product verified this
+   independently against the installed hook: a 400 KB message delivers and parses; an
+   `EPIPE` mid-write leaves the message **unread** rather than acking it. *The channel no
+   longer destroys large messages.* Decisions 1–3 below are now unblocked.
 1. **Operator mailbox: make acknowledgement explicit and cumulative** (`swarm updates`
    becomes non-destructive; add `swarm inbox ack <id>`). Yes/no.
 2. **Agents: keep injecting message bodies** rather than switching to notify-and-pull.
@@ -277,8 +279,8 @@ of it.**
    injection cap leaves behind. Yes/no. *(The header line is a separate copy nit; do not
    bundle it.)*
 
-If you want one answer rather than four: **fix the message loss, adopt the acknowledgement
-model, reject the notification model.**
+If you want one answer rather than three: **adopt the acknowledgement model, reject the
+notification model.** (The message loss is already fixed.)
 
 **IF NO** — i.e. you adopt the redesign wholesale
 
@@ -292,19 +294,26 @@ the record shows where the disagreement was.
 
 ---
 
-## The one thing to fix today regardless of this decision
+## Postscript — the thing this review actually found, and how
 
-Not the header. **G17.**
+Not the header. **G17**, and it is already fixed.
 
-A message over ~64 KB never reaches the agent. The hook writes it to a pipe, Node buffers
-the overflow, `process.exit(0)` throws the buffer away, the harness parses truncated JSON
-and injects nothing, and the message — already renamed into `read/` — is gone. Exit code 0.
-No error anywhere. The cliff is exact: 65,265 bytes of body is delivered; 65,266 is
+A message over ~64 KB never reached the agent. The hook wrote it to a pipe, Node buffered
+the overflow, `process.exit(0)` threw the buffer away, the harness parsed truncated JSON
+and injected nothing, and the message — already renamed into `read/` — was gone. Exit code
+0. No error anywhere. The cliff was exact: 65,265 bytes of body delivered; 65,266
 destroyed.
 
-This is independent of everything above, it is one line in the hook, and it falsifies the
+`cos` fixed it the same day (PR #31), and caught a bug in its own first draft while doing
+so: under `EPIPE` the drain callback fires *with an error*, and its initial version acked
+the message anyway — *"I had reproduced the original bug in a new costume."* The rename is
+now conditional on delivery. Product verified both properties independently against the
+installed hook rather than accepting the report.
+
+It was independent of everything above, it was one line in the hook, and it falsified the
 sentence `WORLD.md` uses to describe the whole feature: *"the message is surfaced into the
 agent's context on its next turn — even if the agent was busy or the doorbell was missed."*
+That sentence is true again.
 
 **How it was found is the argument for how product should work.** I filed a defect
 (the header's acknowledgement is silent) that I had reasoned out from reading the source.
@@ -313,6 +322,10 @@ fixture, found the `…and N more` line I had myself quoted two paragraphs earli
 [PRD 02](../prd/02-inbox-messaging.md), and told me. Chasing *why* I had been wrong is what
 put me back in front of the hook with a synthetic inbox — and that is where G17 was.
 
+Three agents had been over that file — `rd` filed a finding on it, a child of `cos` rewrote
+a function inside it, and `cos` reviewed that diff line by line. **None of them saw a 64 KiB
+cliff sitting under a `process.exit()`.** It surfaced only because a wrong claim was chased
+rather than defended.
+
 The system already does implicit cumulative acknowledgement, and announces it. Making it
-explicit is right. Making it *pull-based* is the part that costs a guarantee. And none of
-it matters until the channel stops eating large messages.
+explicit is right. Making it *pull-based* is the part that costs a guarantee.
