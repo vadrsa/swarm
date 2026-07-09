@@ -54,10 +54,9 @@ Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
 **Status as of `3ae3ad9`:** of the original four critical gaps, three are closed — G2
 by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
-half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
-(#21), but the guard that was supposed to make the miss impossible still cannot fire
-on a minor bump — and cannot, while the milestone is preserved by policy. **G13 is a
-decided no-op, not an open request** (see its entry). Closed gaps are kept below under
+**CLOSED — accepted by operator decision** (standing policy; the guard is *meant* to
+stay inert through 0.x, and reopens at the 1.0 bump — see its entry). **G13 is a decided
+no-op, not an open request** (see its entry). Closed gaps are kept below under
 [Resolved](#resolved), not deleted: a register that forgets what was broken cannot
 show that the same class of thing broke twice.
 
@@ -211,8 +210,27 @@ Discussed in [07](07-herdr-world-integration.md).
 > under *"What this philosophy is not."*
 
 **G1. A breaking change can still ship as a minor release, and the major guard
-still cannot fire.** *Partially addressed — the record was corrected, the
-mechanism was not.*
+cannot fire.** ***CLOSED — accepted by operator decision (standing), with a reopen
+trigger at 1.0.*** *This is no longer an open gap. The full history below is kept as the
+record of **why** it is closed, not as a live defect.*
+
+> **Ruling (operator, standing).** The guard's inertness through `0.x` is **the design, not a
+> hole in it.** *"Everything is MINOR until I say otherwise"* makes the three breaking-as-minor
+> releases a policy, not a series of overrides, and the guard is **meant** to stay inert while
+> pre-1.0. G1 stops being a live entry.
+>
+> **What carries the safety the guard does not — load-bearing, named so it is not forgotten.**
+> Across a breaking minor, the **`RELEASING.md` migration notes are the only user-facing
+> warning**, and that is by design while `0.x`. That dependency is real: it is the standing
+> reason every breaking change **must** land its migration note *inside the tagged tree*
+> (which `release-mgr` already does). If a breaking minor ever ships without its note, the user
+> crosses it with **no** warning at all — the guard will not catch it, because it is not meant
+> to.
+>
+> **The condition of closure — closed-with-a-trigger, not closed-forever.** At the **1.0 bump**,
+> whenever the operator spends that milestone, the guard is expected to begin firing, and G1
+> **converts from "accepted cost" to "must now work."** Until 1.0 is called, **do not
+> re-escalate this.** After it, this entry reopens by its own terms.
 
 PR #10 replaced live-pane `swarm send` with durable inbox messaging, classified
 itself **MAJOR → v1.0.0**, and wrote a `### v1.0.0` migration note into
