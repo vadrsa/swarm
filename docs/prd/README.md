@@ -6,8 +6,8 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #28 (`364e58f`). Newest tag: **`v0.9.0`** — `main` is
-seven commits ahead of it, carrying three code fixes (PRs #23, #24, #25). That tag is
+Baseline: `main` through PR #31 (`08f683b`). Newest tag: **`v0.9.0`** — `main` is
+ten commits ahead of it, carrying four code fixes (PRs #23, #24, #25, #31). That tag is
 itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
@@ -45,14 +45,14 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; four more
-(G14–G17) were found later, in use. They are restated in context inside each PRD;
+The onboarding pass that produced these PRDs surfaced thirteen issues; five more
+(G14–G18) were found later, in use. They are restated in context inside each PRD;
 this is the index. **Severity is product severity** — how badly the thing a user was
 promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `364e58f`:** of the original four critical gaps, three are closed — G2
+**Status as of `08f683b`:** of the original four critical gaps, three are closed — G2
 by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
 half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
 (#21), but the guard that was supposed to make the miss impossible still cannot fire
@@ -61,17 +61,18 @@ decided no-op, not an open request** (see its entry). Closed gaps are kept below
 [Resolved](#resolved), not deleted: a register that forgets what was broken cannot
 show that the same class of thing broke twice.
 
-**A new critical gap now leads the list: G17**, message loss above ~64 KB. It is the
-only entry here where a guarantee `WORLD.md` states in plain words is provably false,
-reproducibly, today.
+**G17 — message loss above ~64 KB — was filed, fixed, and installed the same day**
+(PR #31). It was the only entry where a guarantee `WORLD.md` states in plain words was
+provably false. It is now under [Resolved](#resolved), with its verification.
 
-Four gaps were added *after* the onboarding pass, none of them visible by reading the
+Five gaps were added *after* the onboarding pass, none of them visible by reading the
 code: **G14** (a message can be silently corrupted by the caller's shell), **G15**
 (`swarm updates` prints unbounded history), **G16** (reading the operator's mail
-destroys it), and **G17** (the delivery hook destroys any message over ~64 KB).
+destroys it), **G17** (the delivery hook destroyed any message over ~64 KB — resolved),
+and **G18** (`restore-state`'s injection grows every cycle, uncapped).
 
-**Two entries here are corrections against this register itself**, and that is the
-point of keeping them:
+**Three entries here are corrections against the people who wrote them**, and that is
+the point of keeping them:
 
 - PR #24 fixed a case where `reap` *could* free a name — a guarantee `WORLD.md`, three
   code comments, and [PRD 05](05-agent-naming.md) all asserted held. It did not.
@@ -82,66 +83,19 @@ point of keeping them:
   than trusting a sibling who had been right three times running. Chasing that refutation
   is what uncovered G17. Product asserted a defect from reading; engineering disproved it
   by executing; executing found a real one. The retraction is kept in place.
+- **G18 corrects both of us.** Product told `cos` that three sibling agents were carrying
+  truncated missions — inferred, never checked; `cos` verified before acting and found all
+  four intact, so nothing was dispatched. `cos` in turn justified the `restore-state` half
+  of the G17 fix with *"my checkpoint is 38,883 bytes and grows"* — true of the file,
+  misleading about the payload, which is 3× smaller because `progress` fields are not
+  injected. The fix was right; the reasoning for it was not, and the **real** unbounded
+  quantity turned out to be task and thread *count*. Both errors were caught the same way.
 
-The method that produced every one of G14–G17: **run the code against a fixture; do not
-assert a guarantee from a document.**
+The method that produced every one of G14–G18, and caught every error in this list:
+**run the code against a fixture; do not assert a guarantee from a document — including
+your own, and including one a trusted sibling hands you.**
 
 ### Critical — a stated guarantee does not hold
-
-**G17. A message larger than ~64 KB is silently destroyed by the delivery hook.**
-This is the most serious defect in the register, and it was found by chasing a wrong
-claim of product's own (see G16).
-
-`inbox-check` builds the injection, calls `process.stdout.write(...)`, then renames the
-message into `read/`, then `process.exit(0)`. The ordering is deliberate — its comment
-reads *"Emit the injection FIRST, then mark read. If we crashed between the two, the
-messages would be re-injected next turn (safe) — losing one is not."*
-
-**Node defeats that reasoning.** When stdout is a pipe — which is exactly how Claude Code
-invokes hooks — `write()` of more than the pipe buffer returns `false` and *queues* the
-remainder. It does not block, does not throw, and does not finish. `process.exit(0)` then
-discards the queued bytes. The write never happened, and nothing says so.
-
-Measured against the shipping hook, with the exact cliff:
-
-| Body size | Bytes reaching the harness | Result |
-|---:|---:|---|
-| 65,265 | 65,529 | delivered |
-| **65,266** | **65,536** | **destroyed** |
-| 400,000 | 65,536 | destroyed |
-
-Beyond the cliff the harness receives JSON cut mid-string, fails to parse it, and injects
-**nothing** — while the message has already been moved to `read/` and the hook has exited
-`0`. The message is not delayed. It is consumed, never delivered, with a success code and
-no error on any channel. Isolated to `process.exit()`: the same 200 KB write completes in
-full if the process is allowed to exit naturally.
-
-Reachable only by a **single** message over the threshold — the `CAP` guard bounds the
-multi-message case at `8000 + one body`. And `cmd_send` has **no size guard at all**
-(`cos`), so nothing prevents it.
-
-**Scope: the agent inbox only. The operator's mailbox is safe — by accident.** Agents
-receive mail through the Node hook, which discards unflushed stdout on `process.exit()`.
-The operator receives mail through `cmd_updates`, which is **Python**, and Python flushes
-stdout on exit:
-
-```
-python3 -c 'import sys; sys.stdout.write("X"*200000); sys.exit(0)' | wc -c  → 200000
-node    -e 'process.stdout.write("X".repeat(200000)); process.exit(0)'   | wc -c  →  65536
-```
-
-So an escalation *to* the operator cannot be destroyed by G17. A steering instruction *from*
-the operator to an agent can be. **That safety is a property of the language, not of the
-design** — nothing records it, nothing tests it, and it would evaporate the moment the two
-read paths were unified. Which is exactly what [proposal 005](../proposals/005-inbox-read-ack.md)
-was asked to consider: unifying the operator's mailbox with the agent inbox under one code
-path would **extend this bug to the operator** unless the flush is fixed first. An argument
-against unification that neither product nor the proposal's author had.
-
-This directly contradicts the product's central promise, that *"the message is surfaced
-into the agent's context on its next turn — even if the agent was busy or the doorbell was
-missed."* Delivery is guaranteed for messages under ~64 KB. Above it, guaranteed loss.
-[02](02-inbox-messaging.md)
 
 **G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
 defaults `--cwd "$PWD"`. In the swarm that produced these PRDs, **eleven agents
@@ -281,6 +235,41 @@ re-parsed through a shell breaks — and the reasoning was never carried across 
 `send`. Delivery is guaranteed; body integrity is not, and no document says so.
 [02](02-inbox-messaging.md) · [proposal 004](../proposals/004-send-quoting-hazard.md)
 
+**G18. `restore-state` has no cap, and what it injects grows every cycle, forever.**
+`inbox-check` budgets its injection at 8,000 characters (imperfectly — see G10).
+`restore-state` budgets nothing. It injects the agent's mission, every task **title**,
+every **blocker**, and every **`open_threads`** entry, joined without limit.
+
+Those fields only ever grow. Nothing in `bin/swarm` or the hook prunes, caps, or ages
+them; the seed writes `"open_threads":[]` and it is append-only by convention thereafter.
+Measured on the live swarm:
+
+| Agent | Cycles | Tasks | Open threads | Checkpoint on disk | `restore-state` injects |
+|---|---:|---:|---:|---:|---:|
+| `cos` | 7 | 17 | 25 | 46,118 B | **15,415 B** |
+| `product` | 3 | 9 | 8 | 8,908 B | 4,936 B |
+
+The 3× gap between file size and payload matters, and it corrects a natural misreading:
+`restore-state` does **not** inject the `progress` fields, which are the bulk of a
+checkpoint. So a 46 KB checkpoint is not a 46 KB injection, and `cos` had ~4.3× headroom
+to the old cliff rather than being on its edge. **The risk was never checkpoint bytes; it
+is task and thread *count*.** Empirically the payload crosses 64 KiB at roughly **700
+tasks** or **300 open threads** — implausible for a short-lived child, entirely plausible
+for a standing agent that accumulates a thread per finding and never closes one.
+
+Since PR #31 this can no longer *destroy* the restore (the drain fix landed), which is the
+right outcome: an oversized payload now arrives whole. But it arrives into a finite context
+window, on **every** `SessionStart`, and the continuity mechanism's own cost therefore rises
+monotonically with an agent's age. An agent restored after a compaction pays for every
+thread it has ever opened.
+
+The product decision is retention, not truncation: **`open_threads` and completed `tasks`
+need a closing discipline** (an agent should retire a thread when it resolves, as it
+retires a task), and `restore-state` should probably prefer *open* threads and
+*in-progress* tasks if it must choose. A blind cap would silently drop the oldest, which
+for a checkpoint is the mission itself.
+[03](03-checkpoints-continuity.md)
+
 **G16. Reading the operator's mail destroys it — including `swarm updates --json`.**
 `cmd_updates` prints, flushes, then calls `mark_read()`, which moves every surfaced
 message into `read/`. It does this on the `--json` path too, *before* exiting. So any
@@ -357,6 +346,41 @@ prompting the agent for input" — presented as fact, sourced from a string matc
 
 Kept, not deleted. Each entry states what was broken, what fixed it, and — where
 the fix left something behind — what it did not fix.
+
+**G17 — a message over ~64 KB was silently destroyed on delivery. Closed by PR #31
+(`08f683b`), fixed and installed the same day it was filed.**
+
+Both of the hook's stdout writes now route through `emitAndExit()`, which waits for the
+drain callback before exiting. The bug was that `process.exit(0)` discarded whatever
+`process.stdout.write()` had queued when the 64 KiB pipe buffer filled — and the message
+was renamed into `read/` regardless, so it was consumed without ever being delivered.
+
+**Verified independently by product against the installed hook**, not taken on report:
+
+| Case | Result |
+|---|---|
+| 400 KB message | 400,264 bytes received, parses, correctly acked |
+| Reader vanishes mid-write (`EPIPE`) | message stays **unread**, survives for retry |
+| Capped multi-message path | unchanged: 5 announced, 3 shown, 3 acked, 2 remain |
+
+The second row is the one worth dwelling on. `cos`'s *first draft* ran the `read/` rename
+unconditionally once the drain callback fired — but under `EPIPE` that callback fires
+**with an error**, the bytes never landed, and the message would have been acked anyway.
+It caught this with a test rather than shipping it: *"I had reproduced the original bug in
+a new costume."* The ack is now conditional on delivery (`done(!err)`), which is what the
+emit-before-mark ordering always meant. **Failing toward re-injection is the safe
+direction**, and the fix now says so in code rather than in a comment.
+
+*What it did not fix:* nothing bounds what the hook tries to write. The drain fix means a
+fat payload now *arrives* instead of being destroyed — strictly better, and it converts a
+correctness bug into a context-budget one. See **G18**, and G10's uncapped first message.
+
+*Provenance worth keeping:* three agents had been over this file — `rd` filed a finding on
+it, a child of `cos` rewrote `lastRecordedState()` inside it, and `cos` reviewed that diff
+line by line. **None of them saw a 64 KiB cliff sitting under a `process.exit()`.** It
+surfaced only because product filed a *wrong* claim (G16), `cos` refuted it by execution,
+and chasing *why* product had been wrong put someone back in front of the hook with a
+fixture. The method found the bug; no amount of reading had.
 
 **G2 — agents cannot escalate to the operator. Closed by PR #20 (`1892806`).**
 The operator is now an addressable target: `swarm send operator "…"` writes a

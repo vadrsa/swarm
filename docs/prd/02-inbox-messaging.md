@@ -102,25 +102,33 @@ next turn (harmless duplicate); the reverse ordering would lose it (unrecoverabl
 
 ## Contracts and guarantees
 
-**Guaranteed — for a message body under ~64 KB.** That qualifier is not in `WORLD.md`,
-and it should be: above the threshold the first and third bullets below are **false**.
-See **G17**.
+**Guaranteed.** These held in intent from the start; the first and third were **false in
+fact** for any message over ~64 KB until PR #31 (`08f683b`) fixed the hook's stdout drain.
+They are true now, at any size, and verified against the installed hook.
 
 - **The message is never lost.** Once `swarm send` returns 0, the message exists
   on disk in the target's inbox. A dead pane, a busy agent, a missed doorbell, a
-  crashed hook — none of these can destroy it. *(True on disk, always. False on
-  delivery above ~64 KB, where the hook consumes it — G17.)*
+  crashed hook — none of these can destroy it.
 - The write is atomic. A concurrent `inbox-check` never reads a half-written
   message.
 - A message is **never silently dropped** by the hook. If it is not injected this
-  turn, it is not moved to `read/`, so it is injected next turn. *(False above
-  ~64 KB: the move happens even though the injection did not — G17.)*
+  turn, it is not moved to `read/`, so it is injected next turn. Since PR #31 the
+  rename is **conditional on the injection actually reaching the harness** — if the
+  write fails (a vanished reader, `EPIPE`), the message stays unread and is re-offered.
+  Failing toward re-injection is the safe direction, and the code now enforces what the
+  ordering always meant.
 - Messages are surfaced oldest-first.
 - The hook never breaks the agent's turn. Every failure mode is a silent no-op.
-  *(This one holds, and it is why G17 is invisible: the silent no-op includes
-  silently losing the message.)*
+  *(This one always held — and it is precisely what hid G17 for the life of the feature:
+  a silent no-op is indistinguishable from a silently lost message.)*
 - The `swarm send` CLI signature is unchanged from the pre-1.0 live-typing
   version — only its contract changed.
+
+**Not bounded, and worth knowing:** nothing limits how much the hook *tries* to inject.
+`cmd_send` has no size guard, `inbox-check`'s 8,000-character cap cannot withhold the
+first message (G10), and `restore-state` has no cap at all (G18). The drain fix means an
+oversized payload now arrives intact rather than being destroyed — a correctness bug
+converted into a context-budget one.
 
 **Best-effort — explicitly NOT guaranteed:**
 
@@ -217,11 +225,13 @@ reaches `process.stdout.write()` whole, overruns the pipe buffer, and is destroy
 multi-message case is bounded at `8000 + one body` and never gets there. And `cmd_send`
 has no size guard, so nothing upstream stops it.
 
-**G17 — a message over ~64 KB is silently destroyed on delivery.** The most serious
-defect in this document, and it directly falsifies the first guarantee above.
+**G17 — a message over ~64 KB was silently destroyed on delivery. RESOLVED by PR #31
+(`08f683b`).** It was the most serious defect in this document, and it directly falsified
+the first guarantee above. The mechanism is preserved here because it is instructive: a
+correct comment, a correct ordering, and a defect that lived underneath both.
 
-`inbox-check` writes the injection to stdout, *then* renames the message into `read/`,
-*then* calls `process.exit(0)`. The comment above that ordering explains the intent:
+`inbox-check` wrote the injection to stdout, *then* renamed the message into `read/`,
+*then* called `process.exit(0)`. The comment above that ordering explains the intent:
 
 > *"Emit the injection FIRST, then mark read. If we crashed between the two, the messages
 > would be re-injected next turn (safe) — losing one is not."*
@@ -255,10 +265,19 @@ Three properties compound to make it invisible:
 3. **The hook's own "never break the turn" guarantee** turns the failure into a silent
    no-op. That guarantee holds. It is precisely what hides this.
 
-The fix is one line in the hook — do not `process.exit()` before stdout drains (use the
-`write` callback, or `process.exitCode = 0` and let Node flush). A size guard on `send`
-and a truncate-with-pointer on the injection are the belt and braces. All three are
-engineering surface; product's contribution is the measurement, not the patch.
+**The fix (PR #31).** Both of the hook's stdout writes now route through a single
+`emitAndExit()` that waits for the drain callback before exiting. Verified independently
+against the installed hook: a 400 KB message delivers 400,264 bytes and parses; the capped
+multi-message path is unchanged.
+
+The interesting part is what the *first draft* of that fix got wrong. It ran the `read/`
+rename unconditionally once the drain callback fired — but under `EPIPE` (the reader
+vanishes mid-write) the callback fires **with an error**, the bytes never landed, and the
+message would have been acked anyway. `cos` caught it with a test rather than shipping it:
+*"I had reproduced the original bug in a new costume."* The rename is now conditional on
+delivery (`done(!err)`), so a failed write leaves the message unread for the next turn.
+**Failing toward re-injection is the safe direction** — which is exactly what the
+emit-before-mark comment always meant, now enforced by code instead of assumed by it.
 
 **Scope: the agent inbox only — and the operator's mailbox is spared by accident.** The
 operator reads mail through `cmd_updates`, which is Python, and Python flushes stdout on

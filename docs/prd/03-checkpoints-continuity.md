@@ -89,8 +89,8 @@ one.
 ### Restoration
 
 `SessionStart` (matcher: all sources, including `startup` and `compact`) runs
-`swarm-hook.cjs restore-state`, which reads `state/<id>.json` and emits it as
-`additionalContext`:
+`swarm-hook.cjs restore-state`, which reads `state/<id>.json` and emits **a summary of
+it** — not the file — as `additionalContext`:
 
 ```
 [swarm continuity] You are the standing agent <id> (<role>), resuming
@@ -104,6 +104,13 @@ Re-read your full checkpoint at state/<id>.json before proceeding…
 
 RECONCILE now (argue against yourself…)
 ```
+
+**What it injects, exactly:** `mission`, `status`, `progress_summary`, each task's
+**title** and **blockers**, and each `open_threads` entry's `id:state`. It does **not**
+inject `progress`, `context`, or `work_cache` — which is why a 46 KB checkpoint yields a
+15 KB injection, and why the payload's size tracks task and thread *count* rather than
+file size (measured; see **G18**). The trailing instruction to *"re-read your full
+checkpoint"* exists precisely because the injection is lossy by design.
 
 The `source == "compact"` branch changes the framing to tell the agent explicitly
 that its memory was just destroyed and this file now outranks its recollection.
@@ -203,6 +210,39 @@ described it — `# window: caller passes --model via env if known; else omit pc
 now sits above a `print` with no `pct` and no table anywhere in the file. The
 percentage the checkpoint schema implies is still never computed; only the dead
 table is gone, not the unbuilt feature.
+
+**G18 — `restore-state` has no cap, and what it injects grows every cycle, forever.**
+`inbox-check` budgets its injection at 8,000 characters. `restore-state` budgets nothing.
+It injects the mission, every task **title**, every **blocker**, and every
+**`open_threads`** entry — joined, unbounded, on every `SessionStart`.
+
+Those fields only grow. The seed writes `"open_threads":[]` and nothing in the CLI or the
+hook ever prunes, caps, or ages them; retiring a thread is a convention with no
+instrument, exactly as G7 says of the schema generally. Measured on the live swarm:
+
+| Agent | Cycles | Tasks | Open threads | Checkpoint on disk | Injected |
+|---|---:|---:|---:|---:|---:|
+| `cos` | 7 | 17 | 25 | 46,118 B | **15,415 B** |
+| `product` | 3 | 9 | 8 | 8,908 B | 4,936 B |
+
+**The 3× gap between file and payload corrects a natural misreading.** `restore-state`
+does *not* inject the `progress` fields, which are most of a checkpoint's bytes. So a
+46 KB checkpoint is not a 46 KB injection, and the quantity that matters is not size on
+disk — it is task and thread **count**. Empirically the payload crosses 64 KiB at roughly
+700 tasks or 300 open threads: implausible for a short-lived child, entirely plausible for
+a standing agent that opens a thread per finding and closes none.
+
+Before PR #31 an oversized payload was *destroyed* (see G17 in
+[PRD 02](02-inbox-messaging.md)) — the continuity mechanism silently eating its own
+restore, which is precisely the goal-drift a checkpoint exists to prevent. That is fixed:
+it now arrives whole. But it arrives into a finite context window, every session, and an
+agent restored after a compaction pays for every thread it has ever opened.
+
+The product decision here is **retention, not truncation**. A blind cap on the injection
+would silently drop the oldest entries, and the oldest entry is the mission. What the
+system lacks is a *closing discipline*: an agent should retire an `open_threads` entry when
+it resolves, the way it marks a task `done`. Failing that, `restore-state` should prefer
+open threads and in-progress tasks over the whole list.
 
 **G7 — the schema has no instrument.** No verb validates a written checkpoint. No
 code in the repository reads `updated_ts` or `seq` — the two fields whose entire
