@@ -6,8 +6,8 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #31 (`08f683b`). Newest tag: **`v0.9.0`** — `main` is
-ten commits ahead of it, carrying four code fixes (PRs #23, #24, #25, #31). That tag is
+Baseline: `main` through PR #38 (`cac6f1a`). Newest tag: **`v0.9.0`** — `main` is well
+ahead of it, carrying four code fixes (PRs #23, #24, #25, #31). That tag is
 itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
@@ -45,14 +45,14 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; five more
-(G14–G18) were found later, in use. They are restated in context inside each PRD;
+The onboarding pass that produced these PRDs surfaced thirteen issues; six more
+(G14–G19) were found later, in use. They are restated in context inside each PRD;
 this is the index. **Severity is product severity** — how badly the thing a user was
 promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `08f683b`:** of the original four critical gaps, three are closed — G2
+**Status as of `cac6f1a`:** of the original four critical gaps, three are closed — G2
 by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
 half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
 (#21), but the guard that was supposed to make the miss impossible still cannot fire
@@ -65,11 +65,12 @@ show that the same class of thing broke twice.
 (PR #31). It was the only entry where a guarantee `WORLD.md` states in plain words was
 provably false. It is now under [Resolved](#resolved), with its verification.
 
-Five gaps were added *after* the onboarding pass, none of them visible by reading the
+Six gaps were added *after* the onboarding pass, none of them visible by reading the
 code: **G14** (a message can be silently corrupted by the caller's shell), **G15**
 (`swarm updates` prints unbounded history), **G16** (reading the operator's mail
 destroys it), **G17** (the delivery hook destroyed any message over ~64 KB — resolved),
-and **G18** (`restore-state`'s injection grows every cycle, uncapped).
+**G18** (`restore-state`'s injection grows every cycle, uncapped), and **G19** (the
+injection frames a directive exactly like a peer's opinion).
 
 **Three entries here are corrections against the people who wrote them**, and that is
 the point of keeping them:
@@ -91,7 +92,7 @@ the point of keeping them:
   injected. The fix was right; the reasoning for it was not, and the **real** unbounded
   quantity turned out to be task and thread *count*. Both errors were caught the same way.
 
-The method that produced every one of G14–G18, and caught every error in this list:
+The method that produced every one of G14–G19, and caught every error in this list:
 **run the code against a fixture; do not assert a guarantee from a document — including
 your own, and including one a trusted sibling hands you.**
 
@@ -324,6 +325,21 @@ So the decision splits three ways, and only one part needs code:
 - **Finished tasks → a filter.** Durable in the file, pointless in the injection, and
   reachable by no agent action at all.
 [03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
+
+**G19. The injection renders a directive and a peer's opinion identically, and calls the
+operator an agent.** The header is unconditional — *"You have N new message(s) **from other
+agents**"* (`swarm-hook.cjs:237`) — and the operator is not an agent; it has no registry entry,
+by design. Messages sort by **timestamp only** (`:225`). `rec.from` is used to print a name and
+nothing else (`:242`). Both are auto-acked identically.
+
+So a message that **settles** a question and one that **opens** one arrive in the same frame,
+in arrival order. A settling message presents as *finished*; an opening one presents as *work*.
+Nothing in the arrangement rewards reading the short procedural one first — which, in the
+incident recorded under G16, was the operator commissioning an implementation.
+
+`from == "operator"` is already on every record and is a clean discriminator. The fix is small
+and belongs with the `swarm inbox read`/`ack` work now in flight.
+[02](02-inbox-messaging.md)
 
 **G16. Reading destroys — and *rendering* is recorded as *receipt*.** Two faces of one
 defect; the operator has adopted a fix for both ([proposal 005](../proposals/005-inbox-read-ack.md),

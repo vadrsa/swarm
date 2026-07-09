@@ -218,6 +218,38 @@ is an argument for **explicit ack**, and simultaneously an argument **against** 
 because the failure was never a missing body. It was a missing action, and a notification adds
 one.
 
+**G19 — the injection renders a directive and a peer's opinion identically, and calls the
+operator an agent.** The mechanism behind the incident above, and it is a property of the
+tool rather than of the agent that tripped on it.
+
+Verified at source and by fixture:
+
+- The header is unconditional: ``You have ${unread.length} new message(s) **from other
+  agents**:`` (`swarm-hook.cjs:237`). The operator is **not an agent** — it has no registry
+  entry, by design — yet its directives are announced as agent chatter.
+- Messages are sorted **by timestamp only** (`:225`). There is no priority, no sender class.
+- `rec.from` is used to *print a name* and for nothing else (`:242`). It is never read to
+  order, mark, or separate.
+- Both messages are auto-acked into `read/` identically.
+
+So a message that **settles** a question and a message that **opens** one are presented in the
+same frame, in arrival order, and consumed by the same act of rendering. A settling message
+presents as *finished*; an opening one presents as *work*. Nothing in the arrangement rewards
+reading the short procedural one first — and in the incident above, the short procedural one
+was the operator commissioning an implementation.
+
+`from == "operator"` is already on every message record and is a clean discriminator (the
+operator has no `agents/<id>.json`, which is exactly how `swarm send operator` is
+special-cased). The fix is small; it belongs with the `swarm inbox read`/`ack` work now in
+flight.
+
+*Recorded because `cos` asked that it be, and declined it as exculpation:* **"the system did
+not decide what I attended to; it presented both and I chose."** Both findings are true and
+they belong in different places. The structural one is here. The personal one is a task in its
+checkpoint. The actionable form it derived — *"when an injection contains more than one
+message, read the one that changes what I should be doing first"* — is a habit no document can
+enforce, which is the point.
+
 **G9 — the doorbell screen-scrapes, against the product's own doctrine.**
 `ring_doorbell` greps the pane for `❯` to find the prompt line. WORLD.md's
 foundational reliability claim is that *"the hook firing is reliable; the pane is
@@ -244,6 +276,17 @@ G17**: because the guard cannot withhold the *first* message, a single oversized
 reaches `process.stdout.write()` whole, overruns the pipe buffer, and is destroyed. The
 multi-message case is bounded at `8000 + one body` and never gets there. And `cmd_send`
 has no size guard, so nothing upstream stops it.
+
+**The cap and the send-time limit are one invariant with two enforcement points**, not two
+features. Adopted with [proposal 005](../proposals/005-inbox-read-ack.md), which adds both:
+
+- **no *accepted* message may exceed the injection budget** — enforced at `send`
+- **no message *on disk* may blow the budget** — enforced at `inject`
+
+The second is not redundant: it covers messages written before the limit existed, and
+anything hand-planted. If the two numbers are allowed to drift apart, one of them is
+decoration. `cos` accepted this framing and rebriefed its implementation child to state the
+relationship in a comment rather than leave two magic constants to diverge.
 
 **G17 — a message over ~64 KB was silently destroyed on delivery. RESOLVED by PR #31
 (`08f683b`).** It was the most serious defect in this document, and it directly falsified
