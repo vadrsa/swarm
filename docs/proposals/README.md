@@ -1,0 +1,18 @@
+# Product proposals
+
+A proposal is a **decision, pre-made, with its work shown** — a recommendation the
+operator can accept or decline outright, never an open question handed back to him.
+The shape and the reasoning behind it are in
+[PRD 08](../prd/08-product-proposals.md).
+
+Declined proposals stay here. A record that forgets what was rejected cannot show
+that the same idea was rejected twice — the same reasoning that keeps resolved
+entries in the gap register.
+
+| # | Proposal | Status |
+|---|---|---|
+| [001](001-self-containedness-standard.md) | Make everything sent to the operator readable by a stranger | proposed |
+| [002](002-product-engineering-coordination.md) | Let product and engineering talk directly about facts | proposed |
+
+Written by the `product` agent. Delivered to the operator with `swarm send operator`,
+which carries the full text — never a path to it.
