@@ -47,6 +47,33 @@ const label = process.env.SWARM_AGENT_LABEL || id;
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
 
+// ------------------------------------------------------ transcript pointer
+// Claude passes the session's transcript path on every hook payload. That is the
+// ONLY authoritative way to learn which .jsonl belongs to THIS agent: `swarm
+// spawn` cannot know it (Claude picks the name after exec), and every agent in a
+// project shares one ~/.claude/projects/<slug>/ dir, so no glob — not even a
+// project-scoped one — can tell two siblings apart.
+//
+// Record it where `swarm checkpoint --context` can read it deterministically by
+// id. Runs BEFORE the verb dispatch below because every verb exits early, and
+// SessionStart/UserPromptSubmit fire long before the first Stop — so the pointer
+// exists from the agent's first breath (self-healing: any hook re-records it).
+//
+// Lives in state/ (not the agents/ registry) because `reap` deletes
+// agents/<id>.json but deliberately preserves state/ — and because a dedicated
+// file has ONE writer, so it needs no read-modify-write race against spawn/reap.
+const transcriptPath = payload.transcript_path || payload.transcriptPath || '';
+if (transcriptPath) {
+  try {
+    const stateDir = path.join(swarmDir, 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const ptr = path.join(stateDir, `${id}.transcript`);
+    const tmp = `${ptr}.tmp`;
+    fs.writeFileSync(tmp, transcriptPath + '\n');
+    fs.renameSync(tmp, ptr); // atomic: a concurrent reader never sees a partial path
+  } catch { /* best effort — never break the agent's turn */ }
+}
+
 // --------------------------------------------------------- restore-state
 // SessionStart verb (all agents). On a fresh or post-compaction session,
 // re-inject this agent's goal-status checkpoint so it recovers its working state
@@ -228,7 +255,7 @@ function looksLikeQuestion(text) {
   return endsQ || (phraseHit && /[?:]\s*$/.test(text));
 }
 
-const transcriptPath = payload.transcript_path || payload.transcriptPath || '';
+// transcriptPath is resolved and persisted near the top, before verb dispatch.
 const fullText = lastAssistantText(transcriptPath);
 const summary = fullText.slice(0, 300);
 
