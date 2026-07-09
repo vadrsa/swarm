@@ -92,7 +92,12 @@ compatibility). Two things follow from this that trip people up:
 
 ## Migration notes
 
-Newest first. One entry per breaking (MAJOR) release.
+Newest first. One entry per breaking release. Ideally every breaking change ships
+in a MAJOR, so that `swarm update`'s `--major` guard stops users on the way in.
+That has not always held: v0.6.0 below is a breaking change that shipped as a
+MINOR, and the guard therefore never fired for it. Where a note's version is not
+`X.0.0`, it is recording exactly that kind of miss — read it before updating past
+it, because nothing in the tooling will make you.
 
 <!-- Template:
 ### vX.0.0 — <title>
@@ -101,11 +106,25 @@ Newest first. One entry per breaking (MAJOR) release.
 delete old .swarm/ dirs, re-run install>.
 -->
 
-### v1.0.0 — durable inbox messaging replaces live-pane `swarm send`
+### v0.6.0 — durable inbox messaging replaces live-pane `swarm send`
+
+> **This breaking change shipped as a MINOR, and `swarm update` will not warn
+> you about it.** The `--major` guard only fires when the version's major
+> component increments. It did not increment here — v0.5.0 → v0.6.0 is a minor
+> bump — so `swarm update` carried, and still carries, users straight across
+> this break with no prompt and no pointer to this note. The guard cannot
+> protect anyone crossing v0.5.0 → v0.6.0. It never could. If you are updating
+> from v0.5.0 or earlier, this note is your only warning; follow **Migrate**
+> below by hand.
+>
+> (For the record: the change was authored as v1.0.0 and this note was
+> originally filed under that heading, but no v1.0.0 was ever cut — the release
+> was classified and tagged v0.6.0. `git tag --contains 8e192a4` reports
+> v0.6.0 as the first tag containing it. There has never been a v1.0.0 tag.)
 
 **Breaking:** `swarm send` no longer types the message into the target agent's
 live TUI pane. It now writes the message to a durable file inbox
-(`.swarm/swarms/<id>/inbox/<agent-id>/*.json`) and rings a best-effort doorbell;
+(`.swarm/inbox/<agent-id>/*.json`) and rings a best-effort doorbell;
 the message is surfaced into the agent's context by a new `UserPromptSubmit` hook
 that `swarm spawn` registers (alongside the existing Stop/Notification hooks).
 Consequences:
@@ -120,8 +139,16 @@ Consequences:
 - The old live-typing helpers (`send_enter_when_settled`, `_prompt_box_content`)
   are removed from the send path.
 
-**Migrate:** Finish or `swarm close` any active swarm started on a pre-1.0
+**Migrate:** Finish or `swarm close` any active swarm started on a pre-v0.6.0
 version before upgrading (its agents won't have the inbox hook). New swarms
-started on v1.0.0 get inbox messaging automatically — no user action beyond the
-normal `swarm update`. Old `.swarm/` dirs from prior runs are harmless to leave
-on disk but won't receive messages under the new model.
+started on v0.6.0 or later get inbox messaging automatically — no user action
+beyond the normal `swarm update`. Old `.swarm/` dirs from prior runs are harmless
+to leave on disk but won't receive messages under the new model.
+
+**Note on the path above.** As shipped, v0.6.0 wrote to
+`.swarm/swarms/<id>/inbox/<agent-id>/*.json`. The flat `.swarm/inbox/...` path
+documented above is the *current* layout: a later change (`0e4d8b7`, "one swarm
+per project") removed the swarm-id level entirely. That change is on `main` and
+is not in any tag as of this writing, so it is not yet its own migration note.
+The path is written in its current form here so that a reader landing on this
+note is not sent looking for a directory that no longer exists.
