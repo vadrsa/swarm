@@ -45,10 +45,10 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; two more
-(G14, G15) were found later, in use. They are restated in context inside each PRD;
-this is the index. **Severity is product severity** — how badly the thing a user was
-promised fails to happen.
+The onboarding pass that produced these PRDs surfaced thirteen issues; three more
+(G14, G15, G16) were found later, in use. They are restated in context inside each
+PRD; this is the index. **Severity is product severity** — how badly the thing a user
+was promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
@@ -61,10 +61,10 @@ policy. **G13 is a decided no-op, not an open request** (see its entry). Closed
 gaps are kept below under [Resolved](#resolved), not deleted: a register that
 forgets what was broken cannot show that the same class of thing broke twice.
 
-Two gaps were added *after* the onboarding pass, both found in use rather than by
-reading: **G14** (a message can be silently corrupted by the caller's shell) and
-**G15** (`swarm updates` prints unbounded history). Neither was visible from the
-code alone.
+Three gaps were added *after* the onboarding pass, all found in use or by running the
+code rather than reading it: **G14** (a message can be silently corrupted by the
+caller's shell), **G15** (`swarm updates` prints unbounded history), and **G16**
+(reading the operator's mail destroys it; the injected inbox header over-counts).
 
 **And one entry is a correction against this register itself.** PR #24 fixed a case
 where `reap` *could* free a name — a guarantee `WORLD.md`, three code comments, and
@@ -213,6 +213,21 @@ re-parsed through a shell breaks — and the reasoning was never carried across 
 `send`. Delivery is guaranteed; body integrity is not, and no document says so.
 [02](02-inbox-messaging.md) · [proposal 004](../proposals/004-send-quoting-hazard.md)
 
+**G16. Reading the operator's mail destroys it — including `swarm updates --json`.**
+`cmd_updates` prints, flushes, then calls `mark_read()`, which moves every surfaced
+message into `read/`. It does this on the `--json` path too, *before* exiting. So any
+script that polls `swarm updates --json` silently consumes the operator's escalations
+and leaves nothing in the terminal for the human. Found by `rd`; the fix is held by
+`cos` pending a decision on read semantics.
+
+The same entry covers a second, subtler defect on the agent side: **the injected inbox
+header counts messages the agent is never shown.** The header uses `unread.length` while
+the loop injects `injectedCount`, so a capped delivery announces *"You have 5 new
+message(s)"*, injects three, and marks those three read. Demonstrated against the real
+hook. The product therefore already performs **implicit, silent, cumulative
+acknowledgement** — the behaviour is right, the silence is the bug.
+[02](02-inbox-messaging.md) · [proposal 005](../proposals/005-inbox-read-ack.md)
+
 **G15. `swarm updates` prints the entire history of the swarm, every time.**
 `cmd_updates` iterates the event directory, filters only by `--id`, and prints every
 record it finds. There is no limit, no default window, and no pagination. Since the
@@ -221,8 +236,9 @@ without bound for as long as the repository lives.
 
 Measured here: 27 records / 108 KB after one generation of five agents; a prior
 per-run directory holds 216 from a single run. Extrapolated, 200 generations is 21 MB
-on disk — irrelevant — but **~432 KB of text dumped into a terminal or an agent's
-context window** by the operator's only inbox verb.
+on disk — irrelevant — but at ~255 bytes of *formatted output* per record (measured by
+`cos`), **~1.4 MB of text dumped unpaginated into a terminal or an agent's context
+window** by the operator's only inbox verb.
 
 The framing matters, because this gap has been rediscovered three times as a *disk*
 problem and it is not one. Every structural reader is already bounded: `wait` wants an

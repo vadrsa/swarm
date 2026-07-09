@@ -200,6 +200,35 @@ any size is injected in full. Conversely, when the cap does bite, the agent is t
 "…and N more; full messages in `inbox/<id>/`" and those N remain unread on disk,
 correctly, for next turn.
 
+Both halves verified by running the shipping hook against a synthetic inbox. One 20 KB
+message injects **20,224 characters through an 8,000-character cap** — 2.5× over. Any
+argument about the injection's context cost that leans on that number is leaning on a
+number the code does not honour.
+
+**G16 — the inbox header counts messages the agent was never shown.** The injected
+header is built from `unread.length`, but the loop injects `injectedCount`. When the cap
+bites, an agent is told *"You have 5 new message(s)"* and shown **three** — and the three
+are then moved to `read/` while the two it was never told it was missing stay behind.
+Demonstrated against the real hook with five 2.6 KB messages:
+
+```
+HEADER:          [swarm inbox] You have 5 new message(s) from other agents:
+bodies injected: 3
+still unread:    2      moved to read/: 3
+```
+
+The trailing *"…and 2 more"* line is technically present, but the header's count and the
+body count disagree, and the header is the sentence that frames everything after it. An
+agent that reads "5 new messages," counts three, and reconciles is being asked to notice
+an arithmetic discrepancy in out-of-band context.
+
+This also means the product **already performs implicit, silent, cumulative
+acknowledgement**: it acks exactly the prefix it delivered. That behaviour is correct —
+it is the *silence* that is the defect. One line fixes it:
+`Showing 3 of 5 new messages (2 remain — they will be shown next turn).`
+Discussed in [proposal 005](../proposals/005-inbox-read-ack.md), which argues this is the
+sound half of a redesign whose other half would cost a delivery guarantee.
+
 There is **no cap on inbox growth**. A parent that sends faster than a child takes
 turns accumulates an unbounded directory, and each subsequent turn re-reads and
 re-parses all of it.
