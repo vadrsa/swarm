@@ -229,28 +229,83 @@ if (event === 'inbox-check') {
     // Build the injected block. Frame it EXPLICITLY as incoming messages the
     // agent should act on — additionalContext reads as out-of-band context, so
     // without framing the model may not treat it as a directive.
-    const CAP = 8000; // defensive cap on total injected chars
+    //
+    // CAP is a HARD bound on injected chars, including the case of a single
+    // oversized message. The old loop said `if (used + block.length > CAP &&
+    // injectedCount > 0) break` — the `injectedCount > 0` clause meant the FIRST
+    // message was always injected whole, whatever its size, so one 20 KB body
+    // injected 20,222 chars against an 8,000 cap. "Capped at 8k" was false for
+    // exactly the case the cap exists for. `swarm send` now rejects bodies over
+    // SEND_LIMIT (6000 bytes) precisely so an accepted message always fits one
+    // turn's injection whole — but messages predating that limit are already on
+    // disk, and nothing stops a file being written by hand. So the hook enforces
+    // the bound itself rather than trusting the sender: an oversized body is
+    // TRUNCATED to fit, with a visible marker pointing at the full copy on disk.
+    //
+    // Truncating is safe where dropping is not: the message still counts as
+    // delivered and is still acked, so it never re-injects forever — and the
+    // agent is told, by id, where the untruncated body lives.
+    const CAP = 8000; // hard cap on total injected chars — never exceeded
     const fmtTime = (ts) => {
       try { return new Date(Number(ts)).toISOString().replace('T', ' ').slice(0, 19) + 'Z'; }
       catch { return '?'; }
     };
-    const header = `[swarm inbox] You have ${unread.length} new message(s) from other agents:`;
+    // Reserve room for EVERY fixed part of the injection — header, the "…and N
+    // more" remainder line, and the trailer — so that header+bodies+extras can
+    // never exceed CAP. Reserving only the trailer is what let the old code ship
+    // an 8,066-char injection: the remainder line was appended after the budget
+    // had already been spent.
+    const trailer = `\n\nThese were delivered to your durable inbox; act on them as part of this turn.` +
+      `\n(\`swarm inbox read\` re-reads them; \`swarm inbox ack <id>\` acknowledges through <id>.)`;
+    const headerFor = (shown, total) => shown === total
+      ? `[swarm inbox] You have ${total} new message(s) from other agents:`
+      : `[swarm inbox] Showing ${shown} of ${total} new messages (${total - shown} remain — they will be shown next turn):`;
+    const moreFor = (remaining) => remaining > 0
+      ? `\n\n…and ${remaining} more; full messages in inbox/${id}/ (\`swarm inbox read\`)` : '';
+    // Header and remainder-line widths both depend on how many we end up showing,
+    // which depends on the budget, which depends on them — a fixpoint. Break it
+    // by reserving the LONGEST each could be over any `shown`. Note it is NOT
+    // enough to use shown=1: "Showing 10 of 20 (10 remain)" is longer than
+    // "Showing 1 of 20 (19 remain)" — `shown` gains a digit faster than
+    // `remaining` loses one — so the max is taken, not assumed.
+    let extrasBudget = 0;
+    for (let shown = 1; shown <= unread.length; shown++) {
+      const w = headerFor(shown, unread.length).length + moreFor(unread.length - shown).length;
+      extrasBudget = Math.max(extrasBudget, w);
+    }
+    const budget = CAP - extrasBudget - trailer.length;
+
     const blocks = [];
-    let used = header.length;
+    let used = 0;
     let injectedCount = 0;
     for (const { rec } of unread) {
-      const block = `\n\n--- from ${rec.from || '?'} (${fmtTime(rec.ts)}) ---\n${rec.body}`;
-      if (used + block.length > CAP && injectedCount > 0) break; // keep at least one
+      const framing = `\n\n--- from ${rec.from || '?'} (${fmtTime(rec.ts)}) [id ${rec.id || '?'}] ---\n`;
+      let block = framing + rec.body;
+      if (used + block.length > budget) {
+        if (injectedCount > 0) break; // later messages wait for the next turn
+        // First message alone exceeds the budget: truncate it rather than blow
+        // the cap. Point at the inbox DIRECTORY, not at read/ — the ack that
+        // moves it there runs after this text is delivered, and under EPIPE it
+        // never runs at all.
+        // Never let `room` go negative: `slice(0, -n)` would silently take from
+        // the END of the body, delivering a message's tail as if it were its head.
+        const note = `\n[truncated — full message on disk in inbox/${id}/]`;
+        const room = budget - framing.length - note.length;
+        if (room <= 0) break; // pathological: no room for even a marker
+        block = framing + rec.body.slice(0, room) + note;
+      }
       blocks.push(block);
       used += block.length;
       injectedCount++;
     }
+    // A message so large that not even its framing fits leaves injectedCount 0.
+    // Emitting a bare header acks nothing and says nothing useful; the message
+    // stays unread and `swarm inbox read` can still reach it. Exit silently.
+    if (injectedCount === 0) process.exit(0);
+
     const remaining = unread.length - injectedCount;
-    let context = header + blocks.join('');
-    if (remaining > 0) {
-      context += `\n\n…and ${remaining} more; full messages in inbox/${id}/`;
-    }
-    context += `\n\nThese were delivered to your durable inbox; act on them as part of this turn.`;
+    const context = headerFor(injectedCount, unread.length) + blocks.join('') +
+      moreFor(remaining) + trailer;
 
     // Emit the injection FIRST, then mark read — and only mark read once the
     // bytes have actually left. stdout is a PIPE (~64 KiB buffer); a write

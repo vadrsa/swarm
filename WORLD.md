@@ -39,13 +39,30 @@ idempotent init that prints the swarm root; it is never required.)
   doorbell was missed. **This is durable-async, NOT the old live-keystroke model**
   (see the reliability note below): a message is *always delivered*, but a busy
   agent may see it on its next turn rather than instantly.
+  **A body over 6000 bytes is rejected** — the guarantee above only holds for a
+  message that fits one turn's injection whole. Put large content in a file and
+  send the path.
 - `swarm send operator "<message>"` → the one non-agent target: the **human root**,
   every escalation's last stop. It has no pane and no doorbell, so the message is
   durable-file-only (`.swarm/inbox/operator/`); the human reads it by running
-  `swarm updates`. Send up to it exactly like any other id. Every other unknown id
-  is still an error.
+  `swarm updates` or `swarm inbox read`. Send up to it exactly like any other id.
+  Every other unknown id is still an error.
 - `swarm updates [--id X]` → subagent reports, each with a state and a one-line
-  summary. Your inbox.
+  summary. Run as the operator, it also shows your inbox. **Reading never
+  consumes**, on any path including `--json`: a script may poll it freely.
+- `swarm inbox read [--json]` → your unread messages, each with its **message id**.
+  Non-destructive; safe to run repeatedly.
+- `swarm inbox ack <message-id>` → consume mail, **explicitly**. Acknowledgement is
+  *cumulative over arrival order*: `ack X` consumes X and everything that arrived
+  before it, and prints every id it consumed. It must **name an id that is
+  currently outstanding** — acking an unknown or already-acked id is an error, not
+  a no-op — and **there is no `ack --all`**.
+
+  For an **agent**, mail is acked automatically the moment the hook injects it:
+  delivery is atomic with the turn, so nothing can be shown and then lost. `read`
+  and `ack` exist for what the 8000-char injection cap *holds back* (and to re-read
+  a message lost to compaction). For the **operator**, who has no hook and no turn,
+  **nothing is ever acked but an explicit `ack`.** That asymmetry is deliberate.
 - `swarm wait <id> [--timeout SEC]` → blocks until the subagent's newest report
   is a stop state, then prints it. Has a timeout (won't hang).
 - `swarm list [--live-only]` → the swarm's roster; each agent marked `live` or
@@ -128,6 +145,10 @@ verified result.
   is gone. The "doorbell" that surfaces it in near-realtime is best-effort — a
   busy agent may pick the message up on its next turn instead of instantly, but it
   *will* pick it up. Do not assume a sent message is seen the same instant.
+- **A message is a message, not a payload.** `swarm send` rejects a body over
+  **6000 bytes**, because the delivery hook injects at most 8000 chars per turn and
+  a message that cannot fit one turn whole cannot be delivered whole. Write large
+  content to a file and send its path. The rejection is loud and nothing is queued.
 - The agent cap the user gives you is a real ceiling on concurrent subagents.
 - Each subagent has only the context you put in its `spawn` task — it does not
   see your conversation or the other agents'.

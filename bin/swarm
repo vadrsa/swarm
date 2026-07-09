@@ -641,6 +641,27 @@ cmd_send() {
   init_swarm_paths
   local id="${1:-}" msg="${2:-}"
   [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"'
+
+  # Size limit — enforced at the SOURCE, before anything is written.
+  #
+  # The delivery hook's injection CAP is 8000 chars TOTAL (header, per-message
+  # framing, and trailer come out of that same budget). A message that cannot fit
+  # one turn's injection whole must either be truncated or held back, and both are
+  # ways of not delivering what the sender wrote. So the send limit sits
+  # meaningfully below 8000, and any ACCEPTED message is guaranteed to fit a
+  # single turn's injection intact. That guarantee is what makes the cap honest.
+  #
+  # 6000 bytes. Measured over every message this swarm has ever sent (n=75):
+  # median 3201, p90 5133, max 11103. A 6000-byte limit accepts 97.3% (73/75) and
+  # rejects only the two largest — both of which are exactly the "paste a file
+  # into a message" case this error tells you to fix. Bytes, not characters: the
+  # inbox record is UTF-8 on disk and the pipe buffer counts bytes.
+  local SEND_LIMIT=6000
+  local nbytes; nbytes=$(printf %s "$msg" | wc -c | tr -d ' ')
+  if [ "$nbytes" -gt "$SEND_LIMIT" ]; then
+    die "message too big ($nbytes > $SEND_LIMIT); store large content as a file and reference its path in the message."
+  fi
+
   # Validate the target exists (and get its pane for the doorbell). The operator
   # has neither: it is a durable-file-only mailbox.
   local pane=""
@@ -727,15 +748,22 @@ ring_doorbell() {
 #
 # `updates` is the "what came in for me" verb, so when the OPERATOR runs it
 # (SWARM_AGENT_ID unset/empty — the same test cmd_send uses to name the human
-# root) it ALSO drains inbox/operator/: the escalations agents sent up. Agents
+# root) it ALSO shows inbox/operator/: the escalations agents sent up. Agents
 # get their inbox injected by the inbox-check hook; the operator has no hook, so
-# this is its read path. No new verb, no new surface.
-#
-# Read semantics mirror the agent hook EXACTLY: surfacing a message marks it read
-# by MOVING it to inbox/operator/read/ (atomic rename, durable audit trail). Emit
-# first, then move — a crash between the two re-shows a message (safe) rather
-# than losing it. An --id filter targets a specific AGENT's reports, so it
+# this is its read path. An --id filter targets a specific AGENT's reports, so it
 # suppresses the operator inbox. An empty inbox is a silent no-op.
+#
+# READING NEVER DESTROYS. `updates` — in EVERY form, including --json — leaves
+# the operator's mail exactly where it found it. Consuming it takes a deliberate
+# second step: `swarm inbox ack <id>`.
+#
+# It used to mark read. `cmd_updates` printed, flushed, then called mark_read(),
+# which moved every surfaced message into read/ — on the --json path too. So any
+# script polling `swarm updates --json` silently consumed the operator's
+# escalations and left no trace on any terminal. The operator has no hook and no
+# turn: unlike an agent, nothing re-offers a message it never saw. Destroying on
+# read was therefore strictly worse here than anywhere else in the system, and it
+# is now gone. See `cmd_inbox` for the read/ack verbs that replace it.
 cmd_updates() {
   init_swarm_paths
   local only_id="" as_json=""
@@ -767,15 +795,8 @@ if op and os.path.isdir(op):
         if isinstance(r.get("body"),str): mail.append((fn,r))
     mail.sort(key=lambda x: int(x[1].get("ts") or 0))
 
-def mark_read():
-    """Move surfaced messages into read/ (atomic rename). Best-effort, never fatal."""
-    if not mail: return
-    rd=os.path.join(op,"read")
-    try: os.makedirs(rd,exist_ok=True)
-    except OSError: return
-    for fn,_ in mail:
-        try: os.replace(os.path.join(op,fn),os.path.join(rd,fn))
-        except OSError: pass
+# Reading is NON-DESTRUCTIVE: nothing is moved into read/ here, on any path.
+# `swarm inbox ack <id>` is the only thing that consumes operator mail.
 
 if as_json:
     # Shape depends on WHO asks, never on whether mail happens to exist:
@@ -784,7 +805,7 @@ if as_json:
     # A poller therefore sees one stable schema, empty inbox or not.
     print(json.dumps({"updates":recs,"inbox":[r for _,r in mail]},indent=2) if op
           else json.dumps(recs,indent=2))
-    sys.stdout.flush(); mark_read(); sys.exit(0)
+    sys.exit(0)
 
 import datetime
 if not recs and not mail:
@@ -793,11 +814,167 @@ for r in recs:
     t=datetime.datetime.fromtimestamp(r.get("ts",0)/1000).strftime("%H:%M:%S")
     print(f"[{t}] {r.get('id')} {r.get('label','')} {r.get('state','').upper()}: {r.get('summary','') or '(no summary)'}")
 if mail:
-    print(f"\n[swarm inbox] {len(mail)} new message(s) to operator:")
+    print(f"\n[swarm inbox] {len(mail)} unread message(s) to operator:")
     for _,r in mail:
         t=datetime.datetime.fromtimestamp(int(r.get("ts") or 0)/1000).strftime("%H:%M:%S")
-        print(f"\n--- from {r.get('from','?')} ({t}) ---\n{r.get('body','')}")
-sys.stdout.flush(); mark_read()
+        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}] ---\n{r.get('body','')}")
+    print(f"\nThese stay unread until acknowledged: swarm inbox ack {mail[-1][1].get('id','<id>')}")
+PY
+}
+
+# ------------------------------------------------------------------- inbox
+# swarm inbox read [--json]     — show MY unread messages. Never consumes.
+# swarm inbox ack <message-id>  — consume everything up to and including <id>.
+#
+# WHOSE inbox: the caller's. An agent (SWARM_AGENT_ID set) reads inbox/<id>/; the
+# operator (unset) reads inbox/operator/. Same layout, same files, same records —
+# but deliberately NOT the same code path as the agent delivery hook, which is
+# Node. That duplication is load-bearing, not laziness: the hook writes its
+# payload to a ~64 KiB pipe and Node discards whatever is still queued at
+# process.exit(), which is how G17 destroyed every message over ~64 KB. Python
+# flushes on exit. The operator's mailbox is the one inbox G17 could never reach,
+# and it was spared *by accident* — because it is read from here. Unifying the two
+# readers would hand the operator's channel the agent path's bug. Proposal 005's
+# verdict is "unify nothing", and this comment is why.
+#
+# WHAT ACK MEANS: acknowledgement is CUMULATIVE over arrival order (`ts`, which is
+# embedded in every message id as `<from>-<ts>`). `ack X` consumes X and every
+# outstanding message that arrived before it. Three rules make that deliberate
+# rather than a footgun, and all three are enforced below:
+#
+#   1. `read` PRINTS IDS. You cannot ack what you were never shown.
+#   2. `ack` NAMES THE HIGHEST ID being claimed — never a count, never a range.
+#   3. THERE IS NO `--all`. Not a hidden one, not an alias. Acking is a claim
+#      about specific messages you have read; a verb that means "whatever is in
+#      there" is a claim about nothing.
+#
+# And the sharp edge, called out in the proposal (~L208): `ack N+2` silently
+# consumes N+1. That is the adopted semantics — a monotonic watermark, the same
+# prefix-ack the injection cap has always performed implicitly. What we refuse is
+# for it to be *silent*: ack names every id it swept, so consuming an unread
+# instruction is something you can see you did. An id that is not currently
+# outstanding is an ERROR, never a silent no-op — otherwise a typo'd ack, or one
+# replayed against an already-drained inbox, would report success having done
+# nothing at all.
+cmd_inbox() {
+  init_swarm_paths
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    read|ack) :;;
+    "") die 'inbox needs: swarm inbox read [--json] | swarm inbox ack <message-id>';;
+    *) die "unknown inbox subcommand: $sub (expected: read | ack)";;
+  esac
+
+  # The caller's own mailbox. Agents never read another agent's inbox.
+  local me="${SWARM_AGENT_ID:-operator}"
+  local box="$INBOX_DIR/$me"
+
+  local as_json="" want_id=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) as_json=1; shift;;
+      # Named explicitly so the refusal is a message, not an "unknown flag". An
+      # ack-all is the one thing this design will not have: acking is a claim
+      # about messages you have read, and "--all" claims nothing in particular.
+      --all) die "there is no 'swarm inbox $sub --all'. Ack names the highest message id you are claiming: swarm inbox ack <message-id>";;
+      -*) die "unknown flag: $1";;
+      *) [ -z "$want_id" ] || die "ack takes exactly one message id"; want_id="$1"; shift;;
+    esac
+  done
+
+  if [ "$sub" = "ack" ]; then
+    [ -n "$want_id" ] || die "ack needs the highest message id you are claiming: swarm inbox ack <message-id> (see 'swarm inbox read'). There is no ack-all."
+    [ -z "$as_json" ] || die "ack takes no --json"
+  else
+    [ -z "$want_id" ] || die "read takes no arguments"
+  fi
+
+  SUB="$sub" BOX="$box" ME="$me" WANT="$want_id" AS_JSON="${as_json:-}" python3 - <<'PY'
+import json,os,sys,datetime
+
+sub,box,me,want,as_json = (os.environ["SUB"],os.environ["BOX"],os.environ["ME"],
+                           os.environ["WANT"],os.environ["AS_JSON"])
+
+# Unread = *.json directly under the box (read ones live in read/). Identical
+# filter and sort to the agent hook, so both readers agree on what "outstanding"
+# and "arrival order" mean.
+mail=[]
+if os.path.isdir(box):
+    for fn in sorted(os.listdir(box)):
+        if not fn.endswith(".json"): continue
+        try: r=json.load(open(os.path.join(box,fn)))
+        except Exception: continue          # unreadable/corrupt: never crash a reader
+        if isinstance(r.get("body"),str): mail.append((fn,r))
+    mail.sort(key=lambda x: int(x[1].get("ts") or 0))
+
+def ts_of(r):
+    try: return int(r.get("ts") or 0)
+    except Exception: return 0
+
+if sub == "read":
+    if as_json:
+        print(json.dumps([r for _,r in mail],indent=2)); sys.exit(0)
+    if not mail:
+        print(f"[swarm inbox] {me}: no unread messages"); sys.exit(0)
+    print(f"[swarm inbox] {me}: {len(mail)} unread message(s):")
+    for _,r in mail:
+        t=datetime.datetime.fromtimestamp(ts_of(r)/1000).strftime("%H:%M:%S")
+        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}] ---\n{r.get('body','')}")
+    print(f"\nStill unread. To consume through the last one: swarm inbox ack {mail[-1][1].get('id','<id>')}")
+    sys.exit(0)
+
+# ------------------------------------------------------------------- ack
+# The named id must be OUTSTANDING right now. Not "already acked", not "never
+# existed", not "sitting in someone else's box" — outstanding here, in this
+# mailbox. Anything else is an error with a nonzero exit, because the caller
+# believes it consumed something and must find out that it did not.
+def already_acked(mid):
+    """Was `mid` acknowledged earlier? Purely to make the error message useful."""
+    rd=os.path.join(box,"read")
+    if not os.path.isdir(rd): return False
+    for f in os.listdir(rd):
+        if not f.endswith(".json"): continue
+        try:
+            if json.load(open(os.path.join(rd,f))).get("id")==mid: return True
+        except Exception: continue
+    return False
+
+target=[(fn,r) for fn,r in mail if r.get("id")==want]
+if not target:
+    if already_acked(want):
+        print(f"swarm: message '{want}' is already acknowledged (nothing to do)",file=sys.stderr)
+    else:
+        print(f"swarm: no outstanding message with id '{want}' in {me}'s inbox",file=sys.stderr)
+    known=sorted(r.get("id","?") for _,r in mail)
+    print(f"swarm: outstanding ids: {', '.join(known)}" if known
+          else "swarm: (inbox is empty — nothing is outstanding)",file=sys.stderr)
+    sys.exit(1)
+
+# Cumulative prefix: this message and everything that arrived at/before it.
+cutoff = ts_of(target[0][1])
+prefix = [(fn,r) for fn,r in mail if ts_of(r) <= cutoff]
+
+rd=os.path.join(box,"read")
+try: os.makedirs(rd,exist_ok=True)
+except OSError as e:
+    print(f"swarm: cannot create {rd}: {e}",file=sys.stderr); sys.exit(1)
+
+acked=[]
+for fn,r in prefix:
+    try:
+        os.replace(os.path.join(box,fn),os.path.join(rd,fn))  # atomic
+        acked.append(r)
+    except OSError as e:
+        print(f"swarm: failed to ack {r.get('id','?')}: {e}",file=sys.stderr); sys.exit(1)
+
+# Name every id consumed. `ack N+2` really does take N+1 with it; the operator's
+# safety rule is that this is visible, not that it cannot happen.
+print(f"acked {len(acked)} message(s) through {want}:")
+for r in acked:
+    mark = "" if r.get("id")==want else "  (swept by cumulative ack)"
+    print(f"  {r.get('id','?')}  from {r.get('from','?')}{mark}")
+left=len(mail)-len(acked)
+print(f"{left} message(s) still unread." if left else "Inbox is now empty.")
 PY
 }
 
@@ -1326,8 +1503,19 @@ verb_usage() {
     update)  echo "swarm update [--check] [--pre] [--major]";;
     start)   echo "swarm start";;
     spawn)   echo 'swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]';;
-    send)    echo 'swarm send <agent-id|operator> "<message>"';;
-    updates) echo "swarm updates [--id <agent-id>] [--json]";;
+    send)    printf '%s\n' \
+               'swarm send <agent-id|operator> "<message>"' \
+               '' \
+               'The body must be <= 6000 bytes: the delivery hook injects at most 8000' \
+               'chars per turn, so a larger message could not be delivered whole. Store' \
+               'large content as a file and reference its path in the message.';;
+    updates) echo "swarm updates [--id <agent-id>] [--json]   (never consumes mail)";;
+    inbox)   printf '%s\n' \
+               'swarm inbox read [--json]        my unread messages (never consumes)' \
+               'swarm inbox ack <message-id>     consume up to and including <message-id>' \
+               '' \
+               'Ack is cumulative over arrival order and names every id it consumes.' \
+               'It must name an id that is currently outstanding. There is no ack-all.';;
     wait)    echo "swarm wait <agent-id> [--timeout SEC]";;
     list)    echo "swarm list [--json] [--live-only]";;
     status)  echo "swarm status [--json]";;
@@ -1351,6 +1539,7 @@ case "${1:-}" in
   spawn)   shift; cmd_spawn "$@";;
   send)    shift; cmd_send "$@";;
   updates) shift; cmd_updates "$@";;
+  inbox)   shift; cmd_inbox "$@";;
   wait)    shift; cmd_wait "$@";;
   list)    shift; cmd_list "$@";;
   checkpoint) shift; cmd_checkpoint "$@";;
@@ -1382,7 +1571,11 @@ a collision (even with a reaped agent) gets a -2/-3/... suffix.
                                          prints the agent's id = slugify(L)
   swarm checkpoint --help | --context    goal-status continuity (every agent)
   swarm send  <agent-id|operator> "<message>"   'operator' = the human root (durable file, no pane)
-  swarm updates [--id <agent-id>] [--json]   agent reports; run as operator, also drains its inbox
+                                         bodies over 6000 bytes are rejected — send a file path
+  swarm updates [--id <agent-id>] [--json]   agent reports; as operator, also SHOWS its inbox
+                                         (reading never consumes; see 'swarm inbox ack')
+  swarm inbox read [--json]              my unread messages (never consumes)
+  swarm inbox ack <message-id>           consume up to and including <message-id> (no ack-all)
   swarm wait  <agent-id> [--timeout SEC]
   swarm list  [--json] [--live-only]     agents in this swarm (marks DEAD)
   swarm status [--json]                  reconciled snapshot (restart: read this)
