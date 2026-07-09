@@ -161,7 +161,8 @@ They are true now, at any size, and verified against the installed hook.
   version — only its contract changed.
 
 **Not bounded, and worth knowing:** nothing limits how much the hook *tries* to inject.
-`cmd_send` has no size guard, `inbox-check`'s 8,000-character cap cannot withhold the
+`cmd_send` **now** caps bodies at 6,000 bytes (PR #40; verified: 6,000 accepted, 6,002 rejected),
+but `inbox-check`'s 8,000-character cap still cannot withhold the
 first message (G10), and `restore-state` has no cap at all (G18). The drain fix means an
 oversized payload now arrives intact rather than being destroyed — a correctness bug
 converted into a context-budget one.
@@ -318,7 +319,7 @@ This is not merely a mis-stated bound. **The escape hatch is the delivery vehicl
 G17**: because the guard cannot withhold the *first* message, a single oversized body
 reaches `process.stdout.write()` whole, overruns the pipe buffer, and is destroyed. The
 multi-message case is bounded at `8000 + one body` and never gets there. And `cmd_send`
-has no size guard, so nothing upstream stops it.
+capped bodies at 6,000 bytes only from PR #40 onward; before that nothing upstream stopped it.
 
 **The cap and the send-time limit are one invariant with two enforcement points**, not two
 features. Adopted with [proposal 005](../proposals/005-inbox-read-ack.md), which adds both:
@@ -363,7 +364,8 @@ to exit naturally.
 
 Three properties compound to make it invisible:
 
-1. **`cmd_send` has no size guard whatsoever** (found by `cos`), so nothing prevents an
+1. **`cmd_send` had no size guard whatsoever** (found by `cos`) — *fixed in PR #40, which caps
+   bodies at 6,000 bytes.* At the time, nothing prevented an
    oversized body from being queued.
 2. **G10's `injectedCount > 0` escape hatch** means a single message bypasses the 8,000
    character budget entirely — so a lone oversized message reaches `write()` in full. The
@@ -557,6 +559,21 @@ still holds.
 > "simplify" the reader back to one directory.
 
 It costs 005 nothing: `inbox read` still moves nothing, it merely lists two directories.
+
+## A document is a claim about the present
+
+Three separate lines in this file asserted *"`cmd_send` has no size guard."* **The guard shipped
+in PR #40.** Verified against the installed binary: a 6,000-byte body is accepted; 6,002 is
+rejected with *"message too big."*
+
+Each line was **true when written** and became false when the code changed. **Nothing re-checked
+them.** `cos`'s child found *one* while working nearby, correctly refused to fix it (no scope
+creep on the core messaging surface), and routed it. Product verified the **class** and found
+three.
+
+That is the same disease as a **stale blocker** (G22) and a stale `delegated_to[].status` — a
+claim stored where the thing it describes cannot correct it. **This document is not exempt**, and
+neither is the correction above: it too will rot. Read it against the code.
 
 ## Testing this file's claims
 
