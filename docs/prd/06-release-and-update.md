@@ -137,15 +137,26 @@ leaves `.swarm/` state and PATH edits alone.
 This is the most serious defect in the product, and it is worth stating the
 evidence rather than the conclusion.
 
-**It has now happened twice, and the second time it was a decision, not an
-accident.** v0.6.0 (PR #10) and v0.9.0 (PR #16) are both breaking; both were
-classified MAJOR against this document's own criteria; both were released as
+**It has now happened three times, and the last two were decisions, not
+accidents.** v0.6.0 (PR #10), v0.9.0 (PR #16), and v0.11.0 (PR #40) are all breaking;
+all were classified MAJOR against this document's own criteria; all shipped as
 MINORs — the second, per its migration note, *"by operator decision, to keep the
 1.0 milestone unspent."* A one-off miss is a process bug. A repeated, deliberate
 one means the policy the guard implements is not the policy the project follows.
-PRs #18 and #21 made the *record* of this honest (see below); neither changed the
+PRs #18, #21, and #41 made the *record* of this honest (see below); none changed the
 mechanism, and no mechanism change is possible while the intent is to keep
 shipping breaks below `1.0.0`.
+
+**By the third, the operator had priced it explicitly.** Authorizing the release, he
+wrote to `release-mgr`: *"…because 0.9.0 → 0.10.0 does not cross a major boundary, the
+swarm update guard will NOT prompt users on the way across. **This is a deliberate
+operator call, not an oversight.**"*
+
+That sentence changes what this section is. It is no longer a defect the owner has not
+noticed; it is a **cost the owner has accepted, with the consequence stated back to
+him.** The remaining question is narrower and unanswered: *if the guard can never fire
+under the standing policy, should it gate on a change's declared classification instead
+— or be deleted, rather than left to imply a protection it never provides?*
 
 PR #10 (`feat!: durable inbox messaging replaces live-pane swarm send (BREAKING)`)
 replaced `swarm send`'s mechanism. Its own PR body says:

@@ -461,6 +461,20 @@ environment.
 command, but an **unchanged** result from a command that never ran the code path under test.
 It looks like a passing check."*
 
+**A second costume of the same hazard, caught live.** Verifying G1's release history, product
+ran `git tag | tail -3` and `git ls-remote --tags origin | tail -4`. Both printed cleanly,
+exited zero, and showed the newest tag as `v0.9.0`. Product nearly reported that
+`release-mgr` had created `v0.10.0`/`v0.11.0` and never pushed them — a release-integrity
+failure.
+
+**Both tags were on the remote.** Git sorts tags *lexically*, so `v0.10.0` and `v0.11.0` sort
+**before** `v0.6.0`, and `tail` showed the wrong end of the list. Two different commands, the
+same trap, and neither failed. `git for-each-ref` and `sort -V` both show the truth.
+
+The command ran. It answered a question — just not the one that was asked. **That is more
+dangerous than a command that errors**, and it is the same shape as the environment hazard
+above: a well-formed answer to a question you did not pose.
+
 ## Open product questions
 
 1. **Should the operator be *notified*, not just addressable?** *(Narrowed by

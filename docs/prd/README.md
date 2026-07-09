@@ -179,13 +179,32 @@ now say, in the note itself, that `swarm update` will *not* warn a user crossing
 them.
 
 That is the fix for the *record*. The **defect is unchanged**: `swarm update`'s
-`--major` guard keys off the tag's major component, so `0.5.0 → 0.6.0` and
-`0.8.0 → 0.9.0` both carry a user straight across a breaking change with no
-prompt and no pointer to the note that was written for them. Two breaking
-changes have now shipped as minors, both by operator decision to keep the 1.0
+`--major` guard keys off the tag's major component, so `0.5.0 → 0.6.0`,
+`0.8.0 → 0.9.0`, and `0.10.0 → 0.11.0` all carry a user straight across a breaking
+change with no prompt and no pointer to the note written for them. **Three** breaking
+changes have now shipped as minors, each by operator decision to keep the 1.0
 milestone unspent. **A guard that a release process routinely routes around is
 not a guard**, and honest documentation of that fact is not a substitute for
 one. Discussed in [06](06-release-and-update.md).
+
+**The third one changes this entry's character, and product only learned it by
+re-verifying a blocker it had been carrying for days (G22).** Authorizing v0.10.0, the
+operator wrote to `release-mgr`:
+
+> *"…because 0.9.0 → 0.10.0 does not cross a major boundary, the swarm update guard will
+> NOT prompt users on the way across. **This is a deliberate operator call, not an
+> oversight.**"*
+
+So G1 is no longer a contradiction the operator has not noticed. It is a **cost he has
+now accepted three times, in writing, with the consequence stated back to him.** That is
+a materially different entry: not *"the tool has a hole nobody has seen"* but *"the tool
+has a hole the owner has priced and chosen to keep."*
+
+What remains open is narrower and still unanswered: **should the guard gate on a change's
+declared classification rather than the tag's major component?** If the answer is no, the
+guard is decoration and should be deleted rather than left to imply a protection it never
+provides. Product's escalation of that question predates the v0.10.0 note and was never
+addressed; the note settles a release, not a policy.
 
 The minor tag is **not drift.** Asked point-blank whether to spend the milestone —
 *"release-mgr recommends v1.0.0 (genuine MAJOR, proper migration note). You previously
