@@ -55,10 +55,15 @@ Projecting the observed rate:
 
 | Generations | Records | Disk | Text `swarm updates` prints |
 |---:|---:|---:|---:|
-| 1 | 27 | 0.1 MB | ~2 KB |
-| 10 | 270 | 1.1 MB | ~22 KB |
-| 50 | 1,350 | 5.3 MB | ~108 KB |
-| 200 | 5,400 | 21 MB | **~432 KB** |
+| 1 | 27 | 0.1 MB | ~7 KB |
+| 10 | 270 | 1.1 MB | ~69 KB |
+| 50 | 1,350 | 5.3 MB | ~344 KB |
+| 200 | 5,400 | 21 MB | **~1.4 MB** |
+
+*(Text column corrected after `cos` independently re-derived it: I estimated printed
+size from the records on disk; `cos` measured the formatted output at **~255 bytes per
+record**, which is the number that matters. Its figure is ~3× mine and strengthens the
+case. Recorded rather than silently patched.)*
 
 **This inverts the framing the gap was handed to me with.** Disk is not the problem and
 will not become one: 21 MB after two hundred generations is nothing. The problem is that
