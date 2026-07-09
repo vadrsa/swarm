@@ -66,8 +66,13 @@ if not raw.strip(): sys.exit(0)
 print(json.load(open("/dev/stdin")) if False else json.loads(raw)["hookSpecificOutput"]["additionalContext"],end="")'
 }
 
-nunread() { ls "$SWARM_DIR/inbox/$1"/*.json 2>/dev/null | wc -l | tr -d ' '; }
-nread()   { ls "$SWARM_DIR/inbox/$1"/read/*.json 2>/dev/null | wc -l | tr -d ' '; }
+# The three states. `nunread` counts only NEVER-RENDERED messages (files directly
+# under the box); `nrendered` counts delivered-but-unacked; `nread` counts acked.
+# UNACKED = nunread + nrendered.
+nunread()   { ls "$SWARM_DIR/inbox/$1"/*.json 2>/dev/null | wc -l | tr -d ' '; }
+nrendered() { ls "$SWARM_DIR/inbox/$1"/rendered/*.json 2>/dev/null | wc -l | tr -d ' '; }
+nread()     { ls "$SWARM_DIR/inbox/$1"/read/*.json 2>/dev/null | wc -l | tr -d ' '; }
+nunacked()  { echo $(( $(nunread "$1") + $(nrendered "$1") )); }
 
 # ---------------------------------------------------------------------------
 case_ "V1 — send rejects an oversized body, and writes NOTHING"
@@ -107,14 +112,17 @@ case "$hdr" in
 esac
 case "$ctx" in *"…and 3 more; full messages in inbox/tester/"*) ok "'…and N more' disclosure preserved";; *) bad "lost the '…and N more' disclosure";; esac
 [ "${#ctx}" -le 8000 ] && ok "injection ${#ctx} chars <= 8000" || bad "injection ${#ctx} chars > 8000"
-[ "$(nunread tester)" = "3" ] && ok "3 messages left unread" || bad "expected 3 unread, got $(nunread tester)"
-# The withheld remainder is readable, without consuming it.
+[ "$(nunread tester)" = "3" ] && ok "3 messages never rendered" || bad "expected 3 unrendered, got $(nunread tester)"
+[ "$(nrendered tester)" = "2" ] && ok "2 injected messages moved to rendered/" || bad "expected 2 rendered, got $(nrendered tester)"
+[ "$(nread tester)" = "0" ] && ok "injection acked NOTHING into read/" || bad "injection put $(nread tester) in read/"
+# The withheld remainder AND the rendered-but-unacked pair are all outstanding.
 out="$(SWARM_AGENT_ID=tester "$SWARM" inbox read 2>&1)"
-case "$out" in *"3 unread message(s)"*) ok "remainder visible via 'swarm inbox read'";; *) bad "read did not show 3" "$out";; esac
-[ "$(nunread tester)" = "3" ] && ok "read did not consume" || bad "read consumed messages"
-# ...and ack-able by naming the highest id.
+case "$out" in *"5 unacked message(s)"*) ok "'inbox read' shows all 5 unacked (3 unrendered + 2 rendered)";; *) bad "read did not show 5" "$(printf '%s' "$out" | head -1)";; esac
+[ "$(nunacked tester)" = "5" ] && ok "read did not consume" || bad "read consumed messages"
+# ...and ack-able by naming the highest id — sweeping BOTH states.
 SWARM_AGENT_ID=tester "$SWARM" inbox ack sender5-1005 >/dev/null 2>&1 \
-  && [ "$(nunread tester)" = "0" ] && ok "remainder ack-able by highest id" || bad "ack of remainder failed"
+  && [ "$(nunacked tester)" = "0" ] && [ "$(nread tester)" = "5" ] \
+  && ok "cumulative ack sweeps rendered/ and inbox/ alike" || bad "ack of remainder failed"
 
 # ---------------------------------------------------------------------------
 case_ "V3 — operator mail survives repeated 'updates --json' polls"
@@ -240,10 +248,10 @@ case_ "The incident: an injected message stays outstanding until claimed by id"
 # became indistinguishable from one that never arrived. That is the bug this
 # whole change exists to prevent for the operator's channel.
 #
-# NOTE the asymmetry, which is proposal 005's actual verdict: for AGENTS,
-# injection still acks — delivery is atomic with the turn and that guarantee is
-# worth keeping. For the OPERATOR, who has no hook and no turn, nothing acks but
-# an explicit ack. The operator's directive below is the one that must survive.
+# The asymmetry proposal 005 shipped with — "for AGENTS, injection acks" — is GONE
+# (operator ruling, 2026-07-09). Injection now marks a message RENDERED, not read;
+# nothing but an explicit `swarm inbox ack` reaches read/, for agent or operator
+# alike. The operator's directive below must survive repeated reads, as before.
 fresh incident
 plant operator 9000 sibling "$(python3 -c 'print("s"*4699,end="")')"
 plant operator 9037 operator "$(python3 -c 'print("d"*2036,end="")')"
@@ -255,6 +263,102 @@ plant operator 9037 operator "$(python3 -c 'print("d"*2036,end="")')"
 [ "$(nunread operator)" = "1" ] && ok "acking the sibling leaves the directive outstanding" || bad "the directive was swept"
 out="$("$SWARM" inbox read 2>&1)"
 case "$out" in *"operator-9037"*) ok "the unacted directive is still visible, by id";; *) bad "directive vanished" "$out";; esac
+
+# ---------------------------------------------------------------------------
+case_ "V9 — a rendered message is never re-injected; it becomes a one-line nag"
+fresh v9
+plant nagbox 1101 boss "the directive body"
+ctx="$(inject nagbox)"
+case "$ctx" in *"the directive body"*) ok "turn 1 injects the body";; *) bad "turn 1 did not inject the body";; esac
+[ "$(nunread nagbox)" = "0" ] && [ "$(nrendered nagbox)" = "1" ] && [ "$(nread nagbox)" = "0" ] \
+  && ok "moved to rendered/, NOT read/" || bad "state after render: $(nunread nagbox)/$(nrendered nagbox)/$(nread nagbox)"
+ctx2="$(inject nagbox)"
+printf '  nag verbatim: %s\n' "$ctx2"
+case "$ctx2" in *"the directive body"*) bad "turn 2 RE-INJECTED the body";; *) ok "turn 2 does not re-inject the body";; esac
+[ "$(printf '%s' "$ctx2" | wc -l | tr -d ' ')" = "0" ] && ok "the nag is exactly ONE line" || bad "nag spans multiple lines"
+case "$ctx2" in
+  "[swarm inbox] 1 message(s) delivered earlier and still UNACKED: boss-1101 — re-read with \`swarm inbox read\`; clear with \`swarm inbox ack <id>\` (cumulative).")
+    ok "nag names the id and the ack hint";;
+  *) bad "unexpected nag text" "$ctx2";;
+esac
+# It keeps nagging, turn after turn, until acked. That is the point.
+ctx3="$(inject nagbox)"; [ "$ctx3" = "$ctx2" ] && ok "the nag repeats on every later turn" || bad "nag changed/stopped"
+[ "$(nrendered nagbox)" = "1" ] && ok "nagging has no side effect (nothing moved)" || bad "the nag moved a file"
+# Explicit ack clears it, and the hook falls silent.
+SWARM_AGENT_ID=nagbox "$SWARM" inbox ack boss-1101 >/dev/null 2>&1
+[ "$(nread nagbox)" = "1" ] && [ "$(nrendered nagbox)" = "0" ] && ok "ack moves rendered/ -> read/" || bad "ack did not consume the rendered message"
+out="$(inject nagbox)"
+[ -z "$out" ] && ok "after ack: hook is silent again" || bad "still nagging after ack" "$out"
+
+# ---------------------------------------------------------------------------
+case_ "V10 — unacked = inbox/ + rendered/; a turn with both nags only the carried"
+fresh v10
+plant mix 2101 a "first"
+inject mix >/dev/null                 # a-2101 -> rendered/
+plant mix 2102 b "second"             # never rendered
+[ "$(nunacked mix)" = "2" ] && ok "unacked counts both states (2)" || bad "unacked = $(nunacked mix)"
+ctx="$(inject mix)"
+case "$ctx" in *"second"*) ok "the NEW body is injected";; *) bad "new body not injected";; esac
+case "$ctx" in *"first"*) bad "the rendered body was re-injected";; *) ok "the rendered body is not re-injected";; esac
+case "$ctx" in *"still UNACKED: a-2101"*) ok "the carried message is nagged by id";; *) bad "carried id not nagged" "$ctx";; esac
+[ "$(nunacked mix)" = "2" ] && [ "$(nrendered mix)" = "2" ] && ok "both are now rendered, both still unacked" || bad "state wrong"
+# `inbox read` sees both, marks which was already delivered, and consumes neither.
+out="$(SWARM_AGENT_ID=mix "$SWARM" inbox read 2>&1)"
+case "$out" in *"2 unacked message(s)"*) ok "'inbox read' shows both";; *) bad "read did not show 2" "$out";; esac
+case "$out" in *"already delivered to your context; unacked"*) ok "read marks the delivered ones";; *) bad "no delivered marker";; esac
+[ "$(nunacked mix)" = "2" ] && ok "read consumed nothing" || bad "read consumed"
+n="$(SWARM_AGENT_ID=mix "$SWARM" inbox read --json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$n" = "2" ] && ok "'inbox read --json' is a bare array of both" || bad "--json len=$n"
+
+# ---------------------------------------------------------------------------
+case_ "V11 — cumulative ack sweeps rendered/ and inbox/ in ARRIVAL order"
+fresh v11
+plant cum 3101 p "one"; plant cum 3102 q "two"
+inject cum >/dev/null                       # p,q -> rendered/
+plant cum 3103 r "three"; plant cum 3104 s "four"   # never rendered
+[ "$(nunread cum)" = "2" ] && [ "$(nrendered cum)" = "2" ] && ok "2 unrendered + 2 rendered" || bad "setup wrong"
+out="$(SWARM_AGENT_ID=cum "$SWARM" inbox ack r-3103 2>&1)"
+case "$out" in *"acked 3 message(s) through r-3103"*) ok "ack sweeps the prefix across both dirs";; *) bad "prefix wrong" "$out";; esac
+case "$out" in *"p-3101"*"swept by cumulative ack"*) ok "names the rendered messages it swept";; *) bad "swept rendered ids not named" "$out";; esac
+[ "$(nunread cum)" = "1" ] && [ "$(nrendered cum)" = "0" ] && [ "$(nread cum)" = "3" ] && ok "s-3104 alone stays outstanding" || bad "final state $(nunread cum)/$(nrendered cum)/$(nread cum)"
+# read/ still means acked-only: already_acked recognises a swept, rendered message.
+out="$(SWARM_AGENT_ID=cum "$SWARM" inbox ack p-3101 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "re-acking a swept message errors" || bad "re-ack succeeded"
+case "$out" in *"already acknowledged"*) ok "already_acked() sees it in read/";; *) bad "wrong error" "$out";; esac
+
+# ---------------------------------------------------------------------------
+case_ "V12 — EPIPE on the NAG path is also harmless, and nags again next turn"
+fresh v12
+plant epipe 4101 a "body"
+inject epipe >/dev/null                     # -> rendered/
+echo '{}' | SWARM_AGENT_ID=epipe node "$HOOK" inbox-check 2>/dev/null | true
+rc=${PIPESTATUS[1]:-0}
+[ "$rc" = "0" ] && ok "nag path exits 0 under EPIPE" || bad "nag path exited $rc"
+[ "$(nrendered epipe)" = "1" ] && [ "$(nread epipe)" = "0" ] && ok "the nag has no side effect to lose" || bad "EPIPE moved a file"
+ctx="$(inject epipe)"
+case "$ctx" in *"still UNACKED: a-4101"*) ok "still nagging on the next turn";; *) bad "nag lost";; esac
+# And an empty rendered/ dir is as silent as no inbox at all.
+fresh v12b
+mkdir -p "$SWARM_DIR/inbox/quiet/rendered"
+out="$(echo '{}' | SWARM_AGENT_ID=quiet node "$HOOK" inbox-check 2>/dev/null)"; rc=$?
+[ "$rc" = "0" ] && [ -z "$out" ] && ok "empty rendered/: exit 0, no output" || bad "empty rendered/: rc=$rc out='$out'"
+
+# ---------------------------------------------------------------------------
+case_ "V13 — a legacy record (no 'id' field) can still be named, nagged, and acked"
+# Under the old hook this was harmless: injection acked it. Now an unnameable
+# message would nag forever, because the agent could never name it to ack it.
+fresh v13
+mkdir -p "$SWARM_DIR/inbox/leg"
+python3 -c "
+import json
+json.dump({'to':'leg','from':'old','ts':1,'type':'message','body':'legacy body','read':False},
+          open('$SWARM_DIR/inbox/leg/1-old.json','w'))"
+ctx="$(inject leg)"
+case "$ctx" in *"[id old-1]"*) ok "the injection FRAMES it with a derived id";; *) bad "framed as [id ?] — unackable" "$(printf '%s' "$ctx" | sed -n 2p)";; esac
+ctx2="$(inject leg)"
+case "$ctx2" in *"still UNACKED: old-1"*) ok "the nag names the derived id";; *) bad "nag cannot name it" "$ctx2";; esac
+SWARM_AGENT_ID=leg "$SWARM" inbox ack old-1 >/dev/null 2>&1 \
+  && [ "$(nread leg)" = "1" ] && ok "and it can be acked by that id" || bad "legacy message is unackable"
 
 # ---------------------------------------------------------------------------
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
