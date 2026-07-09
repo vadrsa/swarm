@@ -78,25 +78,57 @@ The `UserPromptSubmit` hook runs `swarm-hook.cjs inbox-check` on **every turn of
 every agent**. It is therefore written to be fast, side-effect-light, and
 bulletproof — every path is wrapped so that any error exits 0 with no output.
 
+A mailbox has **three** states, and they are the file's **location**, never a flag
+inside the record. `read/` is a directory precisely so that the state change is one
+atomic rename with no re-injection race; a flag would need a read-modify-write on a
+file a concurrent reader may hold. `rendered/` inherits that property for free.
+
+| location | meaning | hook behaviour |
+|---|---|---|
+| `inbox/<id>/*.json` | never delivered | inject the body |
+| `inbox/<id>/rendered/*.json` | delivered once, **unacked** | name it in the one-line nag |
+| `inbox/<id>/read/*.json` | explicitly acked | silent |
+
+**Unacked** is the union of the first two. Only `swarm inbox ack <id>` reaches
+`read/`. Rendering a message is not acknowledging it (operator ruling, 2026-07-09) —
+proposal 005 records the hook acking an operator directive into `read/` on the
+strength of having *rendered* it, and the agent never acting on it. Shown is not
+understood.
+
 1. Resolve `inbox/<id>/`. If it does not exist, no-op.
-2. Read every `*.json` directly under it (files in `read/` are already delivered).
-3. Sort by `ts` ascending.
-4. Build an injected block, explicitly framed:
+2. Read every `*.json` directly under it — the never-delivered ones — and, separately,
+   every `*.json` under `rendered/` — the delivered-but-unacked ones. Sort each by `ts`.
+3. If there is nothing to inject and nothing outstanding, exit 0 silently.
+4. If there is nothing to inject but `rendered/` is not empty, emit **one line** — the
+   nag — and nothing else. It names the unacked ids and the ack hint. Bodies are never
+   re-injected. The nag has no side effect: nothing is moved.
+   ```
+   [swarm inbox] 2 message(s) delivered earlier and still UNACKED: cos-1783…, rd-1783… — re-read with `swarm inbox read`; clear with `swarm inbox ack <id>` (cumulative).
+   ```
+5. Otherwise build an injected block, explicitly framed:
    ```
    [swarm inbox] You have N new message(s) from other agents:
 
-   --- from <sender> (<ISO time>) ---
+   --- from <sender> (<ISO time>) [id <message-id>] ---
    <body>
 
    These were delivered to your durable inbox; act on them as part of this turn.
+   (`swarm inbox read` re-reads them; `swarm inbox ack <id>` acknowledges through <id>
+   — they stay UNACKED, and are re-listed every turn, until you do.)
    ```
-   The framing is deliberate — `additionalContext` reads to the model as
+   …followed by the nag line, if any message was delivered on an *earlier* turn and is
+   still unacked. The framing is deliberate — `additionalContext` reads to the model as
    out-of-band context, and without the explicit "act on them" the model may treat
    a directive as background noise.
-5. Emit the injection to stdout **first**.
-6. **Then** move the surfaced files to `inbox/<id>/read/` by atomic rename.
+6. Emit the injection to stdout **first**.
+7. **Then** move the surfaced files to `inbox/<id>/rendered/` by atomic rename.
 
-Step 5 before step 6 is the crash-safety ordering, and the comment in the code
+The nag's width is subtracted from the 8,000-char budget before any body is measured,
+exactly as the header and the `…and N more` line are. Unlike them its width is not
+bounded by the message count — it grows with the number of ids carried — so appending
+it to a spent budget would blow the cap.
+
+Step 6 before step 7 is the crash-safety ordering, and the comment in the code
 states the reasoning exactly: if we die between them, the message is re-injected
 next turn (harmless duplicate); the reverse ordering would lose it (unrecoverable).
 
@@ -112,11 +144,15 @@ They are true now, at any size, and verified against the installed hook.
 - The write is atomic. A concurrent `inbox-check` never reads a half-written
   message.
 - A message is **never silently dropped** by the hook. If it is not injected this
-  turn, it is not moved to `read/`, so it is injected next turn. Since PR #31 the
+  turn, it is not moved to `rendered/`, so it is injected next turn. Since PR #31 the
   rename is **conditional on the injection actually reaching the harness** — if the
-  write fails (a vanished reader, `EPIPE`), the message stays unread and is re-offered.
-  Failing toward re-injection is the safe direction, and the code now enforces what the
-  ordering always meant.
+  write fails (a vanished reader, `EPIPE`), the message stays **unrendered** and is
+  re-offered whole. Failing toward re-injection is the safe direction, and the code now
+  enforces what the ordering always meant.
+- A delivered message is **never silently dropped by the agent** either. It stays in
+  `rendered/`, and every later turn re-surfaces its id in the one-line nag, until the
+  agent runs `swarm inbox ack`. A message that stays outstanding is a message that keeps
+  asking.
 - Messages are surfaced oldest-first.
 - The hook never breaks the agent's turn. Every failure mode is a silent no-op.
   *(This one always held — and it is precisely what hid G17 for the life of the feature:
@@ -192,31 +228,35 @@ finished its work and gone permanently idle never takes another turn. Its
 `swarm send` reported success. The doorbell is the *only* thing that closes this
 gap, and the doorbell is best-effort by design.
 
-There is no way for a sender to observe whether a message was surfaced. The hook
-moves files to `read/`, which is a durable audit trail — but nothing reports it
-upward, no verb reads it, and read-receipts were explicitly deferred. A sender's
-only recourse is to read the target's pane, which the world doc permits (for
-liveness) and forbids (for judging work).
+There is no way for a **sender** to observe whether a message was surfaced. The hook
+moves files to `rendered/` and then `swarm inbox ack` moves them to `read/`, which is a
+durable audit trail — but nothing reports it upward, no verb reads another agent's box,
+and read-receipts were explicitly deferred. A sender's only recourse is to read the
+target's pane, which the world doc permits (for liveness) and forbids (for judging work).
+*(The **recipient** now observes its own outstanding mail, on every turn — see below.)*
 
 **There is a third rung on this ladder, and it is the one that has actually cost something.**
 Delivery to the *inbox* is not delivery to the *agent* (above). But delivery to the agent's
-**context** is not **receipt** either — and the hook marks a message `read/` at the instant it
-injects it, so the system records consumption on the strength of having *rendered* the text.
+**context** is not **receipt** either — and the hook **used to mark** a message `read/` at the
+instant it injected it, recording consumption on the strength of having *rendered* the text.
 
 Demonstrated, not hypothesised. `cos` was sent the operator's directive commissioning an
-implementation. Replaying the exact message pair through the real hook: 6,965 characters
+implementation. Replaying the exact message pair through the hook of the day: 6,965 characters
 injected against an 8,000 cap, both bodies present, **nothing withheld, both auto-acked**. The
 directive was in its context, intact. It answered the other message and not the operator, and
 spent four cycles reporting the item as *"awaiting the operator"* while the answer sat in its
 own `read/` directory.
 
-**Shown is not understood.** Today's implicit prefix-ack conflates the two. Explicit
-cumulative acknowledgement — adopted, see [proposal 005](../proposals/005-inbox-read-ack.md) —
-separates them: an unclaimed message stays outstanding and re-surfaces every turn, so a busy
-agent's own inattention becomes visible *to itself*. Note the direction of the evidence: this
-is an argument for **explicit ack**, and simultaneously an argument **against** notify-and-pull,
-because the failure was never a missing body. It was a missing action, and a notification adds
-one.
+**Shown is not understood.** The implicit prefix-ack conflated the two. **Fixed** (operator
+ruling, 2026-07-09): injection now moves a message to `rendered/`, not `read/`, and every
+later turn re-surfaces its id in a one-line nag until the agent runs `swarm inbox ack`. An
+unclaimed message stays outstanding and keeps asking, so a busy agent's own inattention becomes
+visible *to itself*. `cos` would have tripped over that directive four times.
+
+Note the direction of the evidence: this is an argument for **explicit ack**, and
+simultaneously an argument **against** notify-and-pull, because the failure was never a missing
+body. It was a missing action, and a notification adds one. The nag is not a notification: the
+body was already delivered, in full, once. The nag only refuses to let the agent forget it.
 
 **G19 — the injection renders a directive and a peer's opinion identically, and calls the
 operator an agent.** The mechanism behind the incident above, and it is a property of the
@@ -230,10 +270,13 @@ Verified at source and by fixture:
 - Messages are sorted **by timestamp only** (`:225`). There is no priority, no sender class.
 - `rec.from` is used to *print a name* and for nothing else (`:242`). It is never read to
   order, mark, or separate.
-- Both messages are auto-acked into `read/` identically.
+- Both messages were auto-acked into `read/` identically. *(No longer: both are now moved to
+  `rendered/` identically, and both nag identically until acked. **G19's remaining half stands**
+  — the sender class is still invisible, so a directive and a peer's opinion still look alike.
+  What is fixed is that neither can now be silently consumed by being read.)*
 
 So a message that **settles** a question and a message that **opens** one are presented in the
-same frame, in arrival order, and consumed by the same act of rendering. A settling message
+same frame, in arrival order, and were consumed by the same act of rendering. A settling message
 presents as *finished*; an opening one presents as *work*. Nothing in the arrangement rewards
 reading the short procedural one first — and in the incident above, the short procedural one
 was the operator commissioning an implementation.

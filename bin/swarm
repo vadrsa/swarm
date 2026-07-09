@@ -825,15 +825,20 @@ def with_id(fn,r):
         if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
     return r
 
-# Unread operator mail = *.json directly under inbox/operator/ (read ones live in
-# read/). Same layout, same filter, same sort as the agent inbox-check hook.
+# Outstanding operator mail = UNACKED mail = *.json directly under inbox/operator/
+# (never rendered) PLUS inbox/operator/rendered/ (shown once, still unacked). Only
+# inbox/operator/read/ is done. Same three-state layout, same filter, same sort as
+# the agent inbox-check hook. The operator has no hook, so rendered/ is normally
+# empty in its box — but the definition of "outstanding" is one definition.
 mail=[]
 if op and os.path.isdir(op):
-    for fn in sorted(os.listdir(op)):
-        if not fn.endswith(".json"): continue
-        try: r=json.load(open(os.path.join(op,fn)))
-        except: continue
-        if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
+    for d in (op, os.path.join(op,"rendered")):
+        if not os.path.isdir(d): continue
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".json"): continue
+            try: r=json.load(open(os.path.join(d,fn)))
+            except: continue
+            if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
     mail.sort(key=lambda x: int(x[1].get("ts") or 0))
 
 # Reading is NON-DESTRUCTIVE: nothing is moved into read/ here, on any path.
@@ -864,8 +869,17 @@ PY
 }
 
 # ------------------------------------------------------------------- inbox
-# swarm inbox read [--json]     — show MY unread messages. Never consumes.
+# swarm inbox read [--json]     — show MY unacked messages. Never consumes.
 # swarm inbox ack <message-id>  — consume everything up to and including <id>.
+#
+# THREE states on disk (operator ruling, 2026-07-09). A mailbox holds:
+#   inbox/<me>/*.json            never delivered   -> outstanding
+#   inbox/<me>/rendered/*.json   delivered, unacked-> outstanding (agents only:
+#                                the hook renders; nothing else writes here)
+#   inbox/<me>/read/*.json       acked             -> done
+# "Unacked" (what `read` shows and what `ack` sweeps) is the union of the first
+# two. Being SHOWN a message is not acknowledging it — that conflation is the bug
+# proposal 005 documents happening in the wild.
 #
 # WHOSE inbox: the caller's. An agent (SWARM_AGENT_ID set) reads inbox/<id>/; the
 # operator (unset) reads inbox/operator/. Same layout, same files, same records —
@@ -947,17 +961,25 @@ def with_id(fn,r):
         if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
     return r
 
-# Unread = *.json directly under the box (read ones live in read/). Identical
-# filter and sort to the agent hook, so both readers agree on what "outstanding"
-# and "arrival order" mean.
-mail=[]
-if os.path.isdir(box):
-    for fn in sorted(os.listdir(box)):
+# OUTSTANDING = UNACKED = *.json directly under the box (never rendered) PLUS
+# everything under rendered/ (shown to the agent once, still unacknowledged).
+# Only read/ is finished. Identical filter and sort to the agent hook, so both
+# readers agree on what "outstanding" and "arrival order" mean.
+#
+# Carrying rendered/ here is load-bearing, not tidiness: after the hook renders a
+# message the agent can no longer see it under inbox/, and if `read` did not show
+# it the agent could not learn the id it needs to ack — a self-lockout with no
+# exit. `read` shows it; `ack` sweeps it.
+mail=[]                                     # [(dir, fn, rec)]
+for d in (box, os.path.join(box,"rendered")):
+    if not os.path.isdir(d): continue
+    for fn in sorted(os.listdir(d)):
         if not fn.endswith(".json"): continue
-        try: r=json.load(open(os.path.join(box,fn)))
+        try: r=json.load(open(os.path.join(d,fn)))
         except Exception: continue          # unreadable/corrupt: never crash a reader
-        if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
-    mail.sort(key=lambda x: int(x[1].get("ts") or 0))
+        if isinstance(r.get("body"),str): mail.append((d,fn,with_id(fn,r)))
+mail.sort(key=lambda x: int(x[2].get("ts") or 0))
+def is_rendered(d): return os.path.basename(d)=="rendered"
 
 def ts_of(r):
     try: return int(r.get("ts") or 0)
@@ -965,14 +987,18 @@ def ts_of(r):
 
 if sub == "read":
     if as_json:
-        print(json.dumps([r for _,r in mail],indent=2)); sys.exit(0)
+        # Bare array of the on-disk records, unchanged. `delivered` is derived
+        # (the file's location), added as an extra key — readers that ignore it
+        # see exactly the record they saw before.
+        print(json.dumps([dict(r,delivered=is_rendered(d)) for d,_,r in mail],indent=2)); sys.exit(0)
     if not mail:
-        print(f"[swarm inbox] {me}: no unread messages"); sys.exit(0)
-    print(f"[swarm inbox] {me}: {len(mail)} unread message(s):")
-    for _,r in mail:
+        print(f"[swarm inbox] {me}: no unacked messages"); sys.exit(0)
+    print(f"[swarm inbox] {me}: {len(mail)} unacked message(s):")
+    for d,_,r in mail:
         t=datetime.datetime.fromtimestamp(ts_of(r)/1000).strftime("%H:%M:%S")
-        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}] ---\n{r.get('body','')}")
-    print(f"\nStill unread. To consume through the last one: swarm inbox ack {mail[-1][1].get('id','<id>')}")
+        seen=" [already delivered to your context; unacked]" if is_rendered(d) else " [not yet delivered]"
+        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}]{seen} ---\n{r.get('body','')}")
+    print(f"\nStill unacked. To consume through the last one: swarm inbox ack {mail[-1][2].get('id','<id>')}")
     sys.exit(0)
 
 # ------------------------------------------------------------------- ack
@@ -993,20 +1019,23 @@ def already_acked(mid):
         except Exception: continue
     return False
 
-target=[(fn,r) for fn,r in mail if r.get("id")==want]
+target=[(d,fn,r) for d,fn,r in mail if r.get("id")==want]
 if not target:
     if already_acked(want):
         print(f"swarm: message '{want}' is already acknowledged (nothing to do)",file=sys.stderr)
     else:
         print(f"swarm: no outstanding message with id '{want}' in {me}'s inbox",file=sys.stderr)
-    known=sorted(r.get("id","?") for _,r in mail)
+    known=sorted(r.get("id","?") for _,_,r in mail)
     print(f"swarm: outstanding ids: {', '.join(known)}" if known
           else "swarm: (inbox is empty — nothing is outstanding)",file=sys.stderr)
     sys.exit(1)
 
-# Cumulative prefix: this message and everything that arrived at/before it.
-cutoff = ts_of(target[0][1])
-prefix = [(fn,r) for fn,r in mail if ts_of(r) <= cutoff]
+# Cumulative prefix: this message and everything that arrived at/before it —
+# across BOTH outstanding states. A rendered-but-unacked message and a message
+# that was never rendered are both outstanding, and arrival order is the `ts`,
+# not the directory. `ack` sweeps the prefix from wherever each file sits.
+cutoff = ts_of(target[0][2])
+prefix = [(d,fn,r) for d,fn,r in mail if ts_of(r) <= cutoff]
 
 rd=os.path.join(box,"read")
 try: os.makedirs(rd,exist_ok=True)
@@ -1014,9 +1043,9 @@ except OSError as e:
     print(f"swarm: cannot create {rd}: {e}",file=sys.stderr); sys.exit(1)
 
 acked=[]
-for fn,r in prefix:
+for d,fn,r in prefix:
     try:
-        os.replace(os.path.join(box,fn),os.path.join(rd,fn))  # atomic
+        os.replace(os.path.join(d,fn),os.path.join(rd,fn))    # atomic; from inbox/ or rendered/
         acked.append(r)
     except OSError as e:
         print(f"swarm: failed to ack {r.get('id','?')}: {e}",file=sys.stderr); sys.exit(1)
@@ -1028,7 +1057,7 @@ for r in acked:
     mark = "" if r.get("id")==want else "  (swept by cumulative ack)"
     print(f"  {r.get('id','?')}  from {r.get('from','?')}{mark}")
 left=len(mail)-len(acked)
-print(f"{left} message(s) still unread." if left else "Inbox is now empty.")
+print(f"{left} message(s) still unacked." if left else "Inbox is now empty.")
 PY
 }
 
@@ -1574,8 +1603,12 @@ verb_usage() {
                'large content as a file and reference its path in the message.';;
     updates) echo "swarm updates [--id <agent-id>] [--json]   (never consumes mail)";;
     inbox)   printf '%s\n' \
-               'swarm inbox read [--json]        my unread messages (never consumes)' \
+               'swarm inbox read [--json]        my unacked messages (never consumes)' \
                'swarm inbox ack <message-id>     consume up to and including <message-id>' \
+               '' \
+               'Unacked = messages not yet delivered to your context PLUS messages already' \
+               'delivered but never acknowledged. A message is injected in full exactly' \
+               'once; after that it is re-listed by id, every turn, until you ack it.' \
                '' \
                'Ack is cumulative over arrival order and names every id it consumes.' \
                'It must name an id that is currently outstanding. There is no ack-all.';;
@@ -1637,8 +1670,10 @@ a collision (even with a reaped agent) gets a -2/-3/... suffix.
                                          bodies over 6000 bytes are rejected — send a file path
   swarm updates [--id <agent-id>] [--json]   agent reports; as operator, also SHOWS its inbox
                                          (reading never consumes; see 'swarm inbox ack')
-  swarm inbox read [--json]              my unread messages (never consumes)
+  swarm inbox read [--json]              my unacked messages (never consumes)
   swarm inbox ack <message-id>           consume up to and including <message-id> (no ack-all)
+                                         a delivered message stays unacked, and is re-listed
+                                         by id every turn, until you ack it
   swarm wait  <agent-id> [--timeout SEC]
   swarm list  [--json] [--live-only]     agents in this swarm (marks DEAD)
   swarm status [--json]                  reconciled snapshot (restart: read this)

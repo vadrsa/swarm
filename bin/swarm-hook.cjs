@@ -196,8 +196,27 @@ if (event === 'precompact-marker') {
 // ------------------------------------------------------------- inbox-check
 // UserPromptSubmit verb. Surfaces this agent's durable inbox (coordinator ->
 // subagent messages, written by `swarm send`) into the model's context at the
-// turn boundary, then marks the surfaced messages read by MOVING them into a
-// read/ subdir (atomic rename; a durable audit trail; no re-injection race).
+// turn boundary, then marks the surfaced messages RENDERED by MOVING them into a
+// rendered/ subdir (atomic rename; a durable audit trail; no re-injection race).
+//
+// THREE states, not two (operator ruling, 2026-07-09):
+//
+//   inbox/<id>/*.json            never rendered    -> inject the body
+//   inbox/<id>/rendered/*.json   rendered, unacked -> NAG by id, never re-inject
+//   inbox/<id>/read/*.json       explicitly acked  -> silent, done
+//
+// "Unacked" is the union of the first two. Rendering is no longer an
+// acknowledgement: a message the agent was *shown* keeps asking until the agent
+// runs `swarm inbox ack <id>`. That is proposal 005's own finding — the hook
+// acked an operator directive into read/ on the strength of having rendered it,
+// and `cos` never acted on it. Shown is not understood. read/ keeps its exact
+// 005 meaning; the only thing that reaches it now is an explicit ack.
+//
+// WHY A DIRECTORY AND NOT A FLAG IN THE RECORD: read/ is a directory precisely
+// for "atomic rename; no re-injection race" (see below). A flag would need a
+// read-modify-write on a file a concurrent reader may hold — the exact race that
+// design avoids. rendered/ inherits the atomic-rename property for free: the
+// "rendered once" bit is the file's LOCATION, set by one rename, never rewritten.
 //
 // This runs on EVERY turn of EVERY agent, so it is fast, side-effect-light, and
 // BULLETPROOF: any error → exit 0 with no output. It must never break the turn.
@@ -205,6 +224,7 @@ if (event === 'precompact-marker') {
 if (event === 'inbox-check') {
   try {
     const inboxDir = path.join(swarmDir, 'inbox', id);
+    const renderedDir = path.join(inboxDir, 'rendered');
 
     let files;
     try {
@@ -213,18 +233,51 @@ if (event === 'inbox-check') {
       process.exit(0); // no inbox dir yet -> nothing to deliver
     }
 
-    // Unread = *.json directly under inboxDir (read ones live in read/).
-    const unread = files
+    // A message written before the id field existed has no `id`. The filename IS
+    // the id, reordered: `<ts>-<from>.json` <-> `<from>-<ts>`. Derive it, so the
+    // nag can NAME a legacy message — an unnameable message is an unackable one,
+    // and now that rendering no longer acks, it would nag forever.
+    const idOf = (fn, rec) => {
+      if (rec && rec.id) return rec.id;
+      const stem = fn.slice(0, -'.json'.length);
+      const dash = stem.indexOf('-');
+      const ts = stem.slice(0, dash), frm = stem.slice(dash + 1);
+      if (dash > 0 && frm && /^\d+$/.test(ts)) return `${frm}-${ts}`;
+      return '?';
+    };
+    const loadBox = (dir, names) => names
       .filter((fn) => fn.endsWith('.json'))
       .map((fn) => {
         let rec = null;
-        try { rec = JSON.parse(fs.readFileSync(path.join(inboxDir, fn), 'utf8')); } catch { /* skip */ }
+        try { rec = JSON.parse(fs.readFileSync(path.join(dir, fn), 'utf8')); } catch { /* skip */ }
         return { fn, rec };
       })
       .filter((x) => x.rec && typeof x.rec.body === 'string')
       .sort((a, b) => Number(a.rec.ts || 0) - Number(b.rec.ts || 0));
 
-    if (unread.length === 0) process.exit(0); // empty inbox -> no-op, no output
+    // Never rendered = *.json directly under inboxDir. These get their bodies.
+    const unread = loadBox(inboxDir, files);
+
+    // Rendered but not acked. These are NAGGED by id — never re-injected.
+    let carried = [];
+    try { carried = loadBox(renderedDir, fs.readdirSync(renderedDir)); } catch { /* none */ }
+
+    // The nag: ONE line, on every later turn, for as long as mail stays unacked.
+    // It names ids only — bodies were delivered once and are on disk. Built from
+    // `carried` (rendered on an EARLIER turn); this turn's freshly injected
+    // bodies carry the ack hint in the trailer and join the nag next turn.
+    const nagFor = (list) => list.length === 0 ? '' :
+      `\n\n[swarm inbox] ${list.length} message(s) delivered earlier and still UNACKED: ` +
+      `${list.map(({ fn, rec }) => idOf(fn, rec)).join(', ')} ` +
+      `— re-read with \`swarm inbox read\`; clear with \`swarm inbox ack <id>\` (cumulative).`;
+
+    if (unread.length === 0) {
+      // No new bodies. If mail is outstanding, nag; otherwise stay silent.
+      if (carried.length === 0) process.exit(0); // empty inbox -> no-op, no output
+      // Nothing to mark: the nag has no side effect, so no post-emit callback.
+      emitAndExit({ hookEventName: 'UserPromptSubmit', additionalContext: nagFor(carried).trimStart() });
+      return;
+    }
 
     // Build the injected block. Frame it EXPLICITLY as incoming messages the
     // agent should act on — additionalContext reads as out-of-band context, so
@@ -243,20 +296,25 @@ if (event === 'inbox-check') {
     // TRUNCATED to fit, with a visible marker pointing at the full copy on disk.
     //
     // Truncating is safe where dropping is not: the message still counts as
-    // delivered and is still acked, so it never re-injects forever — and the
-    // agent is told, by id, where the untruncated body lives.
+    // rendered, so it never re-injects forever — the agent is told, by id, where
+    // the untruncated body lives, and the nag keeps naming it until it acks.
     const CAP = 8000; // hard cap on total injected chars — never exceeded
     const fmtTime = (ts) => {
       try { return new Date(Number(ts)).toISOString().replace('T', ' ').slice(0, 19) + 'Z'; }
       catch { return '?'; }
     };
     // Reserve room for EVERY fixed part of the injection — header, the "…and N
-    // more" remainder line, and the trailer — so that header+bodies+extras can
-    // never exceed CAP. Reserving only the trailer is what let the old code ship
-    // an 8,066-char injection: the remainder line was appended after the budget
-    // had already been spent.
+    // more" remainder line, the nag, and the trailer — so that header+bodies+
+    // extras can never exceed CAP. Reserving only the trailer is what let the old
+    // code ship an 8,066-char injection: the remainder line was appended after
+    // the budget had already been spent. The nag has the same hazard, and unlike
+    // the others its width is unbounded by the message count — it grows with the
+    // number of ids carried — so it is subtracted from the budget, not appended
+    // to a spent one.
+    const nag = nagFor(carried);
     const trailer = `\n\nThese were delivered to your durable inbox; act on them as part of this turn.` +
-      `\n(\`swarm inbox read\` re-reads them; \`swarm inbox ack <id>\` acknowledges through <id>.)`;
+      `\n(\`swarm inbox read\` re-reads them; \`swarm inbox ack <id>\` acknowledges through <id> — ` +
+      `they stay UNACKED, and are re-listed every turn, until you do.)`;
     const headerFor = (shown, total) => shown === total
       ? `[swarm inbox] You have ${total} new message(s) from other agents:`
       : `[swarm inbox] Showing ${shown} of ${total} new messages (${total - shown} remain — they will be shown next turn):`;
@@ -273,13 +331,16 @@ if (event === 'inbox-check') {
       const w = headerFor(shown, unread.length).length + moreFor(unread.length - shown).length;
       extrasBudget = Math.max(extrasBudget, w);
     }
-    const budget = CAP - extrasBudget - trailer.length;
+    const budget = CAP - extrasBudget - trailer.length - nag.length;
 
     const blocks = [];
     let used = 0;
     let injectedCount = 0;
-    for (const { rec } of unread) {
-      const framing = `\n\n--- from ${rec.from || '?'} (${fmtTime(rec.ts)}) [id ${rec.id || '?'}] ---\n`;
+    // `idOf`, not `rec.id`: a legacy record has no id field, and an agent that can
+    // only see the body cannot ack a message it cannot name — under the nag, an
+    // unnameable message would ask forever.
+    for (const { fn, rec } of unread) {
+      const framing = `\n\n--- from ${rec.from || '?'} (${fmtTime(rec.ts)}) [id ${idOf(fn, rec)}] ---\n`;
       let block = framing + rec.body;
       if (used + block.length > budget) {
         if (injectedCount > 0) break; // later messages wait for the next turn
@@ -299,28 +360,37 @@ if (event === 'inbox-check') {
       injectedCount++;
     }
     // A message so large that not even its framing fits leaves injectedCount 0.
-    // Emitting a bare header acks nothing and says nothing useful; the message
-    // stays unread and `swarm inbox read` can still reach it. Exit silently.
-    if (injectedCount === 0) process.exit(0);
+    // Emitting a bare header renders nothing and says nothing useful; the message
+    // stays unrendered and `swarm inbox read` can still reach it. Say nothing —
+    // except that outstanding mail must still nag, and the nag has no side effect,
+    // so it is safe to emit on its own.
+    if (injectedCount === 0) {
+      if (carried.length === 0) process.exit(0);
+      emitAndExit({ hookEventName: 'UserPromptSubmit', additionalContext: nag.trimStart() });
+      return;
+    }
 
     const remaining = unread.length - injectedCount;
     const context = headerFor(injectedCount, unread.length) + blocks.join('') +
-      moreFor(remaining) + trailer;
+      moreFor(remaining) + trailer + nag;
 
-    // Emit the injection FIRST, then mark read — and only mark read once the
-    // bytes have actually left. stdout is a PIPE (~64 KiB buffer); a write
-    // larger than that does not complete synchronously, and `process.exit()`
-    // discards whatever is still queued. That is not a crash, so the
-    // emit-then-ack ordering alone never protected us: the harness would get
-    // JSON truncated mid-string, inject nothing, and the message would already
-    // be in read/. Waiting for the drain callback makes the ack conditional on
-    // delivery, which is what this ordering always meant.
+    // Emit the injection FIRST, then mark RENDERED — and only once the bytes have
+    // actually left. stdout is a PIPE (~64 KiB buffer); a write larger than that
+    // does not complete synchronously, and `process.exit()` discards whatever is
+    // still queued. That is not a crash, so the emit-then-mark ordering alone
+    // never protected us: the harness would get JSON truncated mid-string, inject
+    // nothing, and the message would already have been moved. Waiting for the
+    // drain callback makes the move conditional on delivery, which is what this
+    // ordering always meant. Under EPIPE the message stays UNRENDERED and is
+    // injected whole next turn — the safe direction to fail. (G17, PR #31.)
+    //
+    // The destination is rendered/, not read/: this hook shows a message, it does
+    // not acknowledge it. Only `swarm inbox ack` reaches read/.
     emitAndExit({ hookEventName: 'UserPromptSubmit', additionalContext: context }, () => {
-      const readDir = path.join(inboxDir, 'read');
-      try { fs.mkdirSync(readDir, { recursive: true }); } catch (e) { dbg('mkdir inbox/read', e); }
+      try { fs.mkdirSync(renderedDir, { recursive: true }); } catch (e) { dbg('mkdir inbox/rendered', e); }
       for (let i = 0; i < injectedCount; i++) {
         const fn = unread[i].fn;
-        try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch (e) { dbg('mark inbox message read', e); }
+        try { fs.renameSync(path.join(inboxDir, fn), path.join(renderedDir, fn)); } catch (e) { dbg('mark inbox message rendered', e); }
       }
     });
     return;
