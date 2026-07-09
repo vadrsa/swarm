@@ -8,20 +8,16 @@
 // firing — never a screen scrape, never a parsed marker line.
 //
 // Env (set by swarm spawn on the subagent's pane):
-//   SWARM_DIR       — absolute path to the PROJECT swarm root (holds swarms/).
-//                     The active swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID,
-//                     and its updates/ lives under that. This matches what the
-//                     `swarm` CLI expects, so the child can run swarm verbs too.
-//   SWARM_ID        — the active swarm-id; combined with SWARM_DIR it locates
-//                     this swarm's updates/ dir.
+//   SWARM_DIR       — absolute path to the swarm root. One swarm per project, so
+//                     this dir directly contains agents/ updates/ inbox/ state/
+//                     settings/ and names. Same contract the `swarm` CLI uses, so
+//                     the child can run swarm verbs too.
 //   SWARM_AGENT_ID  — this subagent's stable id within the swarm: its slugified
 //                     label, unique for the swarm's lifetime (e.g. "fix-send-race")
 //   SWARM_AGENT_LABEL — same string as the id (label and id are one concept),
 //                     kept as its own env var/record key for readers.
 //
-// Back-compat: older `swarm spawn` passed SWARM_DIR = the swarm's OWN dir and no
-// SWARM_ID. If SWARM_ID is absent we fall back to treating SWARM_DIR as the dir
-// that directly contains updates/ (the legacy contract).
+// SWARM_ID is not read. The project IS the swarm; there is no swarm-id.
 //
 // Argv: [event]  where event is "stop" | "notification" | "inbox-check"
 //   stop/notification  -> record a state event to updates/ (subagent -> coord).
@@ -44,17 +40,12 @@ function readStdinJSON() {
 const event = (process.argv[2] || 'stop').toLowerCase();
 const payload = readStdinJSON() || {};
 
+// SWARM_DIR IS the swarm dir — one swarm per project, flat layout beneath it.
 const swarmDir = process.env.SWARM_DIR || '';
-const swarmId = process.env.SWARM_ID || '';
 const id = process.env.SWARM_AGENT_ID || 'unknown';
 const label = process.env.SWARM_AGENT_LABEL || id;
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
-
-// Resolve this swarm's own dir (same rule as updatesDir below): SWARM_DIR is the
-// PROJECT root; the swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID (legacy: if
-// SWARM_ID absent, SWARM_DIR already IS the swarm dir).
-const swarmOwnDir = swarmId ? path.join(swarmDir, 'swarms', swarmId) : swarmDir;
 
 // --------------------------------------------------------- restore-state
 // SessionStart verb (all agents). On a fresh or post-compaction session,
@@ -63,7 +54,7 @@ const swarmOwnDir = swarmId ? path.join(swarmDir, 'swarms', swarmId) : swarmDir;
 // checkpoint is now the trustworthy record. Bulletproof: any error => no-op.
 if (event === 'restore-state') {
   try {
-    const stateFile = path.join(swarmOwnDir, 'state', `${id}.json`);
+    const stateFile = path.join(swarmDir, 'state', `${id}.json`);
     if (!fs.existsSync(stateFile)) process.exit(0);
     let st; try { st = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { process.exit(0); }
     const src = (payload.source || 'startup');
@@ -98,7 +89,7 @@ if (event === 'restore-state') {
 // The restore-state hook (SessionStart source=compact) does the actual re-inject.
 if (event === 'precompact-marker') {
   try {
-    const stateDir = path.join(swarmOwnDir, 'state');
+    const stateDir = path.join(swarmDir, 'state');
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(path.join(stateDir, `${id}.compaction-pending`),
       JSON.stringify({ ts: Number(payload.ts) || 0, trigger: payload.trigger || payload.matcher || '' }));
@@ -117,12 +108,7 @@ if (event === 'precompact-marker') {
 // A no-op (no stdout) on an empty inbox is required.
 if (event === 'inbox-check') {
   try {
-    // Same resolution as updatesDir below, minus the legacy branch: the inbox
-    // only exists on the new (SWARM_ID-carrying) contract. If we can't resolve
-    // it, silently do nothing.
-    const inboxDir = swarmId
-      ? path.join(swarmDir, 'swarms', swarmId, 'inbox', id)
-      : path.join(swarmDir, 'inbox', id);
+    const inboxDir = path.join(swarmDir, 'inbox', id);
 
     let files;
     try {
@@ -187,13 +173,8 @@ if (event === 'inbox-check') {
   process.exit(0);
 }
 
-// Resolve this swarm's updates/ dir. Under the current contract SWARM_DIR is the
-// PROJECT root and the swarm's own dir is $SWARM_DIR/swarms/$SWARM_ID. If
-// SWARM_ID is absent we honour the legacy contract where SWARM_DIR was already
-// the swarm's own dir (updates/ directly beneath it).
-const updatesDir = swarmId
-  ? path.join(swarmDir, 'swarms', swarmId, 'updates')
-  : path.join(swarmDir, 'updates');
+// This swarm's updates/ dir, directly beneath the swarm root.
+const updatesDir = path.join(swarmDir, 'updates');
 try { fs.mkdirSync(updatesDir, { recursive: true }); } catch { process.exit(0); }
 
 // Claude includes the transcript path on every hook payload. We pull the

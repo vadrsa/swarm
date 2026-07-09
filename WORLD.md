@@ -10,10 +10,10 @@ five levels deep — everything here applies to you.
 
 ## The verbs
 
-A **swarm** is one run, identified by a swarm-id. Mint one, then every verb acts
-within it:
-
-    SWARM_ID=$(swarm start); export SWARM_ID
+The **project is the swarm**: one swarm per project, rooted at its `.swarm/` dir.
+There is no swarm-id and nothing to mint — every verb creates the layout on first
+use, so you can simply start spawning. (`swarm start` exists as an explicit,
+idempotent init that prints the swarm root; it is never required.)
 
 - `swarm world` → print this document (what every agent reads). Path-agnostic:
   works wherever swarm is installed.
@@ -32,7 +32,7 @@ within it:
   checkpoint. You write `state/<id>.json` yourself; this is the reference + the
   usage helper.
 - `swarm send <id> "<message>"` → delivers a message to a subagent's **durable
-  file inbox** (`.swarm/swarms/<id>/inbox/<agent-id>/`), then rings a best-effort
+  file inbox** (`.swarm/inbox/<agent-id>/`), then rings a best-effort
   "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
   the file: the message is surfaced into the agent's context (via a
   UserPromptSubmit hook) on its next turn — even if the agent was busy or the
@@ -43,17 +43,10 @@ within it:
   summary. Your inbox.
 - `swarm wait <id> [--timeout SEC]` → blocks until the subagent's newest report
   is a stop state, then prints it. Has a timeout (won't hang).
-- `swarm list [--live-only]` → your swarm's roster; each agent marked `live` or
+- `swarm list [--live-only]` → the swarm's roster; each agent marked `live` or
   `DEAD` (reconciled against herdr, not just the registry).
-- `swarm swarms [--json]` → ALL swarm-ids for this project (not just the active
-  one), each with its agent count and last-modified time. The one verb that does
-  NOT need `SWARM_ID` — use it to discover what swarms exist on disk.
-- `swarm status [--json]` → snapshot of the active swarm (agents, live/DEAD, each
-  one's last reported state).
-
-`swarm list`, `swarm status`, and `swarm graph` also accept `--id <swarm-id>` to
-target a specific swarm instead of the exported `SWARM_ID`; omit it to use
-`SWARM_ID` as usual.
+- `swarm status [--json]` → snapshot of the swarm (agents, live/DEAD, each one's
+  last reported state).
 - `swarm whoami` → your own agent id in the graph (or `operator` if you are the
   root — started directly by the human, not spawned by another agent).
 - `swarm parent` → the id of the agent who delegated to you and approves your
@@ -93,8 +86,9 @@ no anonymous `a1`-style id:
   minted is recorded in the swarm's append-only `names` ledger.
 
 That id is what you address in `send`/`wait`/`close`/`graph`, and it is the
-filename for the agent everywhere under `.swarm/swarms/<swarm-id>/`:
-`agents/<id>.json`, `state/<id>.json`, `inbox/<id>/`, `settings/<id>.*`.
+filename for the agent everywhere under the project's `.swarm/`:
+`agents/<id>.json`, `state/<id>.json`, `inbox/<id>/`, `settings/<id>.*`
+(the ledger itself is `.swarm/names`).
 So when you read history, a name never blurs two different agents together.
 
 ## What the reported states mean
@@ -239,7 +233,8 @@ you can't obtain, or a failure the swarm can't resolve.
 
 ## Restarting into an existing swarm
 
-If `SWARM_ID` is already set when you start (e.g. after a context clear in the
-same terminal), a swarm may already exist. `swarm status` shows its state. You
-can keep the same `SWARM_ID` to continue it, or `swarm start` a new one. Whether
-to resume, replace, or ask the user is your call given what `status` shows.
+The project's swarm outlives any single session, so when you start (e.g. after a
+context clear) agents may already be running. `swarm status` shows the roster and
+each agent's live/DEAD state; `swarm graph` shows the living tree. Read one of
+them first. Whether to resume the work in flight, `swarm close` what is stale, or
+ask the user is your call given what you see.

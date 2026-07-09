@@ -9,19 +9,18 @@
 # subagent's Stop/Notification HOOK — a fired event, not a screen scrape.
 #
 # Scope:
-#   PROJECT = the .swarm dir (per repo; $PWD/.swarm, override with SWARM_DIR).
-#   SWARM   = one coordinator run, identified by a swarm-id. `swarm start` mints
-#             one and prints it; the coordinator exports SWARM_ID and every other
-#             verb operates within that swarm only.
-#   AGENT   = one subagent within a swarm. Its id IS its slugified label
+#   SWARM   = the project. One swarm per project, rooted at the .swarm dir
+#             ($PWD/.swarm, override with SWARM_DIR). There is no swarm-id: a
+#             swarm holds many operator-rooted agents, so nothing needs naming.
+#             Every verb auto-creates the layout on use; `swarm start` is just
+#             an explicit, idempotent way to do that.
+#   AGENT   = one subagent within the swarm. Its id IS its slugified label
 #             (e.g. `fix-send-race`) — meaningful, addressable, and unique for
 #             the swarm's entire lifetime (reap never frees a name).
 #
-# State layout:
-#   .swarm/swarms/<swarm-id>/{agents,updates,settings,state,inbox}/
-#   .swarm/swarms/<swarm-id>/names   — append-only ledger of every minted id
-# Everything (list, reap, wait, id allocation) is scoped to the active swarm;
-# swarms never see or touch each other.
+# State layout (flat, directly under the project's .swarm):
+#   .swarm/{agents,updates,settings,state,inbox}/
+#   .swarm/names   — append-only ledger of every minted id
 
 set -euo pipefail
 
@@ -36,8 +35,7 @@ while [ -L "$_src" ]; do
 done
 HERE="$(cd "$(dirname "$_src")" && pwd)"
 HOOK="$HERE/swarm-hook.cjs"
-SWARM_DIR="${SWARM_DIR:-$PWD/.swarm}"   # PROJECT root for swarm state
-SWARMS_DIR="$SWARM_DIR/swarms"          # one subdir per swarm-id
+SWARM_DIR="${SWARM_DIR:-$PWD/.swarm}"   # the swarm root (one swarm per project)
 
 die() { echo "swarm: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -138,16 +136,29 @@ PY
   echo "now on $target"
 }
 
-# Resolve the ACTIVE swarm's dirs from $SWARM_ID. `start` sets SWARM_ID itself
-# (before this runs) so its dirs get created; every other verb requires it.
-SWARM_ID="${SWARM_ID:-}"
+# SWARM_ID is a RETIRED concept (one swarm per project). It is deliberately
+# IGNORED, never an error: agents spawned by an older swarm carry SWARM_ID baked
+# into their pane env, which cannot be changed for a running process. Erroring on
+# it would break every live agent's `swarm` verb the moment the CLI is updated.
+# The note goes to stderr only — stdout of machine-read verbs (start, whoami,
+# spawn) stays clean, and the exit code is untouched.
+if [ -n "${SWARM_ID:-}" ]; then
+  echo "swarm: note: SWARM_ID is ignored (one swarm per project; the swarm-id concept was removed)" >&2
+fi
+
+# Resolve the swarm's dirs and AUTO-INIT them. Idempotent: every verb calls this,
+# so a swarm springs into being on first use and `swarm start` is never required.
 init_swarm_paths() {
-  [ -n "$SWARM_ID" ] || die "no active swarm — run 'swarm start' and export SWARM_ID (SWARM_ID is unset)"
-  SWARM_ROOT="$SWARMS_DIR/$SWARM_ID"
+  SWARM_ROOT="$SWARM_DIR"
   AGENTS_DIR="$SWARM_ROOT/agents"
   UPDATES_DIR="$SWARM_ROOT/updates"
   SETTINGS_DIR="$SWARM_ROOT/settings"
+  STATE_DIR="$SWARM_ROOT/state"
+  INBOX_DIR="$SWARM_ROOT/inbox"
   NAMES_FILE="$SWARM_ROOT/names"   # append-only ledger of every id ever minted
+  mkdir -p "$AGENTS_DIR" "$UPDATES_DIR" "$SETTINGS_DIR" "$STATE_DIR" "$INBOX_DIR" \
+    || die "cannot create swarm layout under $SWARM_ROOT"
+  [ -e "$NAMES_FILE" ] || : > "$NAMES_FILE"
 }
 
 # --- agent ids are slugs -------------------------------------------------
@@ -245,27 +256,15 @@ PY
 }
 
 # ------------------------------------------------------------------ start
-# swarm start [--id <swarm-id>]  — mint a new swarm and print its id. The
-# coordinator captures this and exports SWARM_ID for all subsequent verbs.
+# swarm start  — explicitly create this project's swarm layout and print its
+# root. There is no id to mint (the project IS the swarm), so this is a trivial
+# idempotent init: safe to run any number of times. Every other verb auto-inits
+# the same way, so `start` is never REQUIRED — it exists for bootstrap scripts
+# and for the operator who wants to see where state will live.
 cmd_start() {
-  local given=""
-  while [ $# -gt 0 ]; do case "$1" in --id) given="$2"; shift 2;; *) die "unknown flag: $1";; esac; done
-  # Default id: coordinator's herdr pane + a short counter, so it's readable and
-  # unique per project. No Date.now()/random needed — derive from existing dirs.
-  local sid="$given"
-  if [ -z "$sid" ]; then
-    local base="${HERDR_PANE_ID:-s}"; base="${base//:/-}"
-    local n=1
-    while [ -e "$SWARMS_DIR/${base}-$n" ]; do n=$((n+1)); done
-    sid="${base}-$n"
-  fi
-  [ -e "$SWARMS_DIR/$sid" ] && die "swarm '$sid' already exists"
-  mkdir -p "$SWARMS_DIR/$sid/agents" "$SWARMS_DIR/$sid/updates" \
-           "$SWARMS_DIR/$sid/settings" "$SWARMS_DIR/$sid/state" "$SWARMS_DIR/$sid/inbox"
-  # The name ledger: every agent id ever minted in this swarm, one per line,
-  # append-only. It outlives reap, which is the whole point (see mint_id).
-  : > "$SWARMS_DIR/$sid/names"
-  echo "$sid"
+  [ $# -eq 0 ] || die "unknown flag: $1 (usage: swarm start)"
+  init_swarm_paths   # creates the layout + the names ledger; idempotent
+  echo "$SWARM_ROOT"
 }
 
 # ------------------------------------------------------------------ spawn
@@ -368,7 +367,7 @@ PY
     printf -- '--- RECONCILE, THEN CHECKPOINT (do this before you go idle) ---\n'
     printf 'Before you go idle — after one quick task, or at the end of a long life — run ONE\n'
     printf 'ritual: first RECONCILE toward your goal, then write the result to your durable\n'
-    printf 'checkpoint at `%s`.\n\n' ".swarm/swarms/$SWARM_ID/state/$id.json"
+    printf 'checkpoint at `%s`.\n\n' "$STATE_DIR/$id.json"
     printf 'RECONCILE (do not skip to a reflexive "all good" — argue against yourself):\n'
     printf '  1. State your mission/current task in one sentence FROM YOUR STATE FILE — not a\n'
     printf '     paraphrase of what you happen to be doing (catches goal drift).\n'
@@ -451,18 +450,15 @@ PY
   # Open a new herdr TAB for this subagent (full-width pane; coordinator's
   # own view is untouched) and capture its root pane id. The env is set on
   # the tab's pane so BOTH the child's swarm CLI and its hook resolve state:
-  #   SWARM_DIR      = PROJECT root (what the CLI expects; it appends
-  #                    /swarms/$SWARM_ID itself). NOT the swarm's own dir.
-  #   SWARM_ID       = the active swarm-id, so the child's `swarm <verb>`
-  #                    resolves SWARM_ROOT=$SWARM_DIR/swarms/$SWARM_ID.
+  #   SWARM_DIR      = the swarm root. Its agents/ updates/ inbox/ state/ sit
+  #                    directly beneath — one swarm per project, no nesting.
   #   SWARM_AGENT_ID = this subagent's stable id (used by the hook + whoami).
-  # The hook derives its updates dir from SWARM_DIR+SWARM_ID under this same
-  # contract (see bin/swarm-hook.cjs), so updates still land in the swarm's
-  # own updates/ dir.
+  # The hook resolves its updates/ and inbox/ from SWARM_DIR under this same
+  # contract (see bin/swarm-hook.cjs) — CLI and hook must stay in lockstep.
   local pane tab
   local tabjson
   tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id" \
-           --env "SWARM_DIR=$SWARM_DIR" --env "SWARM_ID=$SWARM_ID" \
+           --env "SWARM_DIR=$SWARM_DIR" \
            --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
   pane=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null || true)
   tab=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["tab"]["tab_id"])' 2>/dev/null || true)
@@ -486,9 +482,8 @@ PY
   # mission = --role if given, else derived from the label/task; tasks[] starts
   # with the delegated task; the agent grows it. Seeding means the restore hook
   # always has a file to inject and the agent starts from a well-formed envelope.
-  mkdir -p "$SWARM_ROOT/state"
   ROLE="${role:-}" LABEL="$label" MODEL="$model" TASK="$task" AID="$id" \
-    python3 - "$SWARM_ROOT/state/$id.json" <<'PY'
+    python3 - "$STATE_DIR/$id.json" <<'PY'
 import json,sys,os,time
 f=sys.argv[1]
 role=os.environ.get("ROLE","").strip()
@@ -583,7 +578,7 @@ cmd_send() {
 
   # Write the message atomically (tmp + rename) into the target's inbox. The
   # filename is <ts_ms>-<from>.json so files sort by arrival time.
-  local inbox="$SWARM_ROOT/inbox/$id"
+  local inbox="$INBOX_DIR/$id"
   mkdir -p "$inbox" || die "cannot create inbox dir: $inbox"
   local ts; ts="$(date +%s%3N)"
   # date +%3N is GNU-only; fall back to a millisecond stamp via python if needed.
@@ -735,7 +730,7 @@ for p in d.get("result",{}).get("panes",[]): print(p.get("pane_id",""))' 2>/dev/
 # --json emits records with a "live" field; --live-only hides dead ones.
 cmd_list() {
   local as_json="" live_only=""
-  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
   init_swarm_paths
   local panes; panes="$(live_panes)"
   AGENTS_DIR="$AGENTS_DIR" PANES="$panes" AS_JSON="${as_json:-}" LIVE_ONLY="${live_only:-}" python3 <<'PY'
@@ -764,39 +759,6 @@ for r in rows:
 PY
 }
 
-# ------------------------------------------------------------------ swarms
-# swarm swarms [--json]  — list ALL swarm-ids for this project, not just the
-# active one. Unlike almost every other verb this does NOT need SWARM_ID: it
-# discovers swarm-ids by listing subdirs of the project's swarms/ dir (resolved
-# from SWARM_DIR, else $PWD/.swarm). For each swarm it shows the id, last-modified
-# time, and agent count (*.json under <swarm>/agents/, same convention as list).
-# Empty/missing swarms dir is not an error — it prints "(no swarms)" / "[]".
-cmd_swarms() {
-  local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
-  SWARMS_DIR="$SWARMS_DIR" AS_JSON="${as_json:-}" python3 <<'PY'
-import json,os,sys,time
-root=os.environ["SWARMS_DIR"]; as_json=os.environ.get("AS_JSON")
-rows=[]
-for sid in sorted(os.listdir(root)) if os.path.isdir(root) else []:
-    sd=os.path.join(root,sid)
-    if not os.path.isdir(sd): continue
-    ad=os.path.join(sd,"agents")
-    agents=[fn for fn in os.listdir(ad) if fn.endswith(".json")] if os.path.isdir(ad) else []
-    try: mtime=os.path.getmtime(sd)
-    except OSError: mtime=0
-    rows.append({"swarm_id":sid,"agents":len(agents),
-                 "modified":time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(mtime)),
-                 "modified_epoch":int(mtime)})
-if as_json:
-    print(json.dumps(rows,indent=2)); sys.exit(0)
-if not rows:
-    print("(no swarms)"); sys.exit(0)
-for r in rows:
-    print(f"{r['swarm_id']}\t{r['agents']} agents\t{r['modified']}")
-PY
-}
-
 # ------------------------------------------------------------------ checkpoint
 # swarm checkpoint --help        — print the goal-status state-file schema.
 # swarm checkpoint --context     — read THIS agent's own transcript and print its
@@ -812,7 +774,7 @@ cmd_checkpoint() {
       cat <<'EOF'
 swarm checkpoint — goal-status continuity, kept by EVERY agent (Thread C).
 
-You maintain: .swarm/swarms/<swarm-id>/state/<your-id>.json
+You maintain: .swarm/state/<your-id>.json
 Write it yourself before going idle. Schema:
 
   {
@@ -896,24 +858,22 @@ cmd_reap() {
 }
 
 # ------------------------------------------------------------------ status
-# swarm status [--json]  — reconciled snapshot of the ACTIVE swarm: does it
-# exist, how many agents, each agent's live/DEAD + latest reported state
-# (done/blocked/none). This is what a restarting coordinator reads to decide
-# how to continue. Exit code: 0 = swarm exists, 3 = SWARM_ID set but no such
-# swarm on disk, (init_swarm_paths dies if SWARM_ID unset).
+# swarm status [--json]  — reconciled snapshot of this project's swarm: how many
+# agents, each agent's live/DEAD + latest reported state (done/blocked/none).
+# This is what a restarting coordinator reads to decide how to continue.
+#
+# Exit codes: 0 always (on a readable layout). Exit 3 is RETIRED: it once meant
+# "SWARM_ID set but no such swarm on disk", which is unreachable now that every
+# verb auto-inits the layout — a swarm cannot be missing. An agentless swarm is a
+# fact ("0 agent(s)"), not an error. Exit 3 is not reused for anything else.
 cmd_status() {
   local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
   init_swarm_paths
-  if [ ! -d "$SWARM_ROOT" ]; then
-    if [ -n "$as_json" ]; then echo "{\"swarm_id\":\"$SWARM_ID\",\"exists\":false,\"agents\":[]}"
-    else echo "swarm '$SWARM_ID' — no state on disk (SWARM_ID is set but this swarm was never started here)"; fi
-    return 3
-  fi
   local panes; panes="$(live_panes)"
-  SWARM_ID="$SWARM_ID" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
+  SWARM_ROOT="$SWARM_ROOT" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
 import json,os,sys
-sid=os.environ["SWARM_ID"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
+root=os.environ["SWARM_ROOT"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
 live=set(l for l in os.environ.get("PANES","").splitlines() if l)
 have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
 
@@ -939,10 +899,10 @@ for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
     agents.append(a)
 
 if as_json:
-    print(json.dumps({"swarm_id":sid,"exists":True,"herdr_reachable":have_herdr,"agents":agents},indent=2)); sys.exit(0)
+    print(json.dumps({"swarm_root":root,"herdr_reachable":have_herdr,"agents":agents},indent=2)); sys.exit(0)
 
 n=len(agents); live_n=sum(1 for a in agents if a["live"]); dead_n=sum(1 for a in agents if a["live"] is False)
-print(f"swarm '{sid}' — {n} agent(s): {live_n} live, {dead_n} DEAD" + ("" if have_herdr else "  (herdr unreachable — live/DEAD unknown)"))
+print(f"swarm at {root} — {n} agent(s): {live_n} live, {dead_n} DEAD" + ("" if have_herdr else "  (herdr unreachable — live/DEAD unknown)"))
 for a in agents:
     lv = "live" if a["live"] else ("DEAD" if a["live"] is False else "?")
     print(f"  {a.get('id')}  {a.get('label','')}  [{lv}]  reported={a['reported'].upper() or 'NONE'}  {('· '+a['last_summary'][:60]) if a['last_summary'] else ''}")
@@ -957,7 +917,7 @@ PY
 #                             producing it, so the whole subtree is done together.
 #   swarm close <id> --self   close ONLY <id>, leave its children running (rare).
 #   swarm close               closes ALL agents in the swarm.
-# Never deletes state — the .swarm/swarms/<id>/ dir stays as a paper trail.
+# Never deletes state — the .swarm/ dir stays as a paper trail.
 cmd_close() {
   init_swarm_paths
   local one="" self=""
@@ -1023,12 +983,12 @@ PY
 # shown as a field: a node with children is coordinating, a leaf is working.
 cmd_graph() {
   local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --id) [ -n "${2:-}" ] || die "--id needs a swarm-id"; SWARM_ID="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
   init_swarm_paths
   local panes; panes="$(live_panes)"
-  SWARM_ID="$SWARM_ID" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
+  AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
 import json,os,sys
-sid=os.environ["SWARM_ID"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
+ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
 live=set(l for l in os.environ.get("PANES","").splitlines() if l)
 have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
 
@@ -1080,11 +1040,11 @@ if as_json:
         return {"id":aid,"label":a.get("label",""),"task":a.get("task",""),
                 "reported":a["reported"],"last_summary":a["last_summary"],
                 "children":[build(c) for c in kids.get(aid,[])]}
-    print(json.dumps({"swarm_id":sid,"operator_children":[build(r) for r in roots]},indent=2)); sys.exit(0)
+    print(json.dumps({"operator_children":[build(r) for r in roots]},indent=2)); sys.exit(0)
 
 if not nodes:
-    print(f"swarm '{sid}' — no living agents"); sys.exit(0)
-print(f"swarm '{sid}' — living graph of work (operator is the root)")
+    print("swarm — no living agents"); sys.exit(0)
+print("swarm — living graph of work (operator is the root)")
 print("operator (human)")
 def render(aid, prefix, is_last):
     a=nodes[aid]
@@ -1196,7 +1156,6 @@ case "${1:-}" in
   updates) shift; cmd_updates "$@";;
   wait)    shift; cmd_wait "$@";;
   list)    shift; cmd_list "$@";;
-  swarms)  shift; cmd_swarms "$@";;
   checkpoint) shift; cmd_checkpoint "$@";;
   status)   shift; cmd_status "$@";;
   whoami)   shift; cmd_whoami "$@";;
@@ -1208,8 +1167,9 @@ case "${1:-}" in
   *) cat >&2 <<EOF
 swarm — spawn/send/receive for a coordinating agent (herdr container).
 
-A SWARM is one run, scoped by swarm-id. Start one, export SWARM_ID, then all
-other verbs act within that swarm only.
+The PROJECT is the SWARM: one swarm per project, rooted at ./.swarm (override
+with SWARM_DIR). There is no swarm-id. Every verb creates the layout on first
+use, so nothing has to be started or exported before you spawn.
 
 An AGENT's id IS its label, slugified: 'swarm spawn "..." --label fix-send-race'
 prints and is addressed as 'fix-send-race'. With no --label the slug comes from
@@ -1219,30 +1179,28 @@ a collision (even with a reaped agent) gets a -2/-3/... suffix.
   swarm world                            print the world doc (what agents read)
   swarm update [--check] [--pre] [--major]  update to latest tagged release
                                          (--pre: incl pre-releases; --major: cross breaking)
-  swarm start [--id <swarm-id>]          mint a swarm; prints its id
-                                         -> export SWARM_ID=<that id>
+  swarm start                            create the layout; prints the swarm root
+                                         (idempotent; never required)
   swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
                                          prints the agent's id = slugify(L)
   swarm checkpoint --help | --context    goal-status continuity (every agent)
   swarm send  <agent-id> "<message>"
   swarm updates [--id <agent-id>] [--json]
   swarm wait  <agent-id> [--timeout SEC]
-  swarm list  [--id <swarm-id>] [--json] [--live-only]   agents in the active swarm (marks DEAD)
-  swarm swarms [--json]                  ALL swarm-ids for this project (no SWARM_ID needed)
-  swarm status [--id <swarm-id>] [--json]                reconciled snapshot (restart: read this)
+  swarm list  [--json] [--live-only]     agents in this swarm (marks DEAD)
+  swarm status [--json]                  reconciled snapshot (restart: read this)
   swarm whoami                           my own agent id (operator if root)
   swarm parent                           who delegated to / approves me
-  swarm graph [--id <swarm-id>] [--json]                 the LIVING tree of work (dead hidden)
+  swarm graph [--json]                   the LIVING tree of work (dead hidden)
   swarm children [--json]                YOUR direct children (one layer down)
   swarm close [<id>] [--self]            close <id>+subtree (--self: just <id>); keeps state
-  swarm reap                             prune dead agents in the active swarm
+  swarm reap                             prune dead agents in this swarm
 
-Typical start:
-  SWARM_ID=\$(swarm start); export SWARM_ID
+Typical start (no bootstrap needed):
   id=\$(swarm spawn "build the CSV importer" --label csv-importer)   # -> csv-importer
   swarm wait "\$id"; swarm close "\$id"
-On restart with SWARM_ID already set:
-  swarm status     # see what's there, then decide: resume / new / clear
+On restart:
+  swarm status     # see what's there, then decide: resume / spawn more / close
 EOF
      exit 1;;
 esac
