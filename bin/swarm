@@ -616,7 +616,15 @@ PY
 }
 
 # ------------------------------------------------------------------ send
-# swarm send <id> "<message>"
+# swarm send <id> --stdin        (recommended: body read from stdin)
+# swarm send <id> "<message>"    (short, quote-free strings only)
+#
+# A positional body is a shell word. Backticks and $(...) are EXECUTED by the
+# caller's shell, and an apostrophe terminates a single-quoted string, before
+# swarm is invoked — so the tool cannot see, warn about, or recover the damage.
+# Observed four times across two agents: one send delivered zero bytes, one
+# arrived with words deleted mid-sentence. `--stdin` never makes the body a
+# shell word. `cmd_spawn` already writes its task to a file for this reason.
 #
 # Durable inbox delivery. Instead of typing the message into the target's live
 # TUI pane (fragile, no delivery guarantee), we write ONE JSON message file to
@@ -639,8 +647,30 @@ PY
 # Every other id still fails hard on a typo.
 cmd_send() {
   init_swarm_paths
-  local id="${1:-}" msg="${2:-}"
-  [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"'
+  local id="" msg="" from_stdin="" have_msg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --stdin) from_stdin=1; shift;;
+      -*)      die "unknown flag: $1";;   # `send --help` is handled by the dispatcher
+      *)       if [ -z "$id" ]; then id="$1"; else msg="$1"; have_msg=1; fi; shift;;
+    esac
+  done
+
+  # `--stdin` reads the body as BYTES off stdin, so it never becomes a shell word.
+  # That is the whole point: a body containing backticks, $(...), or an apostrophe
+  # is mangled or destroyed by the CALLER's shell long before this function runs,
+  # and swarm cannot see or recover it. `cmd_spawn` already writes its task to a
+  # file for exactly this reason (see the note above it). Passing both a positional
+  # body and --stdin is an error rather than a silent precedence rule — quietly
+  # ignoring one of two bodies is the same class of trap.
+  if [ -n "$from_stdin" ]; then
+    [ -z "$have_msg" ] || die "send: --stdin takes the body from stdin; do not also pass a positional <message>"
+    [ ! -t 0 ] || die "send --stdin: no message on stdin (pipe or redirect one in)"
+    msg="$(cat; printf x)"; msg="${msg%x}"   # preserve trailing newlines exactly
+    [ -n "$msg" ] || die "send --stdin: empty message on stdin"
+  fi
+
+  [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"  (or: … <id> --stdin)'
 
   # Size limit — enforced at the SOURCE, before anything is written.
   #
@@ -1528,7 +1558,16 @@ verb_usage() {
     start)   echo "swarm start";;
     spawn)   echo 'swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]';;
     send)    printf '%s\n' \
-               'swarm send <agent-id|operator> "<message>"' \
+               'swarm send <agent-id|operator> --stdin      # body read from stdin (recommended)' \
+               'swarm send <agent-id|operator> "<message>"  # short, quote-free strings only' \
+               '' \
+               'PREFER --stdin for anything you did not hand-check: a positional body is a' \
+               'shell word, so backticks, $(...), and apostrophes are evaluated or eaten by' \
+               'YOUR shell before swarm ever sees them. Agents write prose; prose has' \
+               'apostrophes. Pipe or redirect instead:' \
+               '' \
+               '    swarm send cos --stdin < message.txt' \
+               '    printf %s "$body" | swarm send cos --stdin' \
                '' \
                'The body must be <= 6000 bytes: the delivery hook injects at most 8000' \
                'chars per turn, so a larger message could not be delivered whole. Store' \

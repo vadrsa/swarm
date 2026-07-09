@@ -31,7 +31,8 @@ idempotent init that prints the swarm root; it is never required.)
   a reader that reports your own context-window usage to drop into your
   checkpoint. You write `state/<id>.json` yourself; this is the reference + the
   usage helper.
-- `swarm send <id> "<message>"` → delivers a message to a subagent's **durable
+- `swarm send <id> --stdin` (recommended) or `swarm send <id> "<message>"` for
+  short, quote-free strings → delivers a message to a subagent's **durable
   file inbox** (`.swarm/inbox/<agent-id>/`), then rings a best-effort
   "doorbell" so the agent picks it up in near-realtime. Delivery is guaranteed by
   the file: the message is surfaced into the agent's context (via a
@@ -42,7 +43,13 @@ idempotent init that prints the swarm root; it is never required.)
   **A body over 6000 bytes is rejected** — the guarantee above only holds for a
   message that fits one turn's injection whole. Put large content in a file and
   send the path.
-- `swarm send operator "<message>"` → the one non-agent target: the **human root**,
+  **Prefer `--stdin` for anything you did not hand-check.** A positional body is a
+  shell word: backticks and `$(...)` are *executed* by your shell, and an apostrophe
+  terminates a quoted string — all before `swarm` runs, so it cannot see or recover
+  the damage. Agents write prose, and prose has apostrophes. Pipe or redirect
+  instead: `swarm send cos --stdin < msg.txt`, or `printf %s "$body" | swarm send
+  cos --stdin`.
+- `swarm send operator --stdin` (or `"<message>"`) → the one non-agent target: the **human root**,
   every escalation's last stop. It has no pane and no doorbell, so the message is
   durable-file-only (`.swarm/inbox/operator/`); the human reads it by running
   `swarm updates` or `swarm inbox read`. Send up to it exactly like any other id.
@@ -95,7 +102,7 @@ later).
 no anonymous `a1`-style id:
 
     id=$(swarm spawn "fix the send race" --label fix-send-race)   # -> fix-send-race
-    swarm send fix-send-race "…"    # addressed by that name everywhere
+    swarm send fix-send-race --stdin < note.txt   # addressed by that name everywhere
 
 - **Slugify** = lowercase, alphanumerics and hyphens only, runs of hyphens
   collapsed, ends trimmed, capped at 30 chars.
