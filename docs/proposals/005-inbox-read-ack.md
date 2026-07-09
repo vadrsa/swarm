@@ -1,9 +1,38 @@
 # Proposal 005 — Notify-and-pull for the inbox: adopt, but not for the reason proposed, and not for agents
 
-**STATUS:** proposed · **From:** product · **Date:** 2026-07-09
+**STATUS:** **ADOPTED** (2026-07-09), all three parts, plus one operator addition ·
+**From:** product · **Implementation:** commissioned from `cos`
 **Requested by:** the operator, who asked explicitly for criticism rather than agreement
 
 ---
+
+> ## Outcome
+>
+> The operator adopted this as written and rejected the half of his own redesign that this
+> document argued against:
+>
+> 1. **Operator mailbox → explicit cumulative acknowledgement.** Reading never destroys;
+>    `swarm updates` becomes non-destructive in all forms including `--json`. `read` prints
+>    ids, `ack` must **name the highest id claimed**, and there is **no `ack --all`** — the
+>    safety requirement this document raised at *"the N+1 question"* below.
+> 2. **Agents keep full-body injection.** Notify-and-pull is **rejected**.
+> 3. **New verbs** `swarm inbox read` / `swarm inbox ack <id>`, an honest header, and a real
+>    cap (no single oversized message blowing through the budget — G10).
+> 4. **Operator addition:** `swarm send` rejects oversized bodies with a helpful error,
+>    establishing *files-referenced-by-path* as the pattern for large payloads. The limit is
+>    `cos`'s to pick, grounded in the injection budget.
+>
+> **`swarm inbox read`/`ack` therefore governs what the cap holds back, and the operator's
+> mailbox stops being destructively read. Nothing is unified** — the Python and Node read
+> paths stay separate, because unifying them would import G17 into the operator's channel
+> (see the cost of unification below).
+>
+> **One note for the implementer.** Item 3's *"fix the lying header"* refers to the
+> `Showing 3 of 5 new messages (2 remain…)` wording. Product filed that as a **defect** and
+> then **retracted it** — `cos` proved the shortfall is already announced by an `…and N more`
+> line that ships. The retraction stands: this is a **copy improvement**, not a bug fix. It is
+> worth doing, and the code already does the thing it was accused of omitting. Do not go
+> looking for a missing disclosure.
 
 > ## Correction, 2026-07-09 — one supporting claim in this proposal was wrong
 >
@@ -188,14 +217,61 @@ or an idle death. Crash-safety is preserved in the same direction — an un-acke
 re-shows — but the window grows by orders of magnitude, and the thing that closes it is
 now the model's diligence rather than a `rename` two lines later.
 
-**Cumulative ack does close one real hole**, and this is the proposal's best argument.
-Today, "which messages did the agent actually see?" is answered by a side effect of a
-character count. If the agent's turn dies after injection but before the renames complete,
-`injectedCount` messages were shown and some subset were moved — the loop is not atomic
-across files. Explicit ack replaces that with a single monotonic watermark the agent
+**Cumulative ack does close one real hole**, and this was the proposal's best argument as
+first written. Today, "which messages did the agent actually see?" is answered by a side
+effect of a character count. If the agent's turn dies after injection but before the renames
+complete, `injectedCount` messages were shown and some subset were moved — the loop is not
+atomic across files. Explicit ack replaces that with a single monotonic watermark the agent
 controls. That is strictly better *bookkeeping*.
 
-But it is better bookkeeping for a problem the operator's mailbox has and agents do not.
+### A stronger argument, supplied by the agent it indicts
+
+*Added after adoption. `cos` routed this at the operator's request, as evidence.*
+
+The operator sent `cos` the directive adopting this proposal. **`cos` never acted on it.** It
+kept reporting the mail-read item as "awaiting the operator" for four more cycles while the
+answer sat in its own `read/` directory. The operator had to re-send it.
+
+The tempting reading is *"a message slipped, therefore push is unreliable, therefore
+notify-and-pull."* **That inverts it**, and the artifacts say so. Product replayed the exact
+pair through the real hook — the 4,699-byte message that preceded it and the 2,036-byte
+directive that followed 37 seconds later:
+
+```
+header: [swarm inbox] You have 2 new message(s) from other agents:
+bodies injected: 2          operator body present: TRUE
+total injected: 6,965 chars (CAP 8,000)   withheld line: none
+acked to read/: 2           still unread: 0
+```
+
+Nothing was truncated. **The directive was fully in the agent's context, beside the other
+message, with its commissioning text intact.** The agent answered the interesting technical
+exchange and not the operator telling it what to build. Then the hook auto-acked both.
+
+So this is **not a delivery defect, and it is evidence *for* rejecting notify-and-pull.** The
+failure was not that `cos` lacked the text — it had the text. The failure was that it did not
+act. Replacing the body with *"you have 1 message, go read it"* converts a message the agent
+ignored into a message it must take a **second, separate, forgettable action** even to see.
+It demonstrably forgot the zeroth action; adding a first one does not help.
+
+What the incident *does* prove is the hazard this document already names — **"`ack N+2`
+silently acknowledges N+1, whether or not the agent understood it"** — happening in the wild.
+The hook acked the directive into `read/` at the instant of injection, on the strength of
+having *rendered* it. **Shown is not understood.** Today's implicit prefix-ack acknowledges
+**delivery** and records it as **receipt**.
+
+Under explicit cumulative ack, that directive would have stayed outstanding and re-surfaced on
+every subsequent turn until claimed by id. `cos` would have tripped over it four times.
+
+> **The watermark is not merely cleaner bookkeeping. It is the only mechanism by which a busy
+> agent's own inattention becomes observable to itself. A message that stays outstanding is a
+> message that keeps asking.** — `cos`, on being the counterexample
+
+That argument is stronger than the data-integrity one above, and this document did not have
+it. It corrects a claim made in the next line as originally written.
+
+**The bookkeeping problem belongs to the operator's mailbox. The *inattention* problem belongs
+to agents, and this proposal originally missed it.**
 
 ## Cumulative ack: the N+1 question
 

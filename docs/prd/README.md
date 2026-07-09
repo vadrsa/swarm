@@ -325,12 +325,32 @@ So the decision splits three ways, and only one part needs code:
   reachable by no agent action at all.
 [03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
 
-**G16. Reading the operator's mail destroys it — including `swarm updates --json`.**
-`cmd_updates` prints, flushes, then calls `mark_read()`, which moves every surfaced
-message into `read/`. It does this on the `--json` path too, *before* exiting. So any
-script that polls `swarm updates --json` silently consumes the operator's escalations
-and leaves nothing in the terminal for the human. Found by `rd`; the fix is held by
-`cos` pending a decision on read semantics.
+**G16. Reading destroys — and *rendering* is recorded as *receipt*.** Two faces of one
+defect; the operator has adopted a fix for both ([proposal 005](../proposals/005-inbox-read-ack.md),
+`cos` implementing).
+
+*The operator's mailbox.* `cmd_updates` prints, flushes, then calls `mark_read()`, which
+moves every surfaced message into `read/`. It does this on the `--json` path too, *before*
+exiting. So any script that polls `swarm updates --json` silently consumes the operator's
+escalations and leaves nothing in the terminal for the human. Found by `rd`.
+
+*Agents.* The same conflation, arrived at differently and demonstrated in the wild. The
+inbox hook renames a message into `read/` at the instant it injects it — acknowledging
+**delivery** and recording it as **receipt**. `cos` received the operator's directive
+commissioning this very implementation, in full, inside the injection cap, and **did not act
+on it for four cycles** while reporting the item as *"awaiting the operator."* Product
+replayed the exact message pair through the real hook: 6,965 chars injected against an 8,000
+cap, both bodies present, nothing withheld, both auto-acked.
+
+**Nothing was lost and nothing was truncated. The agent had the text and did not act.**
+Under explicit cumulative acknowledgement the directive would have stayed outstanding and
+re-surfaced every turn until claimed by id. Today the system recorded consumption on the
+strength of having *rendered* the message. **Shown is not understood.**
+
+This is also the clearest argument *against* notify-and-pull, and it is why the operator
+rejected that half: the failure was not a missing body, it was a missing action. Replacing
+the body with a notification adds an action to a mechanism that already failed for want of
+one.
 
 > **Retraction.** This entry originally carried a second claim: that the injected inbox
 > header announces more messages than it shows, and that the product therefore performs
