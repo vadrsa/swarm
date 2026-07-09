@@ -139,10 +139,49 @@ RECONCILE now (argue against yourself…)
 | `context` | **0** | free |
 | `work_cache` | **0** | free |
 
-The free fields are free **without limit**: a checkpoint of 6,000,230 bytes, with two million
-characters in each of `progress`, `context`, and `work_cache`, injects **797 bytes** and
-parses cleanly. The trailing instruction to *"re-read your full checkpoint"* exists precisely
-because the injection is lossy by design.
+The free fields are free **without limit**: a checkpoint of 60,000,227 bytes, with twenty
+million characters in each of `progress`, `context`, and `work_cache`, injects **797 bytes**
+and parses cleanly. The trailing instruction to *"re-read your full checkpoint"* exists
+precisely because the injection is lossy by design.
+
+### Two separate guarantees, often conflated
+
+It is tempting to credit the G17 drain fix (PR #31) with making large checkpoints safe. It
+does not, and the distinction is operational rather than pedantic. Tested against the
+**pre-fix** hook (`386c8d6`) as well as the current one:
+
+| what grows | old hook | new hook | what protects it |
+|---|---|---|---|
+| free fields, 60 MB file | 797 B, parses | 797 B, parses | **the `ctx` template** — they were never at risk |
+| `progress_summary`, 50,000 chars | 50,766 B, parses | 50,766 B, parses | — |
+| `progress_summary`, 100,000 chars | **65,536 B, parse FAILS** | 100,766 B, parses | **the drain fix** |
+
+- **Free fields are free because of the template**, which never reads them. That was always
+  true; no fix was involved, and a 60 MB checkpoint was never in danger.
+- **Injected fields are safe because of the drain fix.** Before it, seven fields crossing
+  ~64 KiB destroyed the restore *silently*, at exit 0 — the continuity mechanism eating its
+  own recovery. Now it fails loudly.
+
+The exact pre-fix cliff, found by bisection: the last surviving `progress_summary` was
+**64,770 characters** (≈65,540 bytes of payload). So an agent stuffing 6 MB into `work_cache`
+was always fine; an agent *narrating 100 KB into `progress_summary`* — which is what the
+reconcile ritual asks for — was silently losing its entire continuity injection on every
+restart. **The second is the one to warn people about, and it is the one the cost table above
+prevents.**
+
+Current headroom to that cliff, live roster:
+
+| agent | injects | headroom |
+|---|---:|---:|
+| `product` | 2,748 B | 23.8× |
+| `rd` | 5,915 B | 11.1× |
+| `audit` | 6,651 B | 9.9× |
+| `release-mgr` | 8,598 B | 7.6× |
+| `cos` | 13,146 B | **5.0×** |
+
+`cos` is closest, and it is the agent whose `progress_summary` the ritual grows fastest. Nobody
+is near the cliff today. The point is that nothing *stops* anyone reaching it, and until PR #31
+arriving there was invisible.
 
 > **The tool documents the opposite, and that is a defect — not an omission.** `WORLD.md`
 > tells every agent *"its checkpoint is re-injected after a context compaction or restart."*
