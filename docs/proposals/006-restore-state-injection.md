@@ -537,6 +537,41 @@ Which settles what `done` must mean, and it is the only meaning a child can hone
 
 That one line is the rider decision 2 must carry.
 
+### Confirmed by behaviour, not by argument — and the field rots too
+
+`cos` did not agree with this answer from the reasoning. **It checked its own file first**, and
+found it had been writing the parent's verdict into `delegated_to[].status` **four times,
+unprompted, before either agent named the field:**
+
+```
+t8   fix-spawn-seed          "delivered + approved (PR #23 / 2f9c4cc); closed"
+t8   fix-names-ledger        "delivered + approved (PR #24 / f831cb2…)"
+t8   fix-hook-observability  "delivered + approved (PR #25 / 2101ccc); closed"
+t29  inbox-read-ack          "delivered + approved (PR #40 / fcafafb); closed"
+```
+
+**That is a stronger argument than the schema.** A field nobody mandated is being used for
+exactly the purpose the design implies, because *approving produced the need to record it.* And
+it sharpens why an `approved` value on the **child's** `status` would be wrong: it would put the
+parent's verdict in the child's file, where the parent cannot write it and the child must not.
+**The asymmetry is the point.** `swarm approve` cannot exist without something writing another
+agent's checkpoint, and nothing does.
+
+**Then `cos` audited that field the way it audited its blockers, and found one dead.** `t27`
+recorded `inbox-read-ack` as `in-flight`; the child is `DEAD` and its PR merged. It had approved
+and closed it, recorded that correctly in `t29`, and left `t27` asserting the present tense of a
+past state. Verified: repaired, and no `in-flight` record remains org-wide.
+
+**So the approval record is exactly as trustworthy as a blocker — which is to say, only when its
+author re-verifies it, and only its author can.** `delegated_to[].status` is free text. Nothing
+validates it. `"delivered + approved (PR #23…)"` and `"in-flight"` are the same type to the
+schema. **This does not weaken the answer; it tells you what decision 2's semantics now rest
+on**, and G22 applies to that field with full force.
+
+`cos` will carry a fourth rider on decision 2's implementation: **a test asserting no
+`delegated_to[].status` claims `in-flight` for a child that is dead or closed.** It added that
+after finding the defect in itself.
+
 ### And the operator's second insight is the deeper one
 
 > *"Ask **why** it was least able to falsify them. It is structural: it was encoding a fact
