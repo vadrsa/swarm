@@ -31,13 +31,12 @@ inside it and mostly cannot tell it is there — which is the point.
 is not a soft requirement; herdr is where an agent *is*.
 
 Each agent gets a **herdr tab** (full-width, `--no-focus`, labelled with the
-agent's id). The tab's root pane carries four environment variables, and this is
+agent's id). The tab's root pane carries three environment variables, and this is
 the whole of the agent's identity:
 
 | Var | Value | Consumed by |
 |---|---|---|
-| `SWARM_DIR` | **project root** (`…/.swarm`) | CLI + hook |
-| `SWARM_ID` | active swarm-id | CLI + hook |
+| `SWARM_DIR` | the swarm root (`…/.swarm`) | CLI + hook |
 | `SWARM_AGENT_ID` | this agent's slug | hook, `whoami`, `parent`, `children`, `send`'s sender field |
 | `SWARM_AGENT_LABEL` | same string | hook (record key) |
 
@@ -45,13 +44,19 @@ Because herdr bakes these into the pane environment, **every shell in that pane
 inherits them and they cannot be lost.** `swarm whoami` needs no state file; it
 reads an env var. An agent that clears its context still knows who it is.
 
-The `SWARM_DIR` semantics were a real bug (PR #6): the hook wanted the swarm's own
-directory, the CLI wanted the project root, and children inherited the hook's
-flavor with no `SWARM_ID` — so **every spawned child's `swarm` CLI resolved state
-one level too deep and failed on every verb**. The fix made `SWARM_DIR` mean
-project-root everywhere and had the hook derive `swarms/$SWARM_ID/` itself, with a
-legacy fallback (no `SWARM_ID` ⇒ `SWARM_DIR` *is* the swarm dir) so panes spawned
-by an older version keep working.
+That immutability is a double edge, and it is the reason PR #16 could not simply
+retire `SWARM_ID`. A running agent's pane env is fixed for its lifetime, so an
+agent spawned under the old model carries a `SWARM_ID` that the new CLI must
+tolerate. It does — ignoring it with a note on stderr rather than erroring — but
+ignoring is not the same as migrating (gap **G12**).
+
+The `SWARM_DIR` semantics were a real bug once (PR #6): the hook wanted the
+swarm's own directory, the CLI wanted the project root, and children inherited the
+hook's flavor with no `SWARM_ID` — so **every spawned child's `swarm` CLI resolved
+state one level too deep and failed on every verb**. PR #16 dissolved the
+distinction that caused it: with one swarm per project there is exactly one root,
+`SWARM_DIR` *is* it, and both the CLI and the hook now join paths onto it directly.
+The hook's legacy-fallback branch is gone.
 
 herdr also answers the one question the registry cannot: `herdr pane list` is the
 **ground truth for liveness**. And `herdr pane read <pane>` lets an agent look at
@@ -134,8 +139,10 @@ to the document, which is itself a pointer to the CLI.
   partial write.
 - Per-agent hooks never touch the user's global Claude Code settings.
 - `swarm world` works from any install location.
-- The hook honors the legacy `SWARM_DIR` contract when `SWARM_ID` is absent, so
-  panes spawned by an older version keep reporting.
+- The CLI tolerates a stale `SWARM_ID` in a pre-cutover agent's pane environment
+  (ignored with a note, never an error), so its verbs do not hard-fail. Note this
+  is *tolerance*, not compatibility: such an agent still resolves state to the
+  wrong root (**G12**). The hook's old legacy-`SWARM_DIR` fallback is removed.
 - No daemon, no background process, no persistent connection. State on disk
   survives every restart, including the coordinator's.
 
@@ -188,16 +195,56 @@ manual path. It guards against a dirty or non-git target directory.
 every verb shells out to Python for JSON handling — an unusual choice for a bash
 CLI, and a hard dependency the README lists but the failure mode does not explain.
 
-**Nothing prevents two coordinators sharing a swarm-id** in the same project. The
-`names` ledger lock serializes id minting, but two `swarm start` calls that pass
-the same `--id` collide, and only the second errors (`swarm '<id>' already
-exists`). Concurrent coordinators on one swarm are undefined.
+**G13 — every agent shares one working tree, and `WORLD.md` never says so.**
+`swarm spawn` defaults `--cwd "$PWD"`, so unless a coordinator deliberately
+overrides it, every agent it spawns lands in the coordinator's own checkout. The
+swarm that produced these PRDs had **eleven agents in one git working tree.**
+
+herdr isolates *panes*, not *filesystems*. Git branch, index, and checkout state
+are properties of a working tree, not of a process — so `git checkout`, `git
+stash`, `git reset`, and `gh pr merge --delete-branch` are all **global side
+effects** that reach every agent sharing that tree. Two agents editing different
+files still collide the moment either changes branches.
+
+This is not theoretical. While one agent held an uncommitted rewrite of
+`bin/swarm` in the tree, another committed and merged a PR in the same tree; the
+uncommitted work disappeared. Because it had never been staged, git held no blob
+to recover it from — `git fsck --unreachable` found nothing, because nothing was
+ever hashed. It survived only in its author's context.
+
+The product's own reliability doctrine makes this worse rather than better.
+`WORLD.md` tells every agent it has *full autonomy over its own layer*, that
+*"nothing is merged, committed, or closed for you"*, and hands it unrestricted
+`git` and `gh` — while never mentioning that ten other agents hold the same
+checkout. An agent following its briefing exactly will eventually destroy a
+sibling's work, and neither will know why.
+
+`git worktree` already solves it: N working trees off one repository, each with
+independent `HEAD`, branch, and index, sharing one object store. The cost is one
+`--cwd` at spawn. Both agents involved in the collision above independently
+adopted worktrees immediately afterward, without being told to — which is some
+evidence the affordance is discoverable once you know you need it, and none at all
+that anyone knows before.
+
+**Concurrent coordinators are undefined.** Before PR #16, `swarm start --id X`
+twice would at least error on the second. Now `start` is idempotent and every verb
+auto-inits, so two coordinators in one project simply share one swarm, one
+registry, and one name ledger, with no signal that they are doing so. The `names`
+lock serializes id minting, which is the only contended resource that is protected.
 
 **`.swarm/` must be gitignored by the user.** The README says so; nothing enforces
 it, and `install.sh` does not offer. A committed `.swarm/` leaks transcript paths
 and every agent's full task text.
 
 ## Open product questions
+
+0. **Should a code-writing agent get its own working tree?** G13 is the sharpest
+   open question in the product, because it is the only one that silently destroys
+   work. The mechanism exists (`git worktree` + the `--cwd` flag already on
+   `spawn`); what is missing is a default and a sentence in `WORLD.md`. Against
+   isolating: agents collaborating on one change genuinely want a shared tree. That
+   argues for making the choice **explicit at spawn** rather than inherited from
+   whatever directory the coordinator happened to be standing in.
 
 1. **Should the coupling to Claude Code's surface be documented in `WORLD.md`?**
    Agents are told the hook is reliable. Three specific mechanisms are reliable

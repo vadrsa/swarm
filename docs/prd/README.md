@@ -6,14 +6,16 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `v0.8.0` + `main` through PR #14 (`09022aa`).
+Baseline: `main` through PR #16 (`0e4d8b7`). Newest tag: `v0.8.0` — **`main` is
+ahead of every tag, and the gap contains a breaking change.**
 
-> **These PRDs describe committed `main` (`09022aa`).** At the time of writing, an
-> uncommitted change in the shared working tree removes the swarm-id concept
-> entirely. It is not merged, not on a branch, and not in any tag, so it is not
-> "as built" — but it invalidates parts of every PRD here and, as it stands,
-> breaks the running swarm. See **G12** below. These documents will need a pass
-> once that change lands.
+> **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
+> swarm per project, rooted at `.swarm/`, no id to mint, every verb auto-creating
+> its layout on first use. `swarm swarms` and the `--id` override are removed;
+> `SWARM_ID` is deliberately ignored rather than an error. These PRDs are written
+> against that model. The prior model (`.swarm/swarms/<swarm-id>/`, an exported
+> `SWARM_ID`) survives only where it explains a live hazard — see **G12**, which
+> is now about the *cutover*, not the code.
 
 ## Whose truth wins
 
@@ -38,7 +40,7 @@ relevant PRD.
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced twelve issues. They are
+The onboarding pass that produced these PRDs surfaced thirteen issues. They are
 restated in context inside each PRD; this is the index. **Severity is product
 severity** — how badly the thing a user was promised fails to happen.
 
@@ -46,38 +48,62 @@ Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
 ### Critical — a stated guarantee does not hold
 
-**G12. The in-flight swarm-id removal breaks the running swarm, and leaves the
-contract doc describing a concept the CLI no longer has.** This is not a defect in
-`main`; it is an uncommitted change in the shared working tree, observed while
-writing these PRDs. Recording it here because it is the most urgent product issue
-open, and because it is invisible in git history.
+**G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
+defaults `--cwd "$PWD"`. In the swarm that produced these PRDs, **eleven agents
+shared a single git checkout.** Git branch, index, and checkout state are global
+to a working tree, so any two agents that touch code can silently destroy each
+other's uncommitted work — `git checkout`, `git stash`, and `gh pr merge
+--delete-branch` all move state out from under whoever else is editing.
 
-The change collapses `.swarm/swarms/<swarm-id>/…` to a flat `.swarm/…` and makes
-`SWARM_ID` a deliberately-ignored no-op. The reasoning in the code comment is
-sound — a running agent has `SWARM_ID` baked into its pane environment and cannot
-have it changed, so *erroring* on it would break every live agent. But *ignoring*
-it breaks them too, just more quietly:
+This is not hypothetical. While one agent had an uncommitted rewrite of
+`bin/swarm` in the tree, another (the author of these PRDs) committed and merged a
+PR in the same tree; the uncommitted work vanished, and because it had never been
+staged, git retained no blob to recover it from. It was reconstructed only because
+its author still held it in context.
 
-- Every live agent's registry row, checkpoint, and inbox live under
-  `.swarm/swarms/<swarm-id>/`. The new CLI resolves to the flat root.
-- Verified against the current swarm: `swarm list` → `(no agents)`;
-  `swarm parent` → `no registry entry for 'product'`. Every live agent's
-  checkpoint is orphaned at a path nothing reads. The swarm becomes invisible to
-  its own tooling the instant the CLI is updated, with no migration and no warning.
-- `swarm swarms` and the `--id` override are removed. Both shipped in tagged
-  releases (PR #7; PR #9 → `v0.5.0`). By `RELEASING.md`'s own definition —
-  *"a verb is removed or renamed"* and *"the `.swarm/` state schema changes such
-  that an in-progress swarm won't work"* — this is **twice over a MAJOR**.
-- `WORLD.md` (10 references) and `README.md` still teach `swarm-id` and `SWARM_ID`
-  as central. WORLD.md is the versioned contract loaded into every agent at
-  runtime; `RELEASING.md` classifies a change to it as breaking. Shipping the CLI
-  change without it means every agent is briefed on a world that no longer exists.
+There is no worktree isolation, no clone-per-agent, no locking, and **`WORLD.md`
+never warns that agents share a checkout** — while telling every agent it has full
+autonomy and that *"nothing is merged, committed, or closed for you."* Agents are
+handed unrestricted git and told nothing about who else is holding it.
 
-The change may well be right — one swarm per project is a real simplification, and
-auto-init is a genuine ergonomic win. The gap is that it currently has **no
-migration path for in-flight swarms** and **no accompanying contract update**, and
-G1 below shows this project has already shipped exactly this class of breaking
-change under a minor tag once.
+`git worktree` already solves this: N working trees off one repository, each with
+independent branch and index state, at the cost of one `--cwd` at spawn.
+Discussed in [07](07-herdr-world-integration.md).
+
+**G12. The swarm-id removal is merged, but the cutover is unsequenced and will
+blind every live agent.** PR #16 landed the one-swarm-per-project model correctly:
+the contract docs (`WORLD.md`, `README.md`, `swarm --help`) were updated in the
+same commit, so nothing teaches a concept the CLI lacks. The *code* half of this
+gap is closed. What remains is the deployment half, and it is sharp.
+
+The installed CLI is a symlink into a git checkout ([06](06-release-and-update.md)).
+The moment that checkout advances past `0e4d8b7`, **every currently-running agent
+loses its swarm.** Live agents carry `SWARM_ID` baked into their pane environment,
+which cannot be changed for a running process, and their registry rows,
+checkpoints, and inboxes all live under `.swarm/swarms/<swarm-id>/`. The new CLI
+resolves to the flat `.swarm/` root.
+
+Verified against the live swarm, running the new binary directly: `swarm list` →
+`(no agents)` where eleven exist; `swarm parent` → `no registry entry for
+'product'`. Checkpoints are orphaned at paths nothing reads. `swarm send` to any
+of them would fail with `unknown agent`.
+
+The code handles this as gracefully as it can — `SWARM_ID` is *ignored with a
+note* rather than made an error, precisely so a stale env var cannot hard-fail a
+running agent's verbs. But ignoring it silently redirects every path lookup, which
+is the same blindness arrived at more quietly. (A side effect: the note prints on
+**every verb invocation, forever**, for any agent spawned before the cutover.)
+
+There is **no migration**: nothing moves `.swarm/swarms/<id>/*` up to `.swarm/`,
+and no `RELEASING.md` note describes what a user must do. By that document's own
+definition this is twice over a MAJOR — *"a verb is removed or renamed"* (`swarm
+swarms`, `--id`, both shipped in tagged releases) and *"the `.swarm/` state schema
+changes such that an in-progress swarm won't work."* It is merged to `main`
+untagged, and **G1 below shows this project has already shipped exactly this class
+of change under a minor tag once.**
+
+The safe order is: finish or `swarm close` every live swarm → advance the checkout
+→ start fresh. Nothing in the tool enforces or even states that order.
 
 **G1. The breaking change shipped as a minor release; the major guard never
 fired.** PR #10 replaced live-pane `swarm send` with durable inbox messaging,
@@ -104,8 +130,8 @@ issued to every agent regardless. Discussed in [02](02-inbox-messaging.md) and
 
 **G3. `swarm checkpoint --context` reads the wrong agent's transcript.** The
 reader prefers `$CLAUDE_TRANSCRIPT_PATH`, but `swarm spawn` never sets that
-variable on the agent's pane (it sets only `SWARM_DIR`, `SWARM_ID`,
-`SWARM_AGENT_ID`, `SWARM_AGENT_LABEL`). So the fallback always runs, and the
+variable on the agent's pane (it sets only `SWARM_DIR`, `SWARM_AGENT_ID`,
+`SWARM_AGENT_LABEL`). So the fallback always runs, and the
 fallback globs `~/.claude/projects/*/*.jsonl` — **every project on the machine** —
 and takes the most recently modified. An agent asking "how full is my context
 window?" is answered with whichever Claude session on the machine wrote last,
@@ -204,10 +230,11 @@ writing the PRDs. Each belongs to the operator.
 
 2. **What is a swarm's end state?** There is `close` (keeps state) and `reap`
    (drops registry rows). There is no *finish*: no verb that says this swarm
-   reached its goal, no place a swarm's outcome is recorded, and `swarm swarms`
-   lists a completed run identically to an abandoned one. Long-lived standing
-   agents make this pressing — the current swarm has five agents with no defined
-   terminal condition.
+   reached its goal, and nowhere its outcome is recorded. PR #16 sharpened this
+   rather than settling it — now that the project *is* the swarm, a swarm has no
+   lifecycle distinct from the repository's, and the `.swarm/` dir accumulates
+   every agent that ever ran there. Long-lived standing agents make it pressing:
+   the current swarm has eleven agents and no defined terminal condition.
 
 3. **Should checkpoint staleness be observable?** `seq` and `updated_ts` are
    written and never read (G7). Either they are load-bearing — and something
@@ -216,18 +243,26 @@ writing the PRDs. Each belongs to the operator.
 
 4. **Who owns semver classification?** PR #10 classified itself MAJOR; the tag
    said otherwise (G1). PR #14 explicitly flagged its own classification as
-   arguable and deferred to the operator. Classification currently lives in the
-   PR author's judgment and the tag lives with the release manager, and nothing
-   reconciles the two. `RELEASING.md` defines the rules but assigns them to
-   nobody.
+   arguable and deferred to the operator. PR #16 is a `feat!:` that removes two
+   shipped verbs and changes the state layout, merged untagged with no migration
+   note. Classification lives in the PR author's judgment, the tag lives with the
+   release manager, and nothing reconciles the two. `RELEASING.md` defines the
+   rules and assigns them to nobody.
 
-5. **Is "every agent is standing" affordable?** PR #12 gave every agent — including
+5. **Should an agent get its own working tree?** G13 is a design gap, not a bug:
+   `--cwd` exists and defaults to sharing. Making code-writing agents spawn into a
+   `git worktree` would give each independent branch and index state for the cost
+   of one flag. The counter-argument is that agents collaborating on one change
+   *want* a shared tree — which is true, and is exactly why the choice should be
+   explicit rather than defaulted.
+
+6. **Is "every agent is standing" affordable?** PR #12 gave every agent — including
    one-shot leaves — the full continuity briefing: roughly 40 lines of reconcile
    ritual prepended to every task. The stated rationale is that you cannot predict
    which agents turn out long-lived. That is sound, but the cost is paid per spawn
    in tokens and in first-turn latency, and nobody has measured it.
 
-6. **Does the reconciliation loop actually change behavior, or does it produce
+7. **Does the reconciliation loop actually change behavior, or does it produce
    compliant-sounding checkpoints?** PR #13's verification showed one agent
    honestly concluding OFF-TRACK, which is real evidence. But the loop is
    unenforced by construction, its only output is a self-written status field, and

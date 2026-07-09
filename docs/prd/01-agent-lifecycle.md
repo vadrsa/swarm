@@ -28,20 +28,18 @@ directly.
 
 ### Scope
 
-Three nested scopes, and confusing them is the source of a real bug class:
+Two scopes, since PR #16 collapsed what used to be three:
 
-- **Project** — the `.swarm/` directory, one per repo. Located at `$PWD/.swarm`
-  unless `SWARM_DIR` overrides it.
-- **Swarm** — one coordinator run, keyed by a **swarm-id**. `swarm start` mints
-  one; every other verb (except `swarm swarms` and `swarm world`) requires
-  `SWARM_ID` in the environment.
-- **Agent** — one Claude session within a swarm, keyed by its slug id (see
+- **Swarm = project.** One swarm per project, rooted at its `.swarm/` directory
+  (`$PWD/.swarm`, override with `SWARM_DIR`). There is no swarm-id and nothing to
+  mint.
+- **Agent** — one Claude session within the swarm, keyed by its slug id (see
   [PRD 05](05-agent-naming.md)).
 
-On disk:
+On disk, flat:
 
 ```
-.swarm/swarms/<swarm-id>/
+.swarm/
   agents/<id>.json     registry row — id, label, pane, model, cwd, task, parent, role?
   updates/<id>-<ts>-<state>.json   append-only hook events
   settings/<id>.{json,task,launch.sh,status}
@@ -50,10 +48,18 @@ On disk:
   names                append-only ledger of every id ever minted
 ```
 
-`swarm start` creates all five directories plus an empty `names` file, and prints
-the swarm-id. The default id is derived from the coordinator's herdr pane id plus
-a counter (`HERDR_PANE_ID` with `:` → `-`, then `-1`, `-2`, …), so it is readable
-and unique per project without any clock or random source.
+**Every verb auto-creates this layout on first use** — `init_swarm_paths` is
+idempotent and called by all of them. `swarm start` therefore is never required;
+it exists as an explicit init that prints the swarm root, and running it twice is
+a no-op. A coordinator can simply begin spawning.
+
+`SWARM_ID` is a **retired** concept. It is deliberately *ignored with a note on
+stderr*, never an error: an agent spawned before the cutover carries `SWARM_ID`
+baked into its pane environment, which cannot be changed for a running process, so
+erroring would break every live agent's verbs the instant the CLI advanced. Machine-read
+stdout (`start`, `whoami`, `spawn`) stays clean and the exit code is untouched. The
+cost is that such an agent prints that note on **every verb call for the rest of its
+life** — and, more seriously, resolves its state to the wrong root (gap **G12**).
 
 ### Spawn
 
@@ -80,10 +86,11 @@ The sequence, in the order it actually happens:
    that you may spawn children, that `swarm world` describes the world, and the
    full reconcile-then-checkpoint ritual (see [PRD 04](04-reconciliation-loop.md)).
    The agent's own task follows under a `--- YOUR TASK ---` delimiter.
-5. **Create a herdr tab** with `SWARM_DIR` (project root), `SWARM_ID`,
-   `SWARM_AGENT_ID`, and `SWARM_AGENT_LABEL` baked into the pane environment.
-   These are inherited by every shell in the pane and cannot be lost, which is
-   why `swarm whoami` needs no state file.
+5. **Create a herdr tab** with `SWARM_DIR` (the swarm root), `SWARM_AGENT_ID`, and
+   `SWARM_AGENT_LABEL` baked into the pane environment. These are inherited by
+   every shell in the pane and cannot be lost, which is why `swarm whoami` needs
+   no state file. The tab inherits `--cwd`, which **defaults to the coordinator's
+   own `$PWD`** — see gap **G13**.
 6. **Register the agent immediately** — before waiting for it to come up. This is
    deliberate: "this agent exists" is the registry plus the hook, never a
    screen-detection poll. A slow-starting but healthy agent is never lost from the
@@ -214,25 +221,31 @@ user-facing copy.
 
 **A `done` immediately followed by an idle notification is normal** and is why
 `lastRecordedState()` exists. But `lastRecordedState()` scans the entire
-`updates/` directory on every notification, which grows without bound for the
-life of the swarm. Not a correctness issue; an O(n) read per event.
+`updates/` directory on every notification, which grows without bound. PR #16
+made this sharper rather than milder: with one flat `.swarm/` per project,
+`updates/` now accumulates every event from every agent that has *ever* run in
+that repo, across all time, with no rotation. Not a correctness issue; an O(n)
+read per event where n only ever grows.
 
-**`swarm start` derives its id from `HERDR_PANE_ID`, falling back to `s`.** Two
-swarms started outside herdr in the same project therefore contend on `s-1`,
-`s-2`, … which is handled (the loop finds a free one) but means swarm-ids are not
-meaningful outside herdr.
+**Nothing distinguishes a finished swarm from an abandoned one.** Previously a
+swarm was a run with an id, so at least the runs were separable on disk. Now the
+project *is* the swarm and its `.swarm/` is permanent, so the registry, the name
+ledger, the checkpoints, and the update log all persist indefinitely. `swarm reap`
+prunes rows for dead panes; nothing prunes anything else.
 
-**Bare `swarm close` closes every agent in the swarm** including the caller's own
-siblings and parent's other children, if invoked by a subagent. Nothing restricts
-`close` to the caller's subtree, though WORLD.md's "acting is local" rule says it
-should be. The CLI enforces no such scoping.
+**Bare `swarm close` closes every agent in the project** — the caller's siblings,
+its parent, and its parent's other children, if invoked by a subagent. Nothing
+restricts `close` to the caller's subtree, though WORLD.md's "acting is local"
+rule says it should be. The CLI enforces no such scoping, and now that a project
+holds exactly one swarm there is no id argument that could accidentally narrow it.
 
 ## Open product questions
 
 1. **What is a swarm's terminal state?** `close` keeps state; `reap` prunes rows.
-   Neither says "this swarm achieved its goal." `swarm swarms` cannot distinguish
-   a finished run from an abandoned one, and with standing agents that never
-   naturally end, "when is this over" has no answer in the product.
+   Neither says "this swarm achieved its goal." Since PR #16 a swarm has no
+   lifecycle distinct from its repository's, so a finished run and an abandoned one
+   are the same directory, and with standing agents that never naturally end,
+   "when is this over" has no answer in the product.
 
 2. **Should `close` be scoped to the caller's subtree?** WORLD.md tells agents
    they act only on their own layer, but the CLI lets any agent close any agent —
