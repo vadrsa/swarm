@@ -6,7 +6,7 @@ description: "Run other Claude sessions as a swarm of subagents to accomplish a 
 # Swarm
 
 The user wants you to run a swarm — spawn other Claude sessions as subagents and
-drive them toward a goal. You become one agent in a graph of agents; how you
+drive them toward a goal. You become one agent in a tree of agents; how you
 reach the goal is your call.
 
 ## Precondition
@@ -18,8 +18,10 @@ installed (`./install.sh` in the swarm repo).
 
 ## What's available
 
-Run **`swarm world`** — it prints the world you live in: the `swarm` verbs
-(world, start, spawn, send, updates, wait, list, status, whoami, parent, graph,
-children, close, reap), what the reported states mean, what is and isn't
-reliable, and how work is judged and finished in the graph. It tells you what
-exists, not what to do. (`swarm` with no args lists the verbs.)
+Run **`swarm world`** — it prints the whole contract: four verbs (`spawn` a
+named child, `send` a message that claims one of the recipient's turns, `ps`
+the one view of the tree, `close` an agent and its subtree), the journal that
+is each agent's continuity, and what is promised (delivered means delivered;
+the operator is a mailbox, not a node; nothing tracks obedience — judge
+artifacts, never claims). It tells you what exists, not what to do. (`swarm`
+with no args lists the verbs.)

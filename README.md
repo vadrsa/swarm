@@ -2,30 +2,28 @@
 
 Run other Claude Code sessions as a **swarm of subagents** to accomplish a goal.
 One agent can spawn others (each a live session in its own [herdr](https://herdr.dev)
-tab), delegate work, receive reliable updates, and see the whole graph — and any
-subagent can do the same, so the structure nests as deep as the work needs.
+pane), message them, and see the whole tree — and any subagent can do the same,
+so the structure nests as deep as the work needs.
 
-No daemon, no MCP, no git assumptions. Just a CLI, a hook, and a world doc the
-agents read. The tools give reliable **spawn / send / receive**; the strategy
-(how to decompose, delegate, judge, integrate) is the model's.
+The tool is one Python file with four verbs — `spawn`, `send`, `ps`, `close` —
+plus `swarm world`, which prints the whole contract. Everything it stores is a
+fact a file can witness; strategy (how to decompose, delegate, judge) is the
+model's. Read [WORLD.md](WORLD.md) for the contract itself and
+[docs/design/SIMPLEST.md](docs/design/SIMPLEST.md) for why it is shaped this way.
 
 ## What's in here
 
-- `bin/swarm` — the CLI (`world, start, spawn, send, updates, wait, list,
-  status, whoami, parent, graph, children, close, reap`).
-- `bin/swarm-hook.cjs` — the completion hook each subagent runs (turns its
-  Stop/Notification events into reliable update records — no screen-scraping).
-- `WORLD.md` — the world every agent reads: the verbs, what the states mean,
-  what's reliable, and how work is judged/approved in the graph. Facts, not a
-  procedure. Print it with `swarm world`.
-- `skill/SKILL.md` — the Claude Code skill that triggers on "start a swarm" and
-  points the agent at `swarm world`.
-- `install.sh` — wires it into your machine.
+- `bin/swarm` — the tool. One file; it is also its own Claude Code hook
+  (delivery, events, restore are wired automatically at spawn).
+- `WORLD.md` — the contract every agent reads. Print it with `swarm world`.
+- `skill/SKILL.md` — the Claude Code skill that triggers on "start a swarm".
+- `install.sh` — wires it into your machine. `docs/` — philosophy and the
+  dated design record.
 
 ## Requirements
 
 `herdr` (the container that holds subagent panes), `claude` (Claude Code CLI),
-`node`, `python3`, `bash` — all on PATH.
+`python3` — all on PATH.
 
 ## Install
 
@@ -33,82 +31,40 @@ agents read. The tools give reliable **spawn / send / receive**; the strategy
 curl -fsSL https://raw.githubusercontent.com/vadrsa/swarm/main/bootstrap.sh | sh
 ```
 
-This clones swarm into `~/.local/share/swarm` and runs its installer. Re-running
-the same command updates it. Override the location with `SWARM_HOME=... ` if you
-like. (Piping a script to `sh` runs code you haven't read — if you'd rather
-review it first, use the manual install below.)
+This clones swarm into `~/.local/share/swarm` and runs its installer; re-running
+the same command updates it. Override the location with `SWARM_HOME=...`.
+(Piping a script to `sh` runs code you haven't read — if you'd rather review it
+first, use the manual install below.)
 
-**Manual install** (also the right choice if you want to hack on swarm — clone
-it somewhere you'll work in):
+**Manual install** (also the right choice if you want to hack on swarm):
 
 ```sh
 git clone https://github.com/vadrsa/swarm.git ~/git/swarm
 ~/git/swarm/install.sh
 ```
 
-`install.sh` is idempotent and:
-
-- symlinks `swarm` into `~/.local/bin/` (put it on your PATH if it isn't:
-  `export PATH="$HOME/.local/bin:$PATH"` in your shell rc),
-- symlinks the skill into `~/.claude/skills/swarm/` (start a **new** Claude Code
-  session afterward so it loads),
-- checks that `herdr`, `claude`, `node`, and `python3` are on your PATH.
-
-After installing, verify with `swarm world` (prints the world doc) — if that
-works, you're set.
-
-**Update:** run `swarm update` — it moves you to the latest tagged release and
-re-runs the installer (`swarm update --check` just tells you if one's available).
-It only advances to versions that were deliberately tagged, never arbitrary
-commits, and refuses to run if you have uncommitted local changes.
+`install.sh` is idempotent: it symlinks `swarm` into `~/.local/bin/`, symlinks
+the skill into `~/.claude/skills/swarm/` (start a **new** Claude Code session
+afterward so it loads), and checks the prerequisites. Verify with `swarm world`.
 
 **Remove:** `./install.sh --uninstall` (removes the two symlinks; leaves your
 `.swarm/` state and PATH edits alone).
-
-Pre-releases: `swarm update --pre`. Crossing a breaking major version needs
-`swarm update --major` — see [RELEASING.md](RELEASING.md) for the versioning
-policy, how changes land, and any migration notes.
 
 ## Use
 
 Inside a **herdr** pane, in your project directory, start a fresh Claude session
 and ask it to run a swarm:
 
-> "start a swarm to build the CSV importer and its tests, max 3 agents"
+> "start a swarm to build the CSV importer and its tests"
 
-The `swarm` skill triggers, the agent reads `swarm world`, and drives it —
-spawning subagents, monitoring them, judging their artifacts, and following
-through. It surfaces only real blockers to you.
+The skill triggers, the agent reads `swarm world`, and drives it — spawning
+named subagents, judging their artifacts, and reporting to you. Messages to
+`operator` are your mailbox: `swarm ps` shows them waiting, with the live tree
+underneath.
 
-Under the hood the agent uses the verbs directly, e.g.:
-
-```sh
-id=$(swarm spawn "build the importer" --model opus --label importer)   # -> "importer"
-swarm wait "$id"          # blocks until it reports done/question/blocked
-swarm graph               # see the whole living tree
-swarm close "$id"         # approve & clean up (closes it + its subtree)
-```
-
-An agent's id **is** its label, slugified (`--label fix-send-race` → the agent
-`fix-send-race`); with no label it's derived from the task's first meaningful
-words. A name identifies one agent for the swarm's whole lifetime — a repeat gets
-`-2`, `-3`, … even if the original was closed and reaped.
-
-## State
-
-One swarm per project: runtime state lives directly in your project's `.swarm/`
-directory (`agents/`, `updates/`, `inbox/`, `state/`, `settings/`, `names`). It's
-a paper trail, safe to delete between runs. **Add `.swarm/` to your project's
-`.gitignore`** so it isn't committed.
-
-## How it stays reliable
-
-- **Completion is a fired hook event**, not a guess from the screen. `DONE`
-  means a turn ended; `QUESTION`/`BLOCKED` mean the agent yielded.
-- **The pane and the artifact are ground truth** — a `DONE` isn't proof of
-  correctness; work is judged by the deliverable, then approved.
-- **Each agent watches only its direct children**; failures route up one hop at
-  a time. Dead agents drop out of the graph; the living reparent upward.
+State lives in your project's `.swarm/` directory (queues, journals, one
+event fact per agent). It is a paper trail, safe to delete between runs — add
+`.swarm/` to that project's `.gitignore`.
 
 ## License
 

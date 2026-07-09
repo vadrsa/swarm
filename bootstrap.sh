@@ -31,7 +31,7 @@ if [ -d "$SWARM_HOME/.git" ]; then
   say "existing clone found — updating"
   # Refuse to clobber local edits (someone hacking on it).
   if ! git -C "$SWARM_HOME" diff --quiet || ! git -C "$SWARM_HOME" diff --cached --quiet; then
-    err "$SWARM_HOME has uncommitted changes — commit/stash them, or run 'swarm update' yourself"
+    err "$SWARM_HOME has uncommitted changes — commit/stash them, or pull and re-install yourself"
     exit 1
   fi
   git -C "$SWARM_HOME" fetch --quiet --tags origin
