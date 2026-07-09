@@ -120,9 +120,27 @@ Reachable only by a **single** message over the threshold — the `CAP` guard bo
 multi-message case at `8000 + one body`. And `cmd_send` has **no size guard at all**
 (`cos`), so nothing prevents it.
 
+**Scope: the agent inbox only. The operator's mailbox is safe — by accident.** Agents
+receive mail through the Node hook, which discards unflushed stdout on `process.exit()`.
+The operator receives mail through `cmd_updates`, which is **Python**, and Python flushes
+stdout on exit:
+
+```
+python3 -c 'import sys; sys.stdout.write("X"*200000); sys.exit(0)' | wc -c  → 200000
+node    -e 'process.stdout.write("X".repeat(200000)); process.exit(0)'   | wc -c  →  65536
+```
+
+So an escalation *to* the operator cannot be destroyed by G17. A steering instruction *from*
+the operator to an agent can be. **That safety is a property of the language, not of the
+design** — nothing records it, nothing tests it, and it would evaporate the moment the two
+read paths were unified. Which is exactly what [proposal 005](../proposals/005-inbox-read-ack.md)
+was asked to consider: unifying the operator's mailbox with the agent inbox under one code
+path would **extend this bug to the operator** unless the flush is fixed first. An argument
+against unification that neither product nor the proposal's author had.
+
 This directly contradicts the product's central promise, that *"the message is surfaced
 into the agent's context on its next turn — even if the agent was busy or the doorbell was
-missed."* Delivery is guaranteed for messages under 64 KB. Above it, guaranteed loss.
+missed."* Delivery is guaranteed for messages under ~64 KB. Above it, guaranteed loss.
 [02](02-inbox-messaging.md)
 
 **G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
