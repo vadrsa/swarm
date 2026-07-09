@@ -478,6 +478,65 @@ days. They were reaching for a field that lives in someone else's file.
 **So: no new state, no new verb, no boundary breach.** Use `delegated_to[].status` for
 parent→child approval. Keep `blocked` for the operator, where it is not a leak but the truth.
 
+### The third `done` — `cos`'s finding, corrected and strengthened
+
+`cos` reported a **contradiction** in `WORLD.md` and earned its negative properly: it ran
+`grep -c approve`, got 7, then *read all seven* rather than report the count. **Nothing gates a
+status write.** The seven are a notification regex, two lines of spawn prose, two comments, and
+help text. Verified.
+
+**But 128 and 198 do not contradict.** They sit under different headings — *"What the reported
+states mean"* (the hook's `DONE` **record**) and *"How work gets judged and finished"*
+(**approval**). Line 198 explicitly reconciles them: *"A child reporting DONE only means its turn
+ended."* Two different `DONE`s, and the document says so.
+
+**The real defect is what neither of us stated: there is a third `done`, and the contract never
+mentions it.**
+
+| # | `done` | defined where | governs |
+|---|---|---|---|
+| 1 | hook record `state=done` | `WORLD.md:128` | a turn ended |
+| 2 | *"done means approved"* | `WORLD.md:198` | the parent's verdict |
+| 3 | **`tasks[].status = "done"`** | **nowhere** | **decision 2's predicate** |
+
+`tasks[].status` appears exactly once in the whole product — as a bare enum in a schema line,
+`"in-progress\|done\|blocked\|at-risk"` — with **no definition** in `WORLD.md` or in
+`swarm checkpoint --help`. It is not contradicted. **It is unspecified.**
+
+That is why three agents disagreed about it: the contract never said. And it is the same shape as
+the `done`-plus-blocker finding — a field carrying meaning nobody wrote down.
+
+**Measured, org-wide: 103 tasks marked `done`. Every one self-written. Zero parent-approved.**
+`cos` has 37 and observes that by `WORLD.md:198` not one of them is done. It is right.
+
+### `cos`'s inversion trap, and why this answer avoids it
+
+> *"If you add APPROVED and decision 2 keeps filtering on `done`, a task an agent self-marks
+> `done` still vanishes from its injection while the approved ones do not — which inverts the
+> intent. The predicate and the schema have to move together."*
+
+**Correct for its encoding, and it does not apply to this one.** The trap requires `approved` to
+be a *value of `tasks[].status`*. It is not: approval lives in the **parent's**
+`delegated_to[].status`, so the child's enum is untouched and the predicate keeps its meaning —
+*drop what the child claims it finished, from the child's own working set.* That is exactly what
+decision 2 is for.
+
+**But `cos`'s underlying worry survives, and it is the sharpest thing said about decision 2.**
+The predicate filters a **self-claim**. A child that wrongly marks a task `done` erases it from
+its own continuity injection, and nothing re-checks it. There is no gate on the write and no
+audit after it. That risk is not created by decision 2 — it exists today, invisibly, because the
+injection carries the task anyway — but decision 2 **converts a visible redundancy into a silent
+deletion.**
+
+Which settles what `done` must mean, and it is the only meaning a child can honestly write:
+
+> **`tasks[].status = "done"` means "I claim I finished this."** Nothing more. The parent's
+> verdict is `delegated_to[].status`, in the parent's file. The word `done` in `WORLD.md:198` is
+> about *work*, not about *this field* — and the contract should say so, in one line, because its
+> silence is what produced three disagreeing agents and 103 unaudited claims.
+
+That one line is the rider decision 2 must carry.
+
 ### And the operator's second insight is the deeper one
 
 > *"Ask **why** it was least able to falsify them. It is structural: it was encoding a fact
