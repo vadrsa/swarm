@@ -38,6 +38,10 @@ relevant PRD.
 | [05](05-agent-naming.md) | Agent naming — label-derived slug ids | Agents + operator |
 | [06](06-release-and-update.md) | Release & update system | Operator |
 | [07](07-herdr-world-integration.md) | herdr + world integration model | Operator + agents |
+| [08](08-product-proposals.md) | Product proposals — how product reaches the operator | Operator + product |
+
+The principles these capabilities were built on are recorded, with their evidence, in
+[PHILOSOPHY.md](../PHILOSOPHY.md). Live proposals are in [docs/proposals/](../proposals/).
 
 ## Gap register
 
@@ -87,6 +91,20 @@ other three were fixed or sequenced away, and this one silently reset.
 independent branch and index state, at the cost of one `--cwd` at spawn.
 Discussed in [07](07-herdr-world-integration.md).
 
+> **The operator has decided this, twice, and the decision is "no."** Asked directly —
+> *"working-tree isolation — your earlier no-op call ('not swarm's job') just cost
+> flat-layout its uncommitted work. Revisit?"* — he answered **"Keep the original no-op
+> entirely."** It is a considered scope call (isolation is the coordinator's job at
+> spawn, not the tool's), made with the data loss already on the table, not an
+> oversight.
+>
+> This entry therefore stays in the register as a **standing hazard, not an open
+> request.** Product does not re-raise it. What the register records is the evidence:
+> the default reintroduces it at every swarm's birth, and agents that write code should
+> be spawned with an explicit `--cwd`. Re-escalating a settled call is the anti-pattern
+> the delegation audit names, and [PHILOSOPHY.md](../PHILOSOPHY.md) records the decision
+> under *"What this philosophy is not."*
+
 **G1. A breaking change can still ship as a minor release, and the major guard
 still cannot fire.** *Partially addressed — the record was corrected, the
 mechanism was not.*
@@ -107,6 +125,16 @@ changes have now shipped as minors, both by operator decision to keep the 1.0
 milestone unspent. **A guard that a release process routinely routes around is
 not a guard**, and honest documentation of that fact is not a substitute for
 one. Discussed in [06](06-release-and-update.md).
+
+The minor tag is **not drift.** Asked point-blank whether to spend the milestone —
+*"release-mgr recommends v1.0.0 (genuine MAJOR, proper migration note). You previously
+preserved the 1.0 milestone deliberately — spend it now?"* — the operator answered
+**"Go with 0.9.0."** Preserving `1.0.0` as a stability *signal* rather than a version
+*counter* is a coherent position ([PHILOSOPHY.md](../PHILOSOPHY.md) §7). What is not
+coherent is holding that position while shipping a guard whose triggering condition
+the policy guarantees will never occur. **The gap is between the policy and the
+mechanism, and only one of them can survive.** That choice is the operator's, not
+`cos`'s — the guard cannot be fixed into relevance while the policy stands.
 
 ### Significant — behavior diverges from the documented model
 
