@@ -74,6 +74,39 @@ function dbg(op, err) {
   } catch { /* a failing logger must never break the turn */ }
 }
 
+// emitAndExit — write the hook's stdout payload, WAIT for it to actually leave,
+// then run `after` (if any) and exit 0.
+//
+// Claude Code runs hooks with stdout on a pipe, whose buffer is ~64 KiB. A
+// larger `process.stdout.write()` returns false and queues the remainder: it
+// neither blocks nor throws. `process.exit()` then discards that queue, so the
+// harness receives JSON cut mid-string, fails to parse it, and injects nothing
+// — while the hook exits 0 and any side effect (marking a message read) has
+// already happened.
+//
+// So `after` runs ONLY on a delivered write. If stdout errored (EPIPE: the
+// reader went away) the bytes never landed, and a side effect that assumes the
+// agent saw them must not happen: the message stays unread and is re-injected
+// next turn, which is the safe direction to fail.
+//
+// Like dbg(), this must never throw: a hook that dies inside its own emitter
+// would break every agent in the swarm at once. On any failure we still exit 0.
+function emitAndExit(hookSpecificOutput, after) {
+  const done = (delivered) => {
+    try { if (delivered && after) after(); } catch (e) { dbg('post-emit', e); }
+    process.exit(0);
+  };
+  try {
+    const payload = JSON.stringify({ hookSpecificOutput });
+    // The callback fires once the data is handed to the OS, even when the write
+    // could not complete synchronously. Never process.exit() before it does.
+    process.stdout.write(payload, (err) => {
+      if (err) dbg('emit stdout', err);
+      done(!err);
+    });
+  } catch (e) { dbg('emit', e); done(false); }
+}
+
 // SWARM_DIR IS the swarm dir — one swarm per project, flat layout beneath it.
 const swarmDir = process.env.SWARM_DIR || '';
 const id = process.env.SWARM_AGENT_ID || 'unknown';
@@ -136,9 +169,11 @@ if (event === 'restore-state') {
       `(3) check each child (swarm children + their state files) and your own progress against that evidence; ` +
       `(4) verdict + the ONE biggest risk, then ACT on it (steer/close/spawn a child, or escalate up with GOAL/GAP/EVIDENCE/OPTIONS/ASK). ` +
       `Then update your checkpoint to reflect the reconciled status.`;
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx },
-    }));
+    // A fat checkpoint (long progress fields, many tasks) can exceed the ~64 KiB
+    // pipe buffer, and a truncated injection is silently dropped by the harness —
+    // the continuity mechanism would eat its own restore. Wait for the drain.
+    emitAndExit({ hookEventName: 'SessionStart', additionalContext: ctx });
+    return;
   } catch (e) { dbg('restore-state injection', e); /* never break session start */ }
   process.exit(0);
 }
@@ -217,19 +252,23 @@ if (event === 'inbox-check') {
     }
     context += `\n\nThese were delivered to your durable inbox; act on them as part of this turn.`;
 
-    // Emit the injection FIRST, then mark read. If we crashed between the two,
-    // the messages would be re-injected next turn (safe) — losing one is not.
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context },
-    }));
-
-    // Mark surfaced messages read by moving them into read/ (atomic rename).
-    const readDir = path.join(inboxDir, 'read');
-    try { fs.mkdirSync(readDir, { recursive: true }); } catch (e) { dbg('mkdir inbox/read', e); }
-    for (let i = 0; i < injectedCount; i++) {
-      const fn = unread[i].fn;
-      try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch (e) { dbg('mark inbox message read', e); }
-    }
+    // Emit the injection FIRST, then mark read — and only mark read once the
+    // bytes have actually left. stdout is a PIPE (~64 KiB buffer); a write
+    // larger than that does not complete synchronously, and `process.exit()`
+    // discards whatever is still queued. That is not a crash, so the
+    // emit-then-ack ordering alone never protected us: the harness would get
+    // JSON truncated mid-string, inject nothing, and the message would already
+    // be in read/. Waiting for the drain callback makes the ack conditional on
+    // delivery, which is what this ordering always meant.
+    emitAndExit({ hookEventName: 'UserPromptSubmit', additionalContext: context }, () => {
+      const readDir = path.join(inboxDir, 'read');
+      try { fs.mkdirSync(readDir, { recursive: true }); } catch (e) { dbg('mkdir inbox/read', e); }
+      for (let i = 0; i < injectedCount; i++) {
+        const fn = unread[i].fn;
+        try { fs.renameSync(path.join(inboxDir, fn), path.join(readDir, fn)); } catch (e) { dbg('mark inbox message read', e); }
+      }
+    });
+    return;
   } catch (e) { dbg('inbox delivery', e); /* never break the turn */ }
   process.exit(0);
 }
