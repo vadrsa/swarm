@@ -484,20 +484,43 @@ PY
   # always has a file to inject and the agent starts from a well-formed envelope.
   ROLE="${role:-}" LABEL="$label" MODEL="$model" TASK="$task" AID="$id" \
     python3 - "$STATE_DIR/$id.json" <<'PY'
-import json,sys,os,time
+import json,sys,os,time,re
 f=sys.argv[1]
 role=os.environ.get("ROLE","").strip()
 task=os.environ.get("TASK","").strip()
 label=os.environ.get("LABEL","").strip()   # == the agent's slug id
+
+def clip(s,limit):
+    """Shorten to <=limit chars WITHOUT cutting mid-word.
+
+    A string that already fits is returned byte-for-byte: no ellipsis, no
+    reformatting. Otherwise cut at the last whitespace inside the budget and
+    mark the elision, so the hook never re-injects a mangled half-word.
+    """
+    if len(s)<=limit: return s             # already fits: reproduce it EXACTLY
+    s=" ".join(s.split())
+    if len(s)<=limit: return s
+    head=s[:limit-1]                       # leave room for the ellipsis
+    cut=head.rsplit(None,1)[0] if " " in head else head
+    return cut.rstrip(" ,;:.-")+"…"
+
+def gist(s,limit):
+    """A clean one-liner for s: prefer its first sentence, else a word-safe clip."""
+    if len(s)<=limit: return s              # already fits: reproduce it EXACTLY
+    first=re.split(r'(?<=[.!?])\s+',s,maxsplit=1)[0] if s else ""
+    first=" ".join(first.split())
+    if first and len(first)<=limit: return first
+    return clip(s,limit)
+
 # mission: explicit role wins; else derive a sensible one-liner from the slug + task.
 if role: mission=role
-elif label: mission=f"{label}: {task[:100]}"
-else: mission=task[:120] or "mission to be refined from my task"
+elif label: mission=clip(f"{label}: {gist(task,100)}",120)
+else: mission=gist(task,120) or "mission to be refined from my task"
 json.dump({
   "agent":os.environ["AID"],"role":role,
   "model":os.environ.get("MODEL",""),"updated_ts":int(time.time()*1000),"seq":0,
   "mission":mission,
-  "tasks":[{"id":"t1","title":task[:120],
+  "tasks":[{"id":"t1","title":gist(task,120),
             "status":"in-progress","progress":"just spawned","delegated_to":[],"blockers":[]}],
   "status":"on-track","progress_summary":"seeded at spawn; not yet reconciled",
   "open_threads":[],"context":{},"work_cache":{}
@@ -1250,6 +1273,33 @@ for a in mine:
     if a["last_summary"]: print(f"       last: {a['last_summary'][:80]}")
 PY
 }
+
+# Per-verb `--help`: one usage line per verb, printed to stdout with exit 0.
+# `checkpoint --help` is NOT routed here — that verb owns --help as its schema
+# printer. An unknown flag still dies (exit 1) via each verb's own parser.
+verb_usage() {
+  case "$1" in
+    world)   echo "swarm world";;
+    update)  echo "swarm update [--check] [--pre] [--major]";;
+    start)   echo "swarm start";;
+    spawn)   echo 'swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]';;
+    send)    echo 'swarm send <agent-id|operator> "<message>"';;
+    updates) echo "swarm updates [--id <agent-id>] [--json]";;
+    wait)    echo "swarm wait <agent-id> [--timeout SEC]";;
+    list)    echo "swarm list [--json] [--live-only]";;
+    status)  echo "swarm status [--json]";;
+    whoami)  echo "swarm whoami";;
+    parent)  echo "swarm parent";;
+    graph)   echo "swarm graph [--json]";;
+    children) echo "swarm children [--json]";;
+    close)   echo "swarm close [<id>] [--self]";;
+    reap)    echo "swarm reap";;
+    *) return 1;;
+  esac
+}
+if [ "${2:-}" = "--help" ] && [ "${1:-}" != "checkpoint" ] && verb_usage "${1:-}" >/dev/null 2>&1; then
+  verb_usage "$1"; exit 0
+fi
 
 case "${1:-}" in
   world)   shift; cmd_world "$@";;
