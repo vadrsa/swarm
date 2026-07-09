@@ -19,10 +19,11 @@ within it:
   works wherever swarm is installed.
 - `swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]`
   → starts a Claude subagent in a new herdr tab, seeded with `<task>` as its first
-  prompt. Prints the subagent's id (e.g. `a1`). `--model` picks the model (e.g.
-  `opus`, `sonnet`); `--label` names it; `--cwd` sets its directory; `--role`
-  sets its mission line (optional — otherwise the mission is derived from the
-  task/label). **Every** agent is seeded with a goal-status checkpoint at
+  prompt. Prints the subagent's id — **which is its label, slugified**: `--label
+  fix-send-race` gives you the agent `fix-send-race` (see "Agent names" below).
+  `--model` picks the model (e.g. `opus`, `sonnet`); `--cwd` sets its directory;
+  `--role` sets its mission line (optional — otherwise the mission is derived
+  from the task/label). **Every** agent is seeded with a goal-status checkpoint at
   `state/<id>.json`, gets restoration hooks (its checkpoint is re-injected after
   a context compaction or restart), and carries a briefed duty to keep that
   checkpoint current — continuity is how every agent is built, not an opt-in.
@@ -63,7 +64,8 @@ target a specific swarm instead of the exported `SWARM_ID`; omit it to use
   living ancestor.
 - `swarm children` → the agents YOU directly spawned (one layer down), each with
   its status. Shows dead children too — a dead child is your signal to re-plan.
-- `swarm reap` → drop DEAD agents from the roster (your swarm only).
+- `swarm reap` → drop DEAD agents from the roster (your swarm only). It never
+  frees a NAME (see below).
 - `swarm close [<id>] [--self]` → close `<id>` AND its whole subtree (or just
   `<id>` with `--self`); keeps state on disk.
 - Read a subagent's actual screen: `herdr pane read <pane> --source recent`
@@ -71,6 +73,29 @@ target a specific swarm instead of the exported `SWARM_ID`; omit it to use
 
 Harness: **Claude only** for now (other harnesses/models per agent may come
 later).
+
+## Agent names
+
+**An agent's id IS its label, slugified.** There is no separate label concept and
+no anonymous `a1`-style id:
+
+    id=$(swarm spawn "fix the send race" --label fix-send-race)   # -> fix-send-race
+    swarm send fix-send-race "…"    # addressed by that name everywhere
+
+- **Slugify** = lowercase, alphanumerics and hyphens only, runs of hyphens
+  collapsed, ends trimmed, capped at 30 chars.
+- **No `--label`?** The slug is derived from the task's first *meaningful* words
+  (filler like "you/are/the/please" is skipped). `swarm spawn "build the CSV
+  importer"` → `build-csv-importer`. You never get an uninformative name.
+- **A name means ONE agent for the swarm's entire lifetime.** If the slug is
+  already taken — *including by an agent that has since died or been reaped* —
+  the new agent gets `-2`, `-3`, … Reap frees a pane, never a name. Every id ever
+  minted is recorded in the swarm's append-only `names` ledger.
+
+That id is what you address in `send`/`wait`/`close`/`graph`, and it is the
+filename for the agent everywhere under `.swarm/swarms/<swarm-id>/`:
+`agents/<id>.json`, `state/<id>.json`, `inbox/<id>/`, `settings/<id>.*`.
+So when you read history, a name never blurs two different agents together.
 
 ## What the reported states mean
 

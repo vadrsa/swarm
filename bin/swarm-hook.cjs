@@ -14,8 +14,10 @@
 //                     `swarm` CLI expects, so the child can run swarm verbs too.
 //   SWARM_ID        — the active swarm-id; combined with SWARM_DIR it locates
 //                     this swarm's updates/ dir.
-//   SWARM_AGENT_ID  — this subagent's stable id within the swarm (e.g. "a1")
-//   SWARM_AGENT_LABEL — human label (e.g. "claude:opus")
+//   SWARM_AGENT_ID  — this subagent's stable id within the swarm: its slugified
+//                     label, unique for the swarm's lifetime (e.g. "fix-send-race")
+//   SWARM_AGENT_LABEL — same string as the id (label and id are one concept),
+//                     kept as its own env var/record key for readers.
 //
 // Back-compat: older `swarm spawn` passed SWARM_DIR = the swarm's OWN dir and no
 // SWARM_ID. If SWARM_ID is absent we fall back to treating SWARM_DIR as the dir
@@ -45,7 +47,7 @@ const payload = readStdinJSON() || {};
 const swarmDir = process.env.SWARM_DIR || '';
 const swarmId = process.env.SWARM_ID || '';
 const id = process.env.SWARM_AGENT_ID || 'unknown';
-const label = process.env.SWARM_AGENT_LABEL || 'claude';
+const label = process.env.SWARM_AGENT_LABEL || id;
 
 if (!swarmDir) process.exit(0); // Not a swarm subagent — do nothing.
 
