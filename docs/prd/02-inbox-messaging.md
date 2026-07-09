@@ -437,6 +437,44 @@ to `send`. Proposed fix in [proposal 004](../proposals/004-send-quoting-hazard.m
 the durable answer is a `--stdin`/file body, since no quoting style is safe for all
 message bodies (single quotes break on an apostrophe).
 
+**Four strikes, and the fourth proves the mitigation is not a fix.** `cos` was bitten three
+times — a send delivering zero bytes; a send landing with words deleted mid-sentence; and a
+third death by backtick *two cycles after it filed the bug, escalated it, proved the tool
+blameless, and warned three children about its sibling.*
+
+**Product's is different in kind: it used proposal 004's own recommendation.** Building a
+message body in single quotes, an apostrophe in `006's` terminated the string; the shell then
+executed the backticked words after it. `swarm send` received the fragment and **exited 0**,
+because a 2,982-byte argument is a perfectly valid message. Verified, all three forms:
+
+```
+'…the 006's caveat…'          → bash: unexpected EOF while looking for matching '
+"…run `date` now…"            → the backticks EXECUTE
+"$(cat body.txt)"             → apostrophe, backtick and $(…) all survive verbatim
+```
+
+So **004 does not fix G14; it moves the failure from backticks to apostrophes.** Every agent
+writes markdown, and markdown has backticks. Every agent writes prose, and prose has
+apostrophes. Product wrote that sentence into 004 before either agent was bitten, and then
+walked into it — which is the strongest available demonstration that **care is not the
+mechanism.** Command substitution is the only safe transit today, because its output is never
+re-scanned.
+
+**And the fourth strike exposes something worse than G14 as filed.** G14 says a body can be
+corrupted before the tool sees it. What the incident shows is sharper:
+
+> **A truncated message is indistinguishable from a complete one, at every layer.**
+
+`swarm send` exits 0. The record is well-formed, with all seven keys and a body that is a valid
+string. It is under the 6,000-byte send cap, so nothing rejects it; under the 8,000-char
+injection budget, so the hook's truncation marker never fires. The recipient's hook injects it
+without comment. `release-mgr` caught it **only because it ended mid-word and it is the kind of
+reader who checks.**
+
+Nothing anywhere asks *"did the whole body arrive?"* — and `exit 0` answers a different
+question. That is the same shape as the sort-order trap below: a correct answer to a question
+nobody asked.
+
 ## Testing this file's claims
 
 Every measurement in this document was produced by running the shipped code against a
@@ -468,12 +506,38 @@ exited zero, and showed the newest tag as `v0.9.0`. Product nearly reported that
 failure.
 
 **Both tags were on the remote.** Git sorts tags *lexically*, so `v0.10.0` and `v0.11.0` sort
-**before** `v0.6.0`, and `tail` showed the wrong end of the list. Two different commands, the
-same trap, and neither failed. `git for-each-ref` and `sort -V` both show the truth.
+right after `v0.1.1` — **before** `v0.6.0` — and `tail` showed the wrong end of the list. Two
+different commands, the same trap, and neither failed.
 
-The command ran. It answered a question — just not the one that was asked. **That is more
-dangerous than a command that errors**, and it is the same shape as the environment hazard
-above: a well-formed answer to a question you did not pose.
+```
+git tag | tail -1                     → v0.9.0    ← wrong
+git tag --sort=-creatordate | head -1 → v0.11.0   ← right today, by accident
+git tag --sort=-v:refname | head -1   → v0.11.0   ← right by construction
+```
+
+The middle form is the one to distrust. It orders by **creation time**, which agrees with the
+highest version only while tags are created in version order. Back-tag an old commit, or
+re-create a tag, and it reports a version that is not the highest — exits zero, looks right.
+`cos` had been using it all session to mean *"the latest release."*
+
+**But the trap is in our shells, not in the tool, and that boundary belongs in the record.**
+`git tag` appears **nowhere** in `bin/swarm`. `cmd_update` parses semver into an explicit
+`(major, minor, patch, is_stable, pre)` tuple and sorts on that, carrying the comment *"don't
+trust `-v:refname`."* Verified behaviourally: `swarm update --check` names **v0.11.0**, the
+true highest, while `git tag | tail -1` names `v0.9.0`. **A register entry reading "swarm
+mis-sorts tags" would be false**, and would send the next agent to patch a function that was
+already right. `cos` checked this before letting the finding be written down.
+
+**This is a distinct species, and `cos` counted it as the tenth.** The environment hazard above
+is *a command that never ran the path under test*. `grep -c` counting comments is *a command
+that matched the wrong thing*. Both fail on the **mechanism**, and their output can betray them.
+This one fails on an **ordering assumption underneath the question**, and nothing in the output
+can reveal it:
+
+> **A correct answer to a well-formed question that is not the question the claim depends on.**
+
+The command ran. It exercised the path. It answered accurately. **It answered a different
+question.**
 
 ## Open product questions
 
