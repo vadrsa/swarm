@@ -6,8 +6,8 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #41 (`4ee90a6`). Newest tag: **`v0.9.0`** — `main` is well
-ahead of it, carrying five code changes (PRs #23, #24, #25, #31, #40). That tag is
+Baseline: `main` through PR #44 (`3ae3ad9`). Newest tag: **`v0.9.0`** — `main` is well
+ahead of it, carrying six code changes (PRs #23, #24, #25, #31, #40, #44). That tag is
 itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
@@ -45,14 +45,14 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues; eight more
-(G14–G21) were found later, in use. They are restated in context inside each PRD;
+The onboarding pass that produced these PRDs surfaced thirteen issues; nine more
+(G14–G22) were found later, in use. They are restated in context inside each PRD;
 this is the index. **Severity is product severity** — how badly the thing a user was
 promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `4ee90a6`:** of the original four critical gaps, three are closed — G2
+**Status as of `3ae3ad9`:** of the original four critical gaps, three are closed — G2
 by PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
 half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration note
 (#21), but the guard that was supposed to make the miss impossible still cannot fire
@@ -61,18 +61,20 @@ decided no-op, not an open request** (see its entry). Closed gaps are kept below
 [Resolved](#resolved), not deleted: a register that forgets what was broken cannot
 show that the same class of thing broke twice.
 
-**G17 — message loss above ~64 KB — was filed, fixed, and installed the same day**
-(PR #31). It was the only entry where a guarantee `WORLD.md` states in plain words was
-provably false. It is now under [Resolved](#resolved), with its verification.
+**Two gaps were filed, fixed, and installed the same day they were reported** — **G17**
+(message loss above ~64 KB, PR #31) and **G20** (unackable legacy mail, PR #44). G17 was the
+only entry where a guarantee `WORLD.md` states in plain words was provably false. Both are
+under [Resolved](#resolved), with their verification.
 
-Eight gaps were added *after* the onboarding pass, none of them visible by reading the
+Nine gaps were added *after* the onboarding pass, none of them visible by reading the
 code: **G14** (a message can be silently corrupted by the caller's shell), **G15**
 (`swarm updates` prints unbounded history), **G16** (reading the operator's mail
 destroys it), **G17** (the delivery hook destroyed any message over ~64 KB — resolved),
 **G18** (`restore-state`'s injection grows every cycle, uncapped), **G19** (the injection
 frames a directive exactly like a peer's opinion), **G20** (a message written before the `id`
-field existed can never be acknowledged), and **G21** (`SWARM_AGENT_ID` selects the code path
-under test — a test that never ran the path looks like a passing check).
+field existed could never be acknowledged — resolved), **G21** (`SWARM_AGENT_ID` selects the
+code path under test — a test that never ran the path looks like a passing check), and **G22**
+(a blocker is a claim about the present, and nothing ever re-checks it).
 
 **Four entries here are corrections against the people who wrote them**, and that is
 the point of keeping them:
@@ -100,9 +102,24 @@ the point of keeping them:
   sibling's continuity injection. The absence claim in its most seductive costume: a complete
   enumeration over a population that had not finished arriving.
 
-The method that produced every one of G14–G21, and caught every error in this list:
+The method that produced every one of G14–G22, and caught every error in this list:
 **run the code against a fixture; do not assert a guarantee from a document — including
 your own, and including one a trusted sibling hands you.**
+
+**And a rule this document had to learn about itself, from `release-mgr`: report the shape,
+not the digit.** Product measured `release-mgr`'s completed-task share at 63%. `release-mgr`
+measured 87%. Product re-measured, mid-exchange, and got **82%**. Three digits, all correct
+when taken, moving because the file was being edited between readings. Neither agent was
+wrong; the *number* was.
+
+Nothing in a live system holds still. *"Completed work dominates injected task lines, and
+grows monotonically"* is a **property** — it survives the next `git pull`. *"63%"* is a
+**measurement**, and it decays between the reading and the writing. `release-mgr` nearly
+shipped a live measurement into an immutable git tag; product shipped one into a proposal and
+then watched it re-open ([G18's fourth correction](#gap-register), above).
+
+Where a digit appears in these documents, read it as *evidence that a shape exists*, not as a
+fact about today.
 
 ### Critical — a stated guarantee does not hold
 
@@ -351,6 +368,40 @@ So the decision splits three ways, and only one part needs code:
   reachable by no agent action at all.
 [03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
 
+**G22. A blocker is a claim about the present, and nothing ever re-checks it.** Found by
+`release-mgr`, in its own file, while correcting product.
+
+`restore-state` re-injects every blocker **verbatim on every restart** (`swarm-hook.cjs:158`):
+
+```
+CURRENT TASKS:
+  - [blocked] Ask operator about X (BLOCKED: Operator must choose A or B)
+```
+
+Nothing revalidates it. Not the hook, not `checkpoint --help`, not the reconcile ritual. So a
+blocker written once is re-asserted forever, as present fact, **to the reader least able to
+falsify it** — a cold-context agent resuming after a compaction, which is precisely the reader
+the checkpoint exists to serve.
+
+`release-mgr` discovered this by checking its own two blockers instead of accepting product's
+claim that it was owed a decision. **Both were stale.** One was overtaken (a code change voided
+the option it asked about); the other had been answered (`git tag --contains fcafafb` → the
+release shipped). For hours its restore injection had been asserting two live operator decisions
+that did not exist.
+
+In its words: *"A stale blocker is not clutter. It is a false statement to the one reader least
+able to falsify it."*
+
+The rendering compounds it. Line 158 emits `[${status}] … (BLOCKED: …)` unconditionally, so
+before the schema was repaired a resumed agent literally read `- [done] … (BLOCKED: operator
+must choose)` — **a task both finished and blocked**, with no way to tell which claim to act on.
+The record was incoherent and so was its rendering.
+
+The remedy is a habit with no instrument, which is G7's shape again: **re-verify every blocker
+at each reconciliation**, exactly as `release-mgr` re-verifies `origin/main` immediately before
+tagging. It now does. Nothing enforces it.
+[03](03-checkpoints-continuity.md)
+
 **G21. `SWARM_AGENT_ID` selects the code path under test, and every agent has it set by
 construction.** Found by `cos`; verified here. `bin/swarm:505` injects
 `--env SWARM_AGENT_ID=<id>` into every spawned agent, and that same variable selects the
@@ -379,39 +430,6 @@ That is strictly more dangerous than a failing check. An empty result looks wron
 unchanged result looks right, exits zero, and prints well-formed output.** It is the false
 negative that passes review — and it is the exact counterpart of the absence claim: *a test
 that never ran the path is an absence claim wearing the costume of a positive one.*
-[02](02-inbox-messaging.md)
-
-**G20. A message written before PR #40 can never be acknowledged.** The `id` field is new.
-`cmd_send` now stamps `id: "<from>-<ts>"` on every message (`bin/swarm:688`), and both
-readers — the Node hook and `cmd_inbox` — display `rec.id`. A message written by the *older*
-`cmd_send` has no such field.
-
-Verified against the shipped binary, on **both** code paths (agent and operator, per G21):
-
-```
-$ swarm inbox read
---- from operator (15:03:40) [id ?] ---
-
-$ swarm inbox ack operator-1783595020254     # the filename-derived id
-swarm: no outstanding message with id 'operator-1783595020254'
-swarm: outstanding ids: ?
-
-$ swarm inbox ack '?'
-swarm: no outstanding message with id '?'
-```
-
-**Nothing acks it.** Not the filename-derived id, not the literal `?` the tool itself prints.
-The message is permanently outstanding, and the error message offers `?` as though it were a
-claimable id. This directly breaks the implementation's own stated rule — *"`read` prints ids.
-You cannot ack what you were never shown"* — because what you are shown is not an id.
-
-**Not currently biting, and that is `cos`'s doing.** Every one of the 13 outstanding messages
-org-wide carries an id; all 93 legacy messages were consumed by the old auto-ack before the
-cutover, so they sit harmlessly in `read/`. The hazard fires on hand-planted mail, on a
-mailbox restored from a backup, and on the old `.swarm/` directories that the v0.11.0 note
-says are harmless to leave on disk. The fix is one line: derive the id from the filename when
-the field is absent — the filename **is** the id, reordered (`<ts>-<from>.json` ↔
-`<from>-<ts>`). Not in `RELEASING.md`'s migration note.
 [02](02-inbox-messaging.md)
 
 **G19. The injection renders a directive and a peer's opinion identically, and calls the
@@ -459,8 +477,17 @@ The system recorded consumption on the strength of having *rendered* the message
 > **Shipped, and the incident is not covered.** PR #40 delivers explicit cumulative ack —
 > but the hook still renames an *injected* message into `read/` the moment the write drains
 > (`swarm-hook.cjs:318–324`). Explicit ack governs only what the cap **holds back**, which is
-> faithful to the operator's directive (*"governing what the injection cap holds back"*) and
-> is **not the case that motivated it**: in the incident, nothing was withheld.
+> faithful to the operator's directive: *"governing what the injection cap holds back."*
+>
+> Product first wrote that this was *"not the case that motivated it."* **`cos` sharpened that
+> against product, and it cuts the other way.** It *is* the motivating case — the operator's
+> own re-send called the incident *"evidence in the notify-vs-inject debate"*, and 005's ack
+> half was argued on it. What is true is narrower and worse: **the scope was drawn around the
+> symptom rather than the mechanism.** Item 3 governs what the cap holds back; the directive
+> `cos` dropped was never held back, so nothing in the shipped feature touches a message that
+> fits. Not a build error, not a spec error — a scope that missed the thing both agents had
+> already written down (*"shown is not understood"*, the third rung on G8) and neither noticed
+> item 3 could not reach.
 >
 > Replayed on the shipped hook — the same two messages, 6,965 chars under an 8,000 cap:
 > both injected, **both auto-acked, zero left outstanding.** One turn later
@@ -549,6 +576,30 @@ prompting the agent for input" — presented as fact, sourced from a string matc
 
 Kept, not deleted. Each entry states what was broken, what fixed it, and — where
 the fix left something behind — what it did not fix.
+
+**G20 — a message written before the `id` field existed could never be acknowledged. Closed
+by PR #44 (`3ae3ad9`), fixed and installed the day it was filed.** The id is now derived from
+the filename when the record lacks one — the filename *is* the id, reordered.
+
+Verified by product against the shipped binary, on both code paths (per G21), with a
+hyphenated sender to exercise the parse:
+
+| | before | after |
+|---|---|---|
+| `inbox read` | `[id ?]` | `[id release-mgr-1783595020254]` |
+| `inbox ack <derived-id>` | exit 1, *"outstanding ids: ?"* | exit 0, consumed |
+| re-ack the same id | exit 1, *"no outstanding message"* | *"already acknowledged (nothing to do)"* |
+| mixed legacy + modern sweep | — | all three consumed in arrival order, each named |
+
+**Product's report named two call sites. There were three.** `cos` found the third — the
+`already_acked` scan over `read/` — and it named it by *asking what the error path does*, then
+running it. Without that site, acking a legacy message once would work and re-acking it would
+report *"no outstanding message with that id"* instead of *"already acknowledged."* A correct
+fix at two sites would have produced a confusing error at the third, on exactly the path a
+confused agent takes.
+
+`partition("-")` splits on the first hyphen only, so `release-mgr` round-trips. Malformed
+filenames fall back to `?` rather than inventing an id.
 
 **G17 — a message over ~64 KB was silently destroyed on delivery. Closed by PR #31
 (`08f683b`), fixed and installed the same day it was filed.**

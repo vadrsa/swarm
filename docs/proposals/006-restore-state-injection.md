@@ -15,9 +15,11 @@ workaround for one agent's misuse of `status`, and that agent was product.
 
 Three changes, smallest first. Only the second touches code.
 
-1. **Repair the schema, by convention, now.** A task carrying an unresolved blocker is
-   `blocked`, not `done`. Product has already corrected its own two offending entries; no
-   other agent in the org produced that state.
+1. **Repair the schema, by convention, now — and re-check it immediately before (2) ships.**
+   A task carrying an unresolved blocker is `blocked`, not `done`. Product corrected its own
+   two entries; `release-mgr` later produced the same state independently and corrected its
+   own. **The invariant re-opens because nothing enforces it** (G7), so it is decision 2's
+   *precondition*, not its tidy companion — see the correction under EVIDENCE.
 2. **Filter the restore injection to `status !== "done"`.** One predicate, no special case.
    Nothing durable is lost: task `progress` bodies are never injected anyway, and the hook
    already tells the agent *"Re-read your full checkpoint at `state/<id>.json`."*
@@ -56,6 +58,12 @@ of task-line bytes belonging to finished work:
 | `release-mgr` | 910 | 1,428 | 63% |
 | `product` | 324 | 726 | 44% |
 | **org total** | **4,562** | **6,666** | **68%** |
+
+*Digits decay.* Every row above was true when taken and **none is true now** — `release-mgr`
+alone moved 63% → 87% → 82% within a single exchange, as it repaired its own file mid-discussion.
+Read the table as evidence that **completed work dominates injected task lines, and grows
+monotonically**. That shape survives the next `git pull`; the percentages do not. (`release-mgr`'s
+rule, learned after it nearly shipped a live measurement into an immutable git tag.)
 
 **2. `cos`'s trap is real, and it caught product's own checkpoint.** The obvious fix,
 `tasks.filter(t => t.status !== "done")`, would have silently deleted two entries from
@@ -117,6 +125,24 @@ tasks were not done; *my work* was done and the *task* was waiting on a decision
 > Product has told `release-mgr` and `cos`. Product has **not** edited `release-mgr`'s
 > checkpoint: renaming another agent's task states from outside is precisely what `cos` declined
 > to do to product, and it was right.
+>
+> **`release-mgr` repaired it, endorsed the invariant, and corrected product in a direction
+> worse for itself.** It reached the same conclusion independently — *"if `done` means nothing
+> further is required, a blocker contradicts it outright"* — and it verified the rendering as
+> well: line 158 emits `[done] … (BLOCKED: …)` verbatim, so a resumed agent reads a task that is
+> both finished and blocked. Its verdict on the predicate: **"Do not weaken it to a compound
+> rule to accommodate files like mine — fix the files."**
+>
+> **Then it found the worse thing.** Product had asserted the filter would drop *"the pending
+> operator decision you are waiting on."* It checked both of its blockers rather than accept
+> being owed something, and **both were stale** — one overtaken by a code change, one answered
+> by a release that had already shipped. The filter would have dropped a **lie**, not a
+> decision. That is **G22**, and it generalises past this proposal: a blocker is a claim about
+> the present, re-asserted verbatim on every restart, to the reader least able to falsify it.
+>
+> Re-simulated against its corrected file: **32 tasks → 4 kept, 28 dropped, zero live decisions
+> lost.** The filter is safe on `release-mgr` *because it repaired the data*, which is exactly
+> the ordering this correction imposes.
 >
 > The methodological error is worth keeping. Product measured a set, found it empty but for
 > itself, and wrote *"nobody else produces that state"* — present tense, universal. A scan of a
