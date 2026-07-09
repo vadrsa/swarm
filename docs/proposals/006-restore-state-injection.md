@@ -159,9 +159,22 @@ tasks were not done; *my work* was done and the *task* was waiting on a decision
 >                    an open operator decision on G14, gone from its continuity injection.
 > ```
 >
-> **Three agents. Three independent occurrences. No coordination.** `product` t5/t6 (repaired),
-> `release-mgr` t19 (repaired), `cos` t37 (live). Each arrived at the same encoding alone, and
-> each was the agent who had most recently argued the invariant to someone else.
+> **Three agents. Three independent occurrences. No coordination.** `product` t5/t6, `release-mgr`
+> t19, `cos` t37. Each arrived at the same encoding alone, and each was the agent who had most
+> recently argued the invariant to someone else.
+>
+> **Correction to this section's own example.** Product filed `cos` t37 as *"`done` carrying a
+> **live** operator decision."* `cos` then applied G22 to **all three** of its blockers rather
+> than the one product named, and **two were stale**: the operator had already ruled on
+> `swarm send --stdin` by shipping it (PR #50, `1af75f8`, verified installed — `--stdin` transits
+> an apostrophe, a backtick and `$(echo PWNED)` byte-identically). So t37 was `done` carrying a
+> **dead** blocker; the right repair was to clear the blocker, not to flip the status.
+>
+> Product reported one defect and `cos` found two. *"Had I fixed only the record you reported,
+> t14 would still be carrying the identical dead claim today. That is the difference between
+> accepting a correction and executing it."* The structural finding is unchanged — three agents
+> reached for a field that does not exist — but the example was misdescribed, and the misdescription
+> was product's.
 >
 > That settles the question product got wrong. *"Nobody else produces that state"* was not merely
 > a snapshot mistaken for a property — **the state is what the schema invites.** `done` reads as
@@ -382,6 +395,103 @@ The narrative was not deleted. It moved into a finished task's `progress` body, 
 durable and costs nothing. **The file grew while the injection fell by a third** — the shape
 `cos` named and neither PRD had stated. That is the whole discipline in one measurement, and
 it is available to every agent today, with no code and no decision from anyone.
+
+## Does the schema need an approval state? — the operator's question, answered
+
+**No. It already has one, on the correct side of the boundary, and nobody is using it.**
+
+The operator found a real hole and stated it exactly: `swarm world` says *"'Done' means
+approved, not 'a turn ended'"* and *"**you** are the approver of the work **you** delegated."*
+But the **child** writes `status: "done"` in its own checkpoint, and a child cannot approve
+its own work. **`done` in the schema is the child's claim; `done` in the world model is the
+parent's verdict.** One word, two meanings.
+
+And the consequence he traced is correct. Under decision 2's `status !== "done"`, a task
+finished-but-unruled sits in `blocked` and is **injected forever**. Measured, org-wide:
+
+```
+7 blocked tasks across 5 checkpoints — every one re-injected on every restart
+product alone holds 3 of them
+```
+
+**Decision 1 does not remove the leak. It renames it.** He is right, and I am the largest
+single beneficiary of the leak I failed to see.
+
+### But the fix is not a new state, and not a new verb
+
+The operator offered `submitted`/`awaiting-approval` and named its cost honestly: it implies
+`swarm approve <child> <task>`, and **nothing in the CLI writes another agent's checkpoint.**
+`cos` twice declined to rename product's task states from outside, and both times it was
+right. That boundary is load-bearing.
+
+**The schema already carries the parent's verdict, in the parent's own file:**
+
+```jsonc
+"tasks": [{
+  "id": "t1", "title": "…", "status": "in-progress|done|blocked|at-risk",
+  "delegated_to": [{"agent": "csv-importer", "expected_artifact": "PR", "status": "…"}],
+  "blockers": []
+}]
+```
+
+`delegated_to[].status` is:
+
+- **written by the parent**, in the parent's file — no verb touches a child's checkpoint;
+- **never injected** (verified against `restore-state`: the field is unreferenced, and the
+  field-cost table records it as free at any size);
+- **already in use** — `cos` populates it on three tasks today;
+- **exactly where the reconcile ritual looks**: *"read each child state file at
+  `state/<child>.json`"*, and judge the artifact.
+
+So the three states the operator drew already exist. They were simply split across two files,
+which is what the world model requires:
+
+| situation | child's `status` | parent's `delegated_to[].status` | injected to child? |
+|---|---|---|---|
+| child still working | `in-progress` | `in-flight` | **yes** — correct |
+| child finished, parent has not ruled | **`done`** | `awaiting-judgment` | **no** — correct |
+| parent approved | `done` | `approved` | no |
+| parent rejected | `in-progress` | `rework` | **yes** — correct, the child resumes |
+
+**`done` should mean "I claim completion."** That is the only thing a child can honestly
+assert about its own work, and it is what every agent already writes. Approval is not the
+child's to record, so it must not be a value of the child's `status` field — which is
+precisely why `done`-plus-a-blocker felt like the right encoding to three agents in three
+days. They were reaching for a field that lives in someone else's file.
+
+### What this costs, stated against itself
+
+- **The child loses the reminder.** A finished-but-unruled task disappears from its
+  injection. If the parent never rules, the child forgets it asked. **Mitigated:** the task
+  remains in `tasks[]`, the hook already says *"re-read your full checkpoint,"* and the child's
+  `open_threads` is the right place for *"waiting on X"* — a thread, unlike a task, is a claim
+  about the present that its author is expected to re-verify (**G22**).
+- **Nothing enforces it.** `delegated_to` is a convention with no instrument, exactly as G7
+  predicts and exactly as the `done`/blockers invariant has now failed three times. If decision
+  2 ships, the merge-time scan must cover both.
+- **It does not fix escalation to the *operator*.** The operator has no checkpoint and no
+  `delegated_to`. A task blocked on an operator ruling has no parent-side slot to record the
+  verdict in. **That is the honest residue of this answer**, and it is where `blocked` remains
+  correct: a top-layer agent waiting on the human genuinely is blocked, and its injection
+  genuinely should keep saying so — until the human rules, which is out-of-band by design.
+
+**So: no new state, no new verb, no boundary breach.** Use `delegated_to[].status` for
+parent→child approval. Keep `blocked` for the operator, where it is not a leak but the truth.
+
+### And the operator's second insight is the deeper one
+
+> *"Ask **why** it was least able to falsify them. It is structural: it was encoding a fact
+> about its **parent's** state in its **own** file."*
+
+That is the mechanism under G22, and neither `release-mgr` nor product connected it. A stale
+blocker is stale **because it is a claim about someone else, stored where that someone else
+cannot correct it.** `delegated_to` inverts the ownership: the parent's verdict is written by
+the parent, so it cannot go stale relative to the parent.
+
+It does not make staleness impossible — the operator's case has no parent to write it — but it
+converts *most* stale blockers from a discipline problem into a schema property. **That is a
+better outcome than the invariant this proposal was arguing for**, and it came from the
+question, not the proposal.
 
 **DECISION**
 
