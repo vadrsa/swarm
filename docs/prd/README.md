@@ -6,9 +6,9 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #21 (`bf8a012`), which is exactly the newest tag,
-**`v0.9.0`** — for the first time in this PRD set's life, `main` is not ahead of a
-release. That release is a breaking change tagged as a minor (see G1).
+Baseline: `main` through PR #26 (`04f5260`). Newest tag: **`v0.9.0`** — `main` is
+five commits ahead of it, carrying three code fixes (PRs #23, #24, #25). That tag is
+itself a breaking change released as a minor, by decision (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
 > swarm per project, rooted at `.swarm/`, no id to mint, every verb auto-creating
@@ -45,20 +45,33 @@ The principles these capabilities were built on are recorded, with their evidenc
 
 ## Gap register
 
-The onboarding pass that produced these PRDs surfaced thirteen issues. They are
-restated in context inside each PRD; this is the index. **Severity is product
-severity** — how badly the thing a user was promised fails to happen.
+The onboarding pass that produced these PRDs surfaced thirteen issues; two more
+(G14, G15) were found later, in use. They are restated in context inside each PRD;
+this is the index. **Severity is product severity** — how badly the thing a user was
+promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
-**Status as of `bf8a012`:** three of the four critical gaps are closed — G2 by
+**Status as of `04f5260`:** three of the four critical gaps are closed — G2 by
 PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
 half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration
 note (#21), but the guard that was supposed to make the miss impossible still
-cannot fire on a minor bump. **G13 is the one critical gap that remains fully
-open, and nothing about it has changed.** Closed gaps are kept below under
-[Resolved](#resolved), not deleted: a register that forgets what was broken
-cannot show that the same class of thing broke twice.
+cannot fire on a minor bump — and cannot, while the milestone is preserved by
+policy. **G13 is a decided no-op, not an open request** (see its entry). Closed
+gaps are kept below under [Resolved](#resolved), not deleted: a register that
+forgets what was broken cannot show that the same class of thing broke twice.
+
+Two gaps were added *after* the onboarding pass, both found in use rather than by
+reading: **G14** (a message can be silently corrupted by the caller's shell) and
+**G15** (`swarm updates` prints unbounded history). Neither was visible from the
+code alone.
+
+**And one entry is a correction against this register itself.** PR #24 fixed a case
+where `reap` *could* free a name — a guarantee `WORLD.md`, three code comments, and
+[PRD 05](05-agent-naming.md) all asserted held. It did not. Engineering found it;
+product had asserted it. That is recorded in PRD 05 rather than quietly patched,
+because a register that only catches other people's errors is not being honest about
+where errors come from.
 
 ### Critical — a stated guarantee does not hold
 
@@ -151,7 +164,8 @@ become unreferenced garbage: `state/<id>.json` will never be restored from,
 `inbox/<id>/` will never be drained. There is no `swarm archive`, no retention
 policy, and no verb that surfaces a dead agent's final checkpoint — which is
 exactly the artifact a parent is told to judge it by.
-[01](01-agent-lifecycle.md), [03](03-checkpoints-continuity.md)
+[01](01-agent-lifecycle.md), [03](03-checkpoints-continuity.md) ·
+the missing `swarm archive` is proposed in [proposal 003](../proposals/003-updates-retention.md)
 
 **G6. A dead agent's checkpoint is invisible in every verb.** `swarm graph`
 hides the dead by design. `swarm children` shows them (correctly — a dead child
@@ -182,6 +196,40 @@ sender has no way to observe whether the message was ever surfaced: the hook
 moves files to `read/` but nothing reports that upward, and read-receipts were
 explicitly deferred in PR #10.
 [02](02-inbox-messaging.md)
+
+**G14. A message can be silently corrupted before the tool ever sees it, and every
+example we ship teaches how.** `swarm send`'s body is documented with double quotes
+in all four places it appears (`WORLD.md` ×2, the usage string, the help text). In a
+double-quoted shell string backticks are evaluated — so an agent writing markdown,
+which is every agent, that sends `` the `wait` verb blocks `` transmits `the  verb
+blocks`. The word is deleted and `wait` is executed.
+
+Observed, not theorized: `cos` lost the two subjects of a sentence in a message to
+`product`, caught it, and resent. `cmd_send` itself is correct (the body reaches
+Python as an env var under a quoted heredoc); the corruption is strictly upstream, in
+the caller's shell, where nothing can detect or recover it. **`spawn` already solved
+this problem** — it writes the task to a file precisely because a quote-heavy prompt
+re-parsed through a shell breaks — and the reasoning was never carried across to
+`send`. Delivery is guaranteed; body integrity is not, and no document says so.
+[02](02-inbox-messaging.md) · [proposal 004](../proposals/004-send-quoting-hazard.md)
+
+**G15. `swarm updates` prints the entire history of the swarm, every time.**
+`cmd_updates` iterates the event directory, filters only by `--id`, and prints every
+record it finds. There is no limit, no default window, and no pagination. Since the
+one-swarm-per-project change the directory is **repo-lifetime**, so the output grows
+without bound for as long as the repository lives.
+
+Measured here: 27 records / 108 KB after one generation of five agents; a prior
+per-run directory holds 216 from a single run. Extrapolated, 200 generations is 21 MB
+on disk — irrelevant — but **~432 KB of text dumped into a terminal or an agent's
+context window** by the operator's only inbox verb.
+
+The framing matters, because this gap has been rediscovered three times as a *disk*
+problem and it is not one. Every structural reader is already bounded: `wait` wants an
+agent's newest record; `status`/`graph`/`children` want the newest per agent. Only
+`updates` wants history, and only `updates` degrades. The read *cost* was fixed in
+PR #25 (filename-only scan, ~46×); the unbounded *output* was not.
+[01](01-agent-lifecycle.md) · [proposal 003](../proposals/003-updates-retention.md)
 
 ### Minor — sharp edges and unstated limits
 
