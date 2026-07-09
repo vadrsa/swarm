@@ -115,6 +115,23 @@ be pasted into the `context` field. It reads the last `usage` block in the
 transcript and sums `cache_read_input_tokens + cache_creation_input_tokens +
 input_tokens`.
 
+**Which transcript is "its own" is resolved by identity, never by heuristic**
+(since PR #19 — see G3):
+
+1. `$CLAUDE_TRANSCRIPT_PATH`, if the caller explicitly set it (an escape hatch;
+   `swarm spawn` does not set it).
+2. `state/<my-id>.transcript` — a pointer that `swarm-hook.cjs` writes from the
+   `transcript_path` Claude places on **every** hook payload. The hook records it
+   before its verb dispatch, so the pointer exists from the agent's first hook
+   (`SessionStart`) and every later hook re-records it. It lives under `state/`
+   rather than in the `agents/` registry because `reap` deletes `agents/<id>.json`
+   but preserves `state/`, and a dedicated single-writer file needs no
+   read-modify-write race against `spawn`/`reap`.
+
+If neither resolves, `--context` prints `{}` — the same empty-object shape the
+no-usage case has always returned, so `"context": <this>` stays schema-valid — and
+explains why on stderr. It never guesses.
+
 A sharp drop between two checkpoints means a compaction happened.
 
 ## Contracts and guarantees
@@ -138,36 +155,44 @@ A sharp drop between two checkpoints means a compaction happened.
   agent that never updates its checkpoint is indistinguishable, mechanically, from
   one that reconciled and found nothing changed.
 - **That the checkpoint is accurate.** It is self-reported.
-- **That `context` is the *caller's* context.** See G3.
+- **That `context` is populated at all.** Since PR #19 it is either the caller's
+  own occupancy or `{}` — never a sibling's. But `{}` is a legal value: an agent
+  whose hook has not yet fired gets an honest unknown, not a number. See G3.
 
 ## Edge cases and known limitations
 
-**G3 — `swarm checkpoint --context` reads the wrong agent's transcript.** The
-reader prefers `$CLAUDE_TRANSCRIPT_PATH`. **`swarm spawn` never sets that
-variable** — the pane environment carries only `SWARM_DIR`, `SWARM_AGENT_ID`,
-`SWARM_AGENT_LABEL`. So the fallback path always executes:
+**G3 — `swarm checkpoint --context` read the wrong agent's transcript. Closed by
+PR #19 (`5e5f545`).** The reader preferred `$CLAUDE_TRANSCRIPT_PATH`, which
+`swarm spawn` never set, so it always fell through to a glob over
+`~/.claude/projects/*/*.jsonl` sorted by mtime — **every project on the machine** —
+and took the newest. Under a live swarm, where siblings write transcript lines
+continuously, an agent asking "how full is my context window?" was routinely
+answered with a sibling's number. The result was printed as bare JSON with no
+qualification; agents are briefed to put it in their checkpoint and parents to
+read the checkpoint as the judged artifact, so a wrong number propagated upward
+as fact. Because `tokens_used` is the input to "should I wrap up before my
+context runs out," a misreport could cause an agent to hand off early or to run
+out of window without warning. The number *looked* plausible in every case, which
+is the worst property a wrong number can have.
 
-```python
-cands = sorted(glob.glob("~/.claude/projects/*/*.jsonl"),
-               key=os.path.getmtime, reverse=True)
-tp = cands[0]
-```
+The fix resolves by identity (see **Context accounting** above): the hook persists
+`transcript_path` to `state/<id>.transcript`, and the glob is deleted outright.
+When the pointer is absent, `--context` prints `{}` and says why on stderr — an
+honest unknown, deliberately preferred to a plausible wrong value.
 
-That glob spans **every project on the machine**, and takes the most recently
-written transcript. Under a live swarm — where several agents are producing
-transcript lines continuously — an agent asking "how full is my context window?"
-is routinely answered with a sibling's number, or with an unrelated Claude Code
-session in another repo.
+**The generalizable lesson, worth keeping:** a *project-scoped* glob would not
+have fixed this either. Every agent in a project shares one
+`~/.claude/projects/<slug>/` directory, so **no path heuristic can distinguish two
+siblings** — only an identity handed down by the harness can. Anywhere else in
+this product that infers "which agent am I" from the filesystem rather than from
+`SWARM_AGENT_ID` has the same bug latent in it.
 
-The result is printed as bare JSON with no qualification, agents are briefed to
-put it in their checkpoint, and parents are told to read the checkpoint as the
-judged artifact. A wrong number therefore propagates upward as fact. Because
-`tokens_used` is the input to "should I wrap up before my context runs out," a
-misreport can cause an agent to hand off early or to run out of window without
-warning.
-
-The number *looks* plausible in every case, which is the worst property a wrong
-number can have.
+*Residual, minor:* the rewrite removed the `WINDOWS` model→window table (`opus`,
+`sonnet`, `haiku`) that was previously dead code, but left the comment that
+described it — `# window: caller passes --model via env if known; else omit pct`
+now sits above a `print` with no `pct` and no table anywhere in the file. The
+percentage the checkpoint schema implies is still never computed; only the dead
+table is gone, not the unbuilt feature.
 
 **G7 — the schema has no instrument.** No verb validates a written checkpoint. No
 code in the repository reads `updated_ts` or `seq` — the two fields whose entire
@@ -196,11 +221,14 @@ path and the slug. WORLD.md tells the parent to "reconcile what's already been
 achieved" against a dead child; the achievement record is the checkpoint, and the
 product does not surface it.
 
-**Context accounting hardcodes a model→window table** (`opus: 1_000_000`,
-`sonnet: 1_000_000`, `haiku: 200_000`) that is then **never used** — the function
-returns `{tokens_used, transcript}` and the comment says *"window: caller passes
---model via env if known; else omit pct."* No caller does. So the percentage the
-schema implies is never computed, and `WINDOWS` is dead code.
+**Context accounting still reports no percentage.** It returns
+`{tokens_used, transcript}`. The `WINDOWS` model→window table that used to sit
+unused beside it was removed by PR #19; its comment (*"window: caller passes
+--model via env if known; else omit pct"*) was not, and now describes nothing. An
+agent asked to judge "am I running out of window?" is handed an absolute token
+count and no denominator — it must know its own model's window size from
+elsewhere. The occupancy *percentage* the checkpoint schema gestures at has never
+been computed by any version of this code.
 
 **`.compaction-pending` is written and never read.** Nothing consumes the marker.
 It is a breadcrumb for a human, not a mechanism.

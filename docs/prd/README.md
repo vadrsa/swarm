@@ -6,8 +6,9 @@ are written *as built*: every guarantee stated here was read out of `bin/swarm`,
 code and the docs disagree, that disagreement is recorded as a gap rather than
 smoothed over.
 
-Baseline: `main` through PR #16 (`0e4d8b7`). Newest tag: `v0.8.0` — **`main` is
-ahead of every tag, and the gap contains a breaking change.**
+Baseline: `main` through PR #21 (`bf8a012`), which is exactly the newest tag,
+**`v0.9.0`** — for the first time in this PRD set's life, `main` is not ahead of a
+release. That release is a breaking change tagged as a minor (see G1).
 
 > **The swarm-id concept is gone.** PR #16 made the project *be* the swarm: one
 > swarm per project, rooted at `.swarm/`, no id to mint, every verb auto-creating
@@ -46,6 +47,15 @@ severity** — how badly the thing a user was promised fails to happen.
 
 Nothing here is fixed by these documents. Implementation belongs to `cos`.
 
+**Status as of `bf8a012`:** three of the four critical gaps are closed — G2 by
+PR #20, G3 by PR #19, and G12 by the operator sequencing the cutover. G1 is
+half-closed: the phantom note was corrected (#18) and v0.9.0 got a migration
+note (#21), but the guard that was supposed to make the miss impossible still
+cannot fire on a minor bump. **G13 is the one critical gap that remains fully
+open, and nothing about it has changed.** Closed gaps are kept below under
+[Resolved](#resolved), not deleted: a register that forgets what was broken
+cannot show that the same class of thing broke twice.
+
 ### Critical — a stated guarantee does not hold
 
 **G13. Every agent shares one working tree, and nothing says so.** `swarm spawn`
@@ -66,78 +76,37 @@ never warns that agents share a checkout** — while telling every agent it has 
 autonomy and that *"nothing is merged, committed, or closed for you."* Agents are
 handed unrestricted git and told nothing about who else is holding it.
 
+**Re-verified after the v0.9.0 cutover:** the swarm was closed and restarted fresh,
+and all five agents of the new generation again have `cwd=/Users/vadrsa/git/swarm`.
+Nothing about starting over changes this — `--cwd "$PWD"` is the default, so the
+hazard is reintroduced by every swarm at birth unless a coordinator opts out
+per-spawn. This is the sense in which G13 is the last *live* critical gap: the
+other three were fixed or sequenced away, and this one silently reset.
+
 `git worktree` already solves this: N working trees off one repository, each with
 independent branch and index state, at the cost of one `--cwd` at spawn.
 Discussed in [07](07-herdr-world-integration.md).
 
-**G12. The swarm-id removal is merged, but the cutover is unsequenced and will
-blind every live agent.** PR #16 landed the one-swarm-per-project model correctly:
-the contract docs (`WORLD.md`, `README.md`, `swarm --help`) were updated in the
-same commit, so nothing teaches a concept the CLI lacks. The *code* half of this
-gap is closed. What remains is the deployment half, and it is sharp.
+**G1. A breaking change can still ship as a minor release, and the major guard
+still cannot fire.** *Partially addressed — the record was corrected, the
+mechanism was not.*
 
-The installed CLI is a symlink into a git checkout ([06](06-release-and-update.md)).
-The moment that checkout advances past `0e4d8b7`, **every currently-running agent
-loses its swarm.** Live agents carry `SWARM_ID` baked into their pane environment,
-which cannot be changed for a running process, and their registry rows,
-checkpoints, and inboxes all live under `.swarm/swarms/<swarm-id>/`. The new CLI
-resolves to the flat `.swarm/` root.
+PR #10 replaced live-pane `swarm send` with durable inbox messaging, classified
+itself **MAJOR → v1.0.0**, and wrote a `### v1.0.0` migration note into
+`RELEASING.md`. It was then tagged **`v0.6.0`**. PR #18 corrected that phantom
+note to `### v0.6.0` and recorded that no v1.0.0 tag ever existed; PR #21 added
+the parallel `### v0.9.0` note for the one-swarm-per-project break. Both notes
+now say, in the note itself, that `swarm update` will *not* warn a user crossing
+them.
 
-Verified against the live swarm, running the new binary directly: `swarm list` →
-`(no agents)` where eleven exist; `swarm parent` → `no registry entry for
-'product'`. Checkpoints are orphaned at paths nothing reads. `swarm send` to any
-of them would fail with `unknown agent`.
-
-The code handles this as gracefully as it can — `SWARM_ID` is *ignored with a
-note* rather than made an error, precisely so a stale env var cannot hard-fail a
-running agent's verbs. But ignoring it silently redirects every path lookup, which
-is the same blindness arrived at more quietly. (A side effect: the note prints on
-**every verb invocation, forever**, for any agent spawned before the cutover.)
-
-There is **no migration**: nothing moves `.swarm/swarms/<id>/*` up to `.swarm/`,
-and no `RELEASING.md` note describes what a user must do. By that document's own
-definition this is twice over a MAJOR — *"a verb is removed or renamed"* (`swarm
-swarms`, `--id`, both shipped in tagged releases) and *"the `.swarm/` state schema
-changes such that an in-progress swarm won't work."* It is merged to `main`
-untagged, and **G1 below shows this project has already shipped exactly this class
-of change under a minor tag once.**
-
-The safe order is: finish or `swarm close` every live swarm → advance the checkout
-→ start fresh. Nothing in the tool enforces or even states that order.
-
-**G1. The breaking change shipped as a minor release; the major guard never
-fired.** PR #10 replaced live-pane `swarm send` with durable inbox messaging,
-classified itself **MAJOR → v1.0.0**, and wrote a `### v1.0.0` migration note
-into `RELEASING.md`. It was then tagged **`v0.6.0`**. So: `v1.0.0` does not
-exist and the migration note in the repo documents a release that was never cut;
-meanwhile a user on `v0.5.0` running `swarm update` is carried across a genuinely
-breaking change — an in-flight swarm's agents have no inbox hook and silently
-stop receiving messages — with **no `--major` prompt and no pointer to the
-migration note**, because the guard keys off the tag's major component and
-`0.5.0 → 0.6.0` does not cross one. The entire purpose of the guard was to make
-this impossible. Discussed in [06](06-release-and-update.md).
-
-**G2. Agents cannot escalate to the operator.** `WORLD.md` instructs *every*
-agent, on finding a gap beyond its authority, to `swarm send` a
-GOAL/GAP/EVIDENCE/OPTIONS/ASK escalation **to its parent**. For every agent
-directly under the operator — the entire top layer, where scope decisions
-actually live — the parent *is* the operator, and `swarm send operator` fails
-with `unknown agent: operator`: the operator has no registry entry, no pane, and
-no inbox. The escalation path that WORLD.md presents as universal is
-unimplemented at precisely the layer that most needs it. The instruction is
-issued to every agent regardless. Discussed in [02](02-inbox-messaging.md) and
-[04](04-reconciliation-loop.md).
-
-**G3. `swarm checkpoint --context` reads the wrong agent's transcript.** The
-reader prefers `$CLAUDE_TRANSCRIPT_PATH`, but `swarm spawn` never sets that
-variable on the agent's pane (it sets only `SWARM_DIR`, `SWARM_AGENT_ID`,
-`SWARM_AGENT_LABEL`). So the fallback always runs, and the
-fallback globs `~/.claude/projects/*/*.jsonl` — **every project on the machine** —
-and takes the most recently modified. An agent asking "how full is my context
-window?" is answered with whichever Claude session on the machine wrote last,
-which under a live swarm is routinely a sibling. The number is reported without
-qualification and agents are briefed to put it in their checkpoint, where a
-parent then reads it as fact. Discussed in [03](03-checkpoints-continuity.md).
+That is the fix for the *record*. The **defect is unchanged**: `swarm update`'s
+`--major` guard keys off the tag's major component, so `0.5.0 → 0.6.0` and
+`0.8.0 → 0.9.0` both carry a user straight across a breaking change with no
+prompt and no pointer to the note that was written for them. Two breaking
+changes have now shipped as minors, both by operator decision to keep the 1.0
+milestone unspent. **A guard that a release process routinely routes around is
+not a guard**, and honest documentation of that fact is not a substitute for
+one. Discussed in [06](06-release-and-update.md).
 
 ### Significant — behavior diverges from the documented model
 
@@ -215,6 +184,63 @@ reclassifies a real permission block as benign idleness, and `swarm wait` return
 it as a stop state. WORLD.md documents `BLOCKED` as "Claude Code itself is
 prompting the agent for input" — presented as fact, sourced from a string match.
 [01](01-agent-lifecycle.md)
+
+### Resolved
+
+Kept, not deleted. Each entry states what was broken, what fixed it, and — where
+the fix left something behind — what it did not fix.
+
+**G2 — agents cannot escalate to the operator. Closed by PR #20 (`1892806`).**
+The operator is now an addressable target: `swarm send operator "…"` writes a
+byte-for-byte ordinary inbox message to `.swarm/inbox/operator/`, skipping only
+the registry guard and the doorbell (it has no pane to ring). The human reads it
+by running `swarm updates`, which drains that inbox when the caller is the
+operator (`SWARM_AGENT_ID` unset) and marks messages read by moving them to
+`inbox/operator/read/`, mirroring the agent hook's semantics exactly. Unknown
+ids still fail hard: `swarm send bogus-id` → `unknown agent: bogus-id`
+(verified). WORLD.md was updated in the same commit, so the escalation chain it
+describes now terminates at a real mailbox.
+
+*What it did not fix:* the operator is a mailbox, not a node. It has no pane, no
+doorbell, and no notification — an escalation sits unread until the human
+happens to run `swarm updates`. G8 (delivery is guaranteed to the inbox, not to
+the recipient) therefore applies to the operator **most sharply of all**, since
+the operator is the only recipient with no hook to surface its mail. See
+[02](02-inbox-messaging.md).
+
+**G3 — `swarm checkpoint --context` reads the wrong agent's transcript. Closed
+by PR #19 (`5e5f545`).** `swarm-hook.cjs` now persists `transcript_path` — which
+Claude puts on every hook payload — to `state/<id>.transcript` before its verb
+dispatch, so the pointer exists from an agent's first hook and is re-recorded by
+every subsequent one. `--context` resolves by identity (`$CLAUDE_TRANSCRIPT_PATH`,
+else `state/$SWARM_AGENT_ID.transcript`) and the machine-wide glob is gone. When
+nothing is recorded it prints `{}` and explains why on stderr rather than
+reporting a sibling's number. Verified live: five sibling `.transcript` pointers
+exist and `--context` returns the calling agent's own session.
+
+The fix's real lesson is one the PRDs should keep: **a project-scoped glob would
+not have worked either.** Every agent in a project shares one
+`~/.claude/projects/<slug>/` directory, so no path heuristic can tell two
+siblings apart — only an identity the harness hands you can. See
+[03](03-checkpoints-continuity.md).
+
+**G12 — the swarm-id cutover was unsequenced. Closed by the operator, not by
+code.** The cutover has happened: the installed CLI resolves the flat `.swarm/`
+root, and the swarm running against it is healthy (`swarm list` shows its agents
+under the new layout). The safe order this register prescribed — finish or
+`swarm close` every live swarm, advance the checkout, start fresh — was followed
+by hand. Pre-cutover agents were closed; the current generation was started
+fresh, so no live agent carries a stale `SWARM_ID`. PR #21 wrote the `### v0.9.0`
+migration note that was missing.
+
+*What it did not fix:* **nothing in the tool enforced or stated that order, and
+nothing does now.** The cutover was survived by an operator who had been told
+what to do, in a register that will not be read by the next person to advance a
+checkout past a state-schema change. There is still no migration step, no
+`.swarm/` schema version, and no check that a running agent's layout matches the
+CLI's. The next such change will present exactly this hazard. This is the same
+root cause as G1 — the release system relies on people reading notes — and the
+two should be resolved together.
 
 ## Open product questions
 

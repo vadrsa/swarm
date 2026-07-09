@@ -54,12 +54,16 @@ it exists as an explicit init that prints the swarm root, and running it twice i
 a no-op. A coordinator can simply begin spawning.
 
 `SWARM_ID` is a **retired** concept. It is deliberately *ignored with a note on
-stderr*, never an error: an agent spawned before the cutover carries `SWARM_ID`
+stderr*, never an error: an agent spawned before the cutover carried `SWARM_ID`
 baked into its pane environment, which cannot be changed for a running process, so
-erroring would break every live agent's verbs the instant the CLI advanced. Machine-read
-stdout (`start`, `whoami`, `spawn`) stays clean and the exit code is untouched. The
-cost is that such an agent prints that note on **every verb call for the rest of its
-life** — and, more seriously, resolves its state to the wrong root (gap **G12**).
+erroring would have broken every live agent's verbs the instant the CLI advanced.
+Machine-read stdout (`start`, `whoami`, `spawn`) stays clean and the exit code is
+untouched. The cost was that such an agent printed that note on **every verb call
+for the rest of its life** and resolved its state to the wrong root — the hazard
+recorded as **G12**, which the operator closed by hand: pre-cutover agents were
+closed and the current generation was started fresh, so no live agent carries a
+stale `SWARM_ID` today. The tolerance code remains, correctly, for any that
+someone revives from an old pane.
 
 ### Spawn
 
