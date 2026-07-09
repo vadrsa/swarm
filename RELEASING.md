@@ -94,8 +94,8 @@ compatibility). Two things follow from this that trip people up:
 
 Newest first. One entry per breaking release. Ideally every breaking change ships
 in a MAJOR, so that `swarm update`'s `--major` guard stops users on the way in.
-That has not always held: v0.9.0 and v0.6.0 below are both breaking changes that
-shipped as MINORs, and the guard therefore never fired for either. Where a note's
+That has not always held: v0.11.0, v0.9.0 and v0.6.0 below are all breaking changes
+that shipped as MINORs, and the guard therefore never fired for any. Where a note's
 version is not `X.0.0`, it is recording exactly that kind of miss — read it before
 updating past it, because nothing in the tooling will make you.
 
@@ -105,6 +105,48 @@ updating past it, because nothing in the tooling will make you.
 **Migrate:** <exact steps a user must take, e.g. finish/close active swarms,
 delete old .swarm/ dirs, re-run install>.
 -->
+
+### v0.11.0 — `swarm updates` no longer drains; `swarm send` caps bodies at 6000 bytes
+
+> **This breaking change shipped as a MINOR, and `swarm update` will not warn
+> you about it.** The `--major` guard only fires when the version's major
+> component increments. It did not increment here — v0.10.0 → v0.11.0 is a minor
+> bump — so `swarm update` carries users straight across this break with no
+> prompt and no pointer to this note. If you are updating from v0.10.0 or
+> earlier, this note is your only warning; follow **Migrate** below by hand.
+>
+> (For the record: this was classified as breaking against the criteria above —
+> "a verb's flags/output change in a way a caller relies on" — and released as a
+> MINOR by operator decision, to keep the 1.0 milestone unspent. The same
+> override produced v0.9.0 and v0.6.0.)
+
+**Breaking:** two verbs changed their contract.
+
+1. **`swarm updates` no longer consumes the operator's inbox.** Under v0.10.0 and
+   earlier, reading drained: `swarm updates` — and `swarm updates --json` — marked
+   every message read, so each message was seen exactly once and a second poll
+   returned nothing. Reading is now non-destructive on every path. Mail
+   accumulates until it is explicitly acknowledged.
+2. **`swarm send` rejects a body over 6000 bytes**, exiting non-zero with
+   `message too big (N > 6000)`. The same send previously succeeded. The limit is
+   not arbitrary: the delivery hook injects at most 8000 chars per turn, so a
+   message that cannot fit one turn whole cannot be delivered whole.
+
+**Migrate:**
+
+- **If you script `swarm updates` (or `--json`) as a drain**, it will now re-show
+  the same messages forever. Read with `swarm inbox read [--json]`, then consume
+  with `swarm inbox ack <message-id>`. Ack is cumulative over arrival order — it
+  consumes the named id and everything that arrived before it — and it must name
+  an id that is currently outstanding. There is deliberately no `ack --all`.
+- **If you send large bodies**, write the content to a file and send the path
+  instead of the content. Nothing is queued on rejection; the failure is loud and
+  the exit status is non-zero, so a script that ignored the exit status will now
+  silently stop delivering.
+- Agents are unaffected on both counts: the hook still injects full message bodies
+  and still acks them implicitly the moment they are injected. Only the operator's
+  mailbox requires an explicit `ack`. That asymmetry is deliberate — the operator
+  has no hook and no turn boundary at which delivery could be made atomic.
 
 ### v0.9.0 — one swarm per project; agent ids are label-derived slugs
 
