@@ -84,11 +84,16 @@ Under the hood the agent uses the verbs directly, e.g.:
 
 ```sh
 SWARM_ID=$(swarm start); export SWARM_ID
-id=$(swarm spawn "build the importer" --model opus --label importer)
+id=$(swarm spawn "build the importer" --model opus --label importer)   # -> "importer"
 swarm wait "$id"          # blocks until it reports done/question/blocked
 swarm graph               # see the whole living tree
 swarm close "$id"         # approve & clean up (closes it + its subtree)
 ```
+
+An agent's id **is** its label, slugified (`--label fix-send-race` → the agent
+`fix-send-race`); with no label it's derived from the task's first meaningful
+words. A name identifies one agent for the swarm's whole lifetime — a repeat gets
+`-2`, `-3`, … even if the original was closed and reaped.
 
 ## State
 

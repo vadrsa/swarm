@@ -13,10 +13,13 @@
 #   SWARM   = one coordinator run, identified by a swarm-id. `swarm start` mints
 #             one and prints it; the coordinator exports SWARM_ID and every other
 #             verb operates within that swarm only.
-#   AGENT   = one subagent within a swarm (a1, a2, ...).
+#   AGENT   = one subagent within a swarm. Its id IS its slugified label
+#             (e.g. `fix-send-race`) — meaningful, addressable, and unique for
+#             the swarm's entire lifetime (reap never frees a name).
 #
 # State layout:
-#   .swarm/swarms/<swarm-id>/{agents,updates,settings}/
+#   .swarm/swarms/<swarm-id>/{agents,updates,settings,state,inbox}/
+#   .swarm/swarms/<swarm-id>/names   — append-only ledger of every minted id
 # Everything (list, reap, wait, id allocation) is scoped to the active swarm;
 # swarms never see or touch each other.
 
@@ -144,13 +147,91 @@ init_swarm_paths() {
   AGENTS_DIR="$SWARM_ROOT/agents"
   UPDATES_DIR="$SWARM_ROOT/updates"
   SETTINGS_DIR="$SWARM_ROOT/settings"
+  NAMES_FILE="$SWARM_ROOT/names"   # append-only ledger of every id ever minted
 }
 
-# --- agent id allocation within the active swarm: a1, a2, ... ---
-next_id() {
-  local n=1
-  while [ -e "$AGENTS_DIR/a$n.json" ]; do n=$((n+1)); done
-  echo "a$n"
+# --- agent ids are slugs -------------------------------------------------
+# An agent's id IS its label, slugified. `swarm spawn "..." --label fix-send-race`
+# yields the id `fix-send-race`, and that string is what you send/wait/close on
+# and what every filename under the swarm uses. With no --label the slug is
+# derived from the task's first MEANINGFUL words — never an uninformative
+# `a1`/`agent-1`/`claude`.
+#
+# Uniqueness is for the swarm's whole LIFETIME: a name means exactly one agent,
+# forever. `reap` deletes agents/<id>.json, so agents/ alone cannot answer "was
+# this name ever used?" — the append-only `names` ledger can, and it is never
+# pruned. mint_id() checks the ledger UNION the live registry, then appends.
+
+# slugify <text> — lowercase, non-alnum -> '-', collapse runs, strip ends,
+# trim to 30 chars (never ending on a hyphen). Prints "" if nothing survives.
+slugify() {
+  printf '%s' "${1:-}" | python3 -c '
+import sys,re,unicodedata
+# Fold accents first so "café" -> "cafe", not "caf".
+s=unicodedata.normalize("NFKD",sys.stdin.read().lower())
+s="".join(c for c in s if not unicodedata.combining(c))
+s=re.sub(r"[^a-z0-9]+","-",s)
+s=re.sub(r"-{2,}","-",s).strip("-")
+print(s[:30].rstrip("-"))'
+}
+
+# Filler words that carry no information about what an agent DOES. Skipped when
+# deriving a slug from a task so the id names the work, not the grammar.
+_SLUG_FILLER='you are the a an and or of to in on for with please your my this that it its is be do go make just now then so as at by from into we i us'
+
+# derive_slug <task> — the first few meaningful words of the task, slugified.
+# Used when --label is omitted. If EVERY word is filler we keep the words rather
+# than emit nothing; a wholly empty task yields "task". Never uninformative.
+derive_slug() {
+  local words
+  words="$(FILLER="$_SLUG_FILLER" python3 -c '
+import sys,os,re,unicodedata
+s=unicodedata.normalize("NFKD",sys.stdin.read().lower())
+s="".join(c for c in s if not unicodedata.combining(c))
+filler=set(os.environ["FILLER"].split())
+words=[w for w in re.split(r"[^a-z0-9]+", s) if w]
+meaningful=[w for w in words if w not in filler] or words
+# 8 words is plenty to fill a 30-char slug; slugify does the real trimming.
+print(" ".join(meaningful[:8]))' <<<"${1:-}")"
+  local s; s="$(slugify "$words")"
+  printf '%s\n' "${s:-task}"
+}
+
+# minted_names — every id this swarm has EVER used: the append-only ledger,
+# unioned with whatever agents/ currently holds (belt and braces: a hand-created
+# or pre-ledger record still blocks its name).
+minted_names() {
+  { [ -f "$NAMES_FILE" ] && cat "$NAMES_FILE"; } 2>/dev/null || true
+  for f in "$AGENTS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done 2>/dev/null || true
+}
+
+# mint_id <base-slug> — claim the first free name in base, base-2, base-3, ...
+# and RECORD it in the ledger. Never returns a name any agent (living, dead, or
+# reaped) has held in this swarm. Check-and-append is serialized by an atomic
+# mkdir lock so two concurrent spawns cannot claim the same name.
+mint_id() {
+  local base="$1"
+  [ -n "$base" ] || base="task"
+  mkdir -p "$SWARM_ROOT"
+  local lock="$NAMES_FILE.lock" i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    i=$((i+1)); [ "$i" -ge 100 ] && { rmdir "$lock" 2>/dev/null || true; break; }
+    sleep 0.1
+  done
+  local taken cand n=1 ledgered
+  taken="$(minted_names)"
+  ledgered="$({ [ -f "$NAMES_FILE" ] && cat "$NAMES_FILE"; } 2>/dev/null || true)"
+  cand="$base"
+  while printf '%s\n' "$taken" | grep -qxF -- "$cand"; do
+    # A name we skip because agents/ holds it, but the ledger does not, would be
+    # freed the moment that agent is reaped. Absorb it into the ledger now, so
+    # the ledger alone is a complete record of every name this swarm has used.
+    printf '%s\n' "$ledgered" | grep -qxF -- "$cand" || printf '%s\n' "$cand" >> "$NAMES_FILE"
+    n=$((n+1)); cand="$base-$n"
+  done
+  printf '%s\n' "$cand" >> "$NAMES_FILE"   # append-only: reap must never free a name
+  rmdir "$lock" 2>/dev/null || true
+  printf '%s\n' "$cand"
 }
 
 json_get() { # json_get <file> <key>  (flat string values only)
@@ -179,7 +260,11 @@ cmd_start() {
     sid="${base}-$n"
   fi
   [ -e "$SWARMS_DIR/$sid" ] && die "swarm '$sid' already exists"
-  mkdir -p "$SWARMS_DIR/$sid/agents" "$SWARMS_DIR/$sid/updates" "$SWARMS_DIR/$sid/settings"
+  mkdir -p "$SWARMS_DIR/$sid/agents" "$SWARMS_DIR/$sid/updates" \
+           "$SWARMS_DIR/$sid/settings" "$SWARMS_DIR/$sid/state" "$SWARMS_DIR/$sid/inbox"
+  # The name ledger: every agent id ever minted in this swarm, one per line,
+  # append-only. It outlives reap, which is the whole point (see mint_id).
+  : > "$SWARMS_DIR/$sid/names"
   echo "$sid"
 }
 
@@ -189,7 +274,7 @@ cmd_spawn() {
   init_swarm_paths
   local task="${1:-}"; shift || true
   [ -n "$task" ] || die 'spawn needs a task: swarm spawn "<task>" [--label L] [--model M]'
-  local label="claude" model="" cwd="$PWD" role=""
+  local label="" model="" cwd="$PWD" role=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --label) label="$2"; shift 2;;
@@ -212,7 +297,19 @@ cmd_spawn() {
   #            parent is the human operator (the root of the graph).
   local parent="${SWARM_AGENT_ID:-}"
 
-  local id; id="$(next_id)"
+  # The id IS the label, slugified — one concept, not two. With --label the slug
+  # comes from it; without, from the task's first meaningful words. A collision
+  # with ANY name this swarm has ever minted (living, dead, or reaped) takes a
+  # -2/-3/... suffix, so a name identifies one agent for the swarm's lifetime.
+  local base
+  if [ -n "$label" ]; then
+    base="$(slugify "$label")"
+    [ -n "$base" ] || die "--label '$label' slugifies to nothing (needs at least one letter or digit)"
+  else
+    base="$(derive_slug "$task")"
+  fi
+  local id; id="$(mint_id "$base")"
+  label="$id"   # label and id are the same thing; records keep the key for readers
 
   # Per-subagent settings: wire the Stop + Notification + UserPromptSubmit hooks
   # to swarm-hook. Stop/Notification report the agent's state to the coordinator
@@ -364,7 +461,7 @@ PY
   # own updates/ dir.
   local pane tab
   local tabjson
-  tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id:$label" \
+  tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id" \
            --env "SWARM_DIR=$SWARM_DIR" --env "SWARM_ID=$SWARM_ID" \
            --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
   pane=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null || true)
@@ -396,10 +493,10 @@ import json,sys,os,time
 f=sys.argv[1]
 role=os.environ.get("ROLE","").strip()
 task=os.environ.get("TASK","").strip()
-label=os.environ.get("LABEL","").strip()
-# mission: explicit role wins; else derive a sensible one-liner from label + task.
+label=os.environ.get("LABEL","").strip()   # == the agent's slug id
+# mission: explicit role wins; else derive a sensible one-liner from the slug + task.
 if role: mission=role
-elif label and label!="claude": mission=f"{label}: {task[:100]}"
+elif label: mission=f"{label}: {task[:100]}"
 else: mission=task[:120] or "mission to be refined from my task"
 json.dump({
   "agent":os.environ["AID"],"role":role,
@@ -440,15 +537,18 @@ PY
     # Only tear down on a CONFIRMED failure — never on ambiguity.
     if [ -n "$tab" ]; then herdr tab close "$tab" >/dev/null 2>&1 || true
     else herdr pane close "$pane" >/dev/null 2>&1 || true; fi
+    # The registry record goes; the NAME stays burned in the ledger. A failed
+    # spawn still consumed that id (its settings/state/task files bear it), and
+    # a name must only ever mean one agent.
     rm -f "$AGENTS_DIR/$id.json"
-    die "subagent $id ($label) did not start: $reason  [pane $pane]"
+    die "subagent $id did not start: $reason  [pane $pane]"
   fi
 
   if [ "$outcome" = "unknown" ]; then
     # Started shell never recorded status within the window. The agent is
     # very likely running fine (slow launcher/FS); do NOT kill it. Warn so the
     # coordinator knows to verify via the update inbox, and keep the agent.
-    echo "swarm: warning: $id ($label) launch unconfirmed after ${ready_timeout}s (no status file yet); keeping it — verify via 'swarm updates --id $id'  [pane $pane]" >&2
+    echo "swarm: warning: $id launch unconfirmed after ${ready_timeout}s (no status file yet); keeping it — verify via 'swarm updates --id $id'  [pane $pane]" >&2
   fi
 
   echo "$id"  # coordinator uses this id for send/wait
@@ -716,10 +816,10 @@ You maintain: .swarm/swarms/<swarm-id>/state/<your-id>.json
 Write it yourself before going idle. Schema:
 
   {
-    "agent":"aN","role":"...","model":"opus","updated_ts":<ms>,"seq":<n++>,
+    "agent":"<your-slug-id>","role":"...","model":"opus","updated_ts":<ms>,"seq":<n++>,
     "mission":"why you exist (stable)",
     "tasks":[ {"id":"t1","title":"...","status":"in-progress|done|blocked|at-risk",
-               "progress":"one line","delegated_to":[{"agent":"aK","expected_artifact":"PR","status":"..."}],
+               "progress":"one line","delegated_to":[{"agent":"csv-importer","expected_artifact":"PR","status":"..."}],
                "blockers":[]} ],
     "status":"on-track|at-risk|blocked",
     "progress_summary":"overall: is my structure right for my load?",
@@ -774,6 +874,11 @@ PY
 # Prune registry entries whose herdr pane is gone (stale from prior runs or
 # agents that died after starting). Safe: only removes entries herdr confirms
 # are dead; never touches live ones or anything if herdr is unreachable.
+#
+# Reap NEVER frees a NAME. The reaped agent's id stays in the swarm's `names`
+# ledger forever, so a later spawn with the same label gets `<slug>-2` rather
+# than resurrecting a dead agent's identity on top of its surviving state/,
+# inbox/, settings/ and updates/ records.
 cmd_reap() {
   init_swarm_paths
   local panes; panes="$(live_panes)"
@@ -1106,12 +1211,18 @@ swarm — spawn/send/receive for a coordinating agent (herdr container).
 A SWARM is one run, scoped by swarm-id. Start one, export SWARM_ID, then all
 other verbs act within that swarm only.
 
+An AGENT's id IS its label, slugified: 'swarm spawn "..." --label fix-send-race'
+prints and is addressed as 'fix-send-race'. With no --label the slug comes from
+the task's first meaningful words. A name is unique for the swarm's whole life —
+a collision (even with a reaped agent) gets a -2/-3/... suffix.
+
   swarm world                            print the world doc (what agents read)
   swarm update [--check] [--pre] [--major]  update to latest tagged release
                                          (--pre: incl pre-releases; --major: cross breaking)
   swarm start [--id <swarm-id>]          mint a swarm; prints its id
                                          -> export SWARM_ID=<that id>
   swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
+                                         prints the agent's id = slugify(L)
   swarm checkpoint --help | --context    goal-status continuity (every agent)
   swarm send  <agent-id> "<message>"
   swarm updates [--id <agent-id>] [--json]
@@ -1128,6 +1239,8 @@ other verbs act within that swarm only.
 
 Typical start:
   SWARM_ID=\$(swarm start); export SWARM_ID
+  id=\$(swarm spawn "build the CSV importer" --label csv-importer)   # -> csv-importer
+  swarm wait "\$id"; swarm close "\$id"
 On restart with SWARM_ID already set:
   swarm status     # see what's there, then decide: resume / new / clear
 EOF
