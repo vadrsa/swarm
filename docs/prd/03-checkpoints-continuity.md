@@ -64,6 +64,14 @@ dynamic and grows as work arrives. `status` and `blockers` are not decoration:
 they **are** the output of reconciliation, and the design deliberately provides no
 separate log.
 
+**The file is the record; the injection is the working set. They should move in opposite
+directions.** A checkpoint that grows while its restore payload shrinks is an agent
+accumulating history and carrying less of it — which is the whole point of writing it down.
+`cos` demonstrated the shape on itself in one cycle: its file grew to 50,613 bytes while its
+injection *fell* to 12,515, by pushing detail out of `progress_summary` (injected) into task
+bodies (durable, never injected). Nothing in the tool enforces or even names this; it is the
+design's intent, discovered by an agent economising under pressure.
+
 **One invariant the schema implies and nothing enforces: a `done` task has no blockers.**
 If a task is waiting on someone else's decision, it is `blocked` — the work being finished
 is not the same as the task being finished. Nothing validates this (see G7), and product
@@ -278,6 +286,25 @@ So the decision splits, and only one half is a habit:
   the injection, and no amount of hygiene stops them accruing. `restore-state` should inject
   `status !== "done"` — which is safe *once the schema invariant above holds*, and unsafe
   before it, which is exactly the trap `cos` found and declined to spring.
+
+**Why an agent cannot fix this itself**, measured against the real hook with sixteen
+finished tasks. There are exactly three levers and no fourth, since `done` is terminal:
+
+| what the agent does | injected | verdict |
+|---|---:|---|
+| baseline | 1,813 | — |
+| empties every `progress` field | **1,813** | reclaims **nothing** |
+| shortens every title to one char | 1,013 | destroys its own index of the task |
+| deletes the tasks from `tasks[]` | 773 | destroys the durable record |
+
+**The counterintuitive trap: trimming `progress` notes reclaims zero injected bytes.** It is
+the field agents most naturally prune when a checkpoint feels heavy, and the only one that
+costs nothing to keep — `restore-state` never injects it. An agent economising there is
+paying with its own memory and buying nothing.
+
+That asymmetry is the whole argument: `open_threads` answers to discipline (`cos` closed
+thirteen and reclaimed 2,855 bytes), and finished tasks answer to nothing an agent can do
+from inside its own checkpoint.
 
 Proposed in [proposal 006](../proposals/006-restore-state-injection.md).
 

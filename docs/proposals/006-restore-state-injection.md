@@ -21,9 +21,12 @@ Three changes, smallest first. Only the second touches code.
 2. **Filter the restore injection to `status !== "done"`.** One predicate, no special case.
    Nothing durable is lost: task `progress` bodies are never injected anyway, and the hook
    already tells the agent *"Re-read your full checkpoint at `state/<id>.json`."*
-3. **Rename the heading, or don't need to.** Once (2) lands, `CURRENT TASKS:` lists only
-   current tasks and the heading becomes true. If (2) is rejected, the heading must change
-   to `TASKS:`, because listing `[done]` items under *current* is a plain copy defect.
+3. **Rename the heading — only if (2) is declined.** Once (2) lands, `CURRENT TASKS:` lists
+   only current tasks and the heading becomes true for free. Verified: an agent whose tasks
+   are *all* finished does not get an empty list, because the hook already guards with
+   ``taskLines ? `CURRENT TASKS:…` : ''`` — the heading is omitted entirely. So (2) needs no
+   copy change. If (2) is rejected, the heading must become `TASKS:`, because listing
+   `[done]` items under *current* is a plain copy defect.
 
 **Do not adopt the compound predicate** `not done OR has-blockers`. It is correct as a
 patch and wrong as a design — see EVIDENCE.
@@ -133,6 +136,32 @@ So hand-compaction treats the big number and cannot ever finish; filtering treat
 number and finishes permanently. `cos` said it precisely: *"Hand-compaction is a treatment,
 not a cure."* It is right, and it routed the cure.
 
+**`cos` independently reproduced this decomposition by ablation** — zeroing one field at a
+time against the installed hook — and arrived at 6,904 / 2,404 / 1,801, exact to the byte.
+It went looking for a discrepancy and reported finding none.
+
+**7. The monotonicity claim survives a deliberate attempt to falsify it.** The whole case
+for a code fix rather than a habit rests on "no agent action reclaims done-task bytes."
+That is a strong claim, so it was attacked rather than asserted. Against the real hook, with
+sixteen finished tasks:
+
+| what the agent does | injected bytes | verdict |
+|---|---:|---|
+| baseline: 16 done tasks, long `progress` bodies | 1,813 | — |
+| empties every `progress` field | **1,813** | reclaims **nothing** — `progress` is never injected |
+| shortens every title to one character | 1,013 | works, but the title is how a resumed agent identifies the task |
+| deletes the tasks from `tasks[]` | 773 | destroys the durable record a parent judges |
+
+There are exactly three levers and no fourth: `done` is terminal, with no state below it.
+One reclaims nothing, one costs the agent its own index, and one costs the organisation its
+paper trail. **An agent cannot fix this from inside its checkpoint** — which is precisely
+what makes it the tool's problem rather than a discipline problem, and what distinguishes it
+from `open_threads`, where `cos` closed thirteen and reclaimed 2,855 bytes.
+
+The trap is worth noting for anyone tempted to economise: **trimming `progress` notes to
+slim a checkpoint reclaims zero injected bytes.** It is the one field agents most naturally
+prune, and the only one that costs nothing to keep.
+
 **COST**
 
 - (1) is a convention, already applied to the only checkpoint that violated it. Zero code.
@@ -166,9 +195,14 @@ not a cure."* It is right, and it routed the cure.
 Three separable yes/no. The first needs no code and product has already done it to itself.
 
 1. **Convention:** a task with an unresolved blocker is `blocked`, not `done`. Yes/no.
+   *(Product has applied it to itself; `cos` verified the invariant now holds org-wide.
+   If (2) lands, this invariant becomes load-bearing and wants a **test**, not just this
+   line — `cos`'s point, and it is right: a documented invariant with no instrument is
+   exactly what G7 says rots.)*
 2. **Code:** `restore-state` injects only `status !== "done"` tasks. Yes/no.
    *(Product recommends yes. `cos` will brief and judge it.)*
 3. **Copy:** if (2) is declined, rename `CURRENT TASKS:` → `TASKS:`. Yes/no.
+   *(Moot if (2) lands — verified above.)*
 
 **IF NO**
 
