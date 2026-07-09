@@ -21,10 +21,12 @@
 > a defect fix, and should not be carried as a rider on any code change.
 >
 > **What chasing the refutation found:** a real, critical, message-loss defect —
-> **G17**, a message over ~64 KB is destroyed by the delivery hook, silently, with a
-> success exit code. Product asserted a defect from reading; engineering disproved it by
-> executing; executing then found a worse one. That sequence is the argument for the method,
-> and it is why this correction is printed here rather than edited away.
+> **G17**, a message over ~64 KB is destroyed by the *agent* delivery hook, silently, with a
+> success exit code. (The operator's own mailbox is spared, because it is read by Python
+> rather than Node — an accident, not a design, and one that unification would undo. See
+> the cost of unification below.) Product asserted a defect from reading; engineering
+> disproved it by executing; executing then found a worse one. That sequence is the argument
+> for the method, and it is why this correction is printed here rather than edited away.
 
 ---
 
@@ -47,9 +49,11 @@ straightforwardly right and one that is a regression, and they have been bundled
    performs an implicit cumulative ack — announced, not silent (see the correction above).
    That behaviour is *correct*, and it is the reason the operator's instinct is right.
    Making it explicit needs a verb, not a bug fix.
-4. **Fix G17 first, ahead of all of this.** A message over ~64 KB is destroyed on
-   delivery. It is unrelated to the redesign, it is one line in the hook, and no decision
-   about read/ack semantics matters while the channel loses large messages outright.
+4. **Fix G17 first, ahead of all of this.** A message over ~64 KB sent to an *agent* is
+   destroyed on delivery. It is unrelated to the redesign, it is one line in the hook, and
+   no decision about read/ack semantics matters while the agent channel loses large
+   messages outright. It is also a reason not to unify: the operator's mailbox is the one
+   inbox G17 cannot reach, and unification would hand it the bug.
 
 The unifying instinct — one read/ack model for agents and the operator — is the part I
 think is wrong. Agents and the operator are not the same kind of recipient, and the
@@ -227,6 +231,15 @@ them again, exactly as the cap does today.
   which means unification is not a simplification; it is a downgrade of the agent path in
   order to make one code path serve two very different recipients.
 
+  **And there is now a concrete hazard, found after this proposal was first written.**
+  The operator's mailbox is the only inbox in the system that G17 cannot destroy, and it
+  is spared *by accident*: `cmd_updates` is Python, which flushes stdout on exit; the agent
+  hook is Node, which discards it. Nothing records that dependency and nothing tests it.
+  **Unifying the two read paths would carry the agent path's message-loss bug into the
+  operator's mailbox** — the one channel where a lost message is an unanswered escalation.
+  Fix G17 first (decision 0), and then unify only if a reason survives that isn't
+  "one code path is tidier."
+
 **ALTERNATIVES**
 
 - *Adopt as proposed, wholesale.* Rejected on the evidence above: it exchanges an atomic
@@ -252,8 +265,10 @@ of it.**
 
 0. **Fix G17 now** — do not `process.exit()` before stdout drains; add a size guard to
    `send`; truncate an oversized injection with a pointer to the file rather than emitting
-   it whole. Yes/no. *(Product recommends yes, immediately. Every message over ~64 KB is
-   currently destroyed. No read/ack semantics matter while that is true.)*
+   it whole. Yes/no. *(Product recommends yes, immediately. Every message over ~64 KB sent
+   **to an agent** is currently destroyed — including one you send. Your own mailbox is
+   spared only because it is read by Python, which unification would change. No read/ack
+   semantics matter while that is true.)*
 1. **Operator mailbox: make acknowledgement explicit and cumulative** (`swarm updates`
    becomes non-destructive; add `swarm inbox ack <id>`). Yes/no.
 2. **Agents: keep injecting message bodies** rather than switching to notify-and-pull.

@@ -260,6 +260,21 @@ The fix is one line in the hook — do not `process.exit()` before stdout drains
 and a truncate-with-pointer on the injection are the belt and braces. All three are
 engineering surface; product's contribution is the measurement, not the patch.
 
+**Scope: the agent inbox only — and the operator's mailbox is spared by accident.** The
+operator reads mail through `cmd_updates`, which is Python, and Python flushes stdout on
+exit. The agent path is Node, which does not:
+
+```
+python3 -c 'import sys; sys.stdout.write("X"*200000); sys.exit(0)' | wc -c  → 200000
+node    -e 'process.stdout.write("X".repeat(200000)); process.exit(0)'   | wc -c  →  65536
+```
+
+An escalation *to* the operator therefore cannot be lost this way; a steering instruction
+*from* the operator to an agent can. Nothing in the code records that this safety exists,
+nothing tests it, and it is a property of the runtime rather than the design. **Unifying
+the two read paths — which the operator's proposed redesign contemplates — would extend
+this defect to the operator's own mailbox unless the flush is fixed first.**
+
 ---
 
 **G16 — the inbox header over-counts. *Retracted as a defect; kept as a copy note.***
