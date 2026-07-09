@@ -198,6 +198,26 @@ upward, no verb reads it, and read-receipts were explicitly deferred. A sender's
 only recourse is to read the target's pane, which the world doc permits (for
 liveness) and forbids (for judging work).
 
+**There is a third rung on this ladder, and it is the one that has actually cost something.**
+Delivery to the *inbox* is not delivery to the *agent* (above). But delivery to the agent's
+**context** is not **receipt** either — and the hook marks a message `read/` at the instant it
+injects it, so the system records consumption on the strength of having *rendered* the text.
+
+Demonstrated, not hypothesised. `cos` was sent the operator's directive commissioning an
+implementation. Replaying the exact message pair through the real hook: 6,965 characters
+injected against an 8,000 cap, both bodies present, **nothing withheld, both auto-acked**. The
+directive was in its context, intact. It answered the other message and not the operator, and
+spent four cycles reporting the item as *"awaiting the operator"* while the answer sat in its
+own `read/` directory.
+
+**Shown is not understood.** Today's implicit prefix-ack conflates the two. Explicit
+cumulative acknowledgement — adopted, see [proposal 005](../proposals/005-inbox-read-ack.md) —
+separates them: an unclaimed message stays outstanding and re-surfaces every turn, so a busy
+agent's own inattention becomes visible *to itself*. Note the direction of the evidence: this
+is an argument for **explicit ack**, and simultaneously an argument **against** notify-and-pull,
+because the failure was never a missing body. It was a missing action, and a notification adds
+one.
+
 **G9 — the doorbell screen-scrapes, against the product's own doctrine.**
 `ring_doorbell` greps the pane for `❯` to find the prompt line. WORLD.md's
 foundational reliability claim is that *"the hook firing is reliable; the pane is
