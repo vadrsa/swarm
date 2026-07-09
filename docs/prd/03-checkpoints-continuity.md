@@ -46,7 +46,7 @@ controls; the CLI never writes it after seeding.
   "mission": "why you exist (stable)",
   "tasks": [{
     "id": "t1", "title": "…",
-    "status": "in-progress|done|blocked|at-risk",
+    "status": "in-progress|done|blocked|at-risk",   // done => blockers MUST be empty
     "progress": "one line",
     "delegated_to": [{"agent":"csv-importer","expected_artifact":"PR","status":"…"}],
     "blockers": []
@@ -63,6 +63,15 @@ controls; the CLI never writes it after seeding.
 dynamic and grows as work arrives. `status` and `blockers` are not decoration:
 they **are** the output of reconciliation, and the design deliberately provides no
 separate log.
+
+**One invariant the schema implies and nothing enforces: a `done` task has no blockers.**
+If a task is waiting on someone else's decision, it is `blocked` — the work being finished
+is not the same as the task being finished. Nothing validates this (see G7), and product
+violated it twice in its own checkpoint, which is how the defect in **G18** was found: the
+obvious filter for `restore-state` looks unsafe only because two records encoded a blocked
+task as done. `tasks[]` is **append-only** — it is the durable record a parent judges — so
+a finished task is never deleted, only marked. What gets *injected* is a separate question,
+and the answer should not be "everything."
 
 ### Seeding
 
@@ -238,11 +247,39 @@ restore, which is precisely the goal-drift a checkpoint exists to prevent. That 
 it now arrives whole. But it arrives into a finite context window, every session, and an
 agent restored after a compaction pays for every thread it has ever opened.
 
-The product decision here is **retention, not truncation**. A blind cap on the injection
-would silently drop the oldest entries, and the oldest entry is the mission. What the
-system lacks is a *closing discipline*: an agent should retire an `open_threads` entry when
-it resolves, the way it marks a task `done`. Failing that, `restore-state` should prefer
-open threads and in-progress tasks over the whole list.
+**Decomposing the payload exactly** (`cos`, 12,515 bytes, measured against the installed
+hook) shows the obvious priority is inverted:
+
+| component | bytes | behaviour |
+|---|---:|---|
+| preamble + mission + reconcile ritual | 3,207 | irreducible |
+| `open_threads` | 6,904 | bounded by discipline |
+| task lines | 2,404 | — |
+| *…of which finished work* | *1,801* | **grows forever, never shrinks** |
+
+`open_threads` is the **largest** component — and it is what agents attack by hand, because
+it is visible. But it *shrinks* when a thread closes. Finished tasks are the **smaller**
+component and the only **monotonic** one: everything else in the payload is bounded by what
+the agent is currently doing. Meanwhile they are printed under a heading that says
+`CURRENT TASKS:`, so a resumed agent reads a list of things it is not doing.
+
+Two agents hand-compacted their own checkpoints, independently, in one cycle before anyone
+noticed the accretion was structural. `cos`: *"We were both treating a product defect as a
+personal discipline failure."* And hand-compaction cannot converge — it gave back 1,151 of
+3,793 saved bytes in a single cycle, because `progress_summary` is rewritten longer each
+time and every new task appends a title forever.
+
+So the decision splits, and only one half is a habit:
+
+- **`open_threads` → retention, not truncation.** A closing discipline: retire a thread when
+  it resolves. A blind cap would drop the oldest entries, and the oldest entry is the
+  mission.
+- **Finished tasks → filter, not discipline.** They are durable in the file, pointless in
+  the injection, and no amount of hygiene stops them accruing. `restore-state` should inject
+  `status !== "done"` — which is safe *once the schema invariant above holds*, and unsafe
+  before it, which is exactly the trap `cos` found and declined to spring.
+
+Proposed in [proposal 006](../proposals/006-restore-state-injection.md).
 
 **G7 — the schema has no instrument.** No verb validates a written checkpoint. No
 code in the repository reads `updated_ts` or `seq` — the two fields whose entire

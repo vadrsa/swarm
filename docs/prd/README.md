@@ -235,10 +235,26 @@ re-parsed through a shell breaks — and the reasoning was never carried across 
 `send`. Delivery is guaranteed; body integrity is not, and no document says so.
 [02](02-inbox-messaging.md) · [proposal 004](../proposals/004-send-quoting-hazard.md)
 
-**G18. `restore-state` has no cap, and what it injects grows every cycle, forever.**
-`inbox-check` budgets its injection at 8,000 characters (imperfectly — see G10).
+**G18. `restore-state` has no cap, injects finished work forever, and calls it "CURRENT
+TASKS".** `inbox-check` budgets its injection at 8,000 characters (imperfectly — see G10).
 `restore-state` budgets nothing. It injects the agent's mission, every task **title**,
-every **blocker**, and every **`open_threads`** entry, joined without limit.
+every **blocker**, and every **`open_threads`** entry, joined without limit — and it prints
+the task list under the heading `CURRENT TASKS:` while including `[done]` ones. Across the
+live roster, **68% of all injected task-line bytes are finished work** (`rd` 91%, `audit`
+88%, `cos` 72%).
+
+Two agents (`cos`, `release-mgr`) independently hand-compacted their own checkpoints in one
+cycle before anyone noticed this was structural rather than a personal hygiene failure.
+
+**A schema defect sits underneath it.** The naive fix — drop `status == "done"` tasks —
+would silently delete continuity entries, because a `done` task can carry a live blocker.
+`cos` found this by testing the fix against the live roster before proposing it, and
+declined to decide. Scanning every checkpoint in the org, the state occurs **twice, both in
+`product`**, and `product`'s own `t9` encodes the same situation correctly as `blocked`. So
+the trap existed only because one agent misused `status`; repairing the data (done, this
+cycle) makes the simple filter correct and loses nothing. **A permanent code exception to
+rescue two malformed records is how a schema rots.** Proposed in
+[006](../proposals/006-restore-state-injection.md).
 
 Those fields only ever grow. Nothing in `bin/swarm` or the hook prunes, caps, or ages
 them; the seed writes `"open_threads":[]` and it is append-only by convention thereafter.
@@ -263,12 +279,26 @@ window, on **every** `SessionStart`, and the continuity mechanism's own cost the
 monotonically with an agent's age. An agent restored after a compaction pays for every
 thread it has ever opened.
 
-The product decision is retention, not truncation: **`open_threads` and completed `tasks`
-need a closing discipline** (an agent should retire a thread when it resolves, as it
-retires a task), and `restore-state` should probably prefer *open* threads and
-*in-progress* tasks if it must choose. A blind cap would silently drop the oldest, which
-for a checkpoint is the mission itself.
-[03](03-checkpoints-continuity.md)
+**Decomposed exactly** (`cos`'s 12,515-byte injection, measured against the installed hook):
+
+| component | bytes | behaviour |
+|---|---:|---|
+| preamble + mission + reconcile ritual | 3,207 | irreducible |
+| `open_threads` | 6,904 | bounded by discipline |
+| task lines | 2,404 | — |
+| *…of which finished work* | *1,801* | **grows forever, never shrinks** |
+
+That decomposition inverts the obvious priority. `open_threads` is the **largest**
+component and the one agents attack by hand — but it shrinks when an agent closes a thread.
+Completed tasks are the **smaller** component and the only **monotonic** one: every other
+part of the payload is bounded by what the agent is currently doing. Finished tasks
+accumulate until the agent dies, under a heading that reads `CURRENT TASKS:`.
+
+So the decision splits. **Retention, not truncation, for `open_threads`** — a closing
+discipline, not a cap, since a blind cap drops the oldest entry and the oldest entry is the
+mission. **Filtering, not discipline, for finished tasks** — they are durable in the file
+and pointless in the injection, and no amount of hygiene stops them accruing.
+[03](03-checkpoints-continuity.md) · [proposal 006](../proposals/006-restore-state-injection.md)
 
 **G16. Reading the operator's mail destroys it — including `swarm updates --json`.**
 `cmd_updates` prints, flushes, then calls `mark_read()`, which moves every surfaced
