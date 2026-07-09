@@ -1,1694 +1,956 @@
-#!/usr/bin/env bash
-# swarm — capability layer for a coordinating agent.
+#!/usr/bin/env python3
+# swarm (SIMPLEST) — the whole tool in one file: CLI verbs + hook entrypoints.
 #
-# Verbs: start, spawn, send, updates, wait, list, reap. No task model, no git,
-# no merge, no daemon. The coordinator (a claude/codex/... run) decides all
-# policy; this just gives it reliable primitives.
+# Nine concepts, four verbs (+ `world`, which prints the contract). An agent is
+# a Claude session in a herdr pane, with a name, a parent, and a journal. A
+# message is a claim on one turn. Everything stored on disk is a fact the
+# filesystem can witness — who, to whom, when, what, and whether it has yet
+# consumed its turn. Nothing here stores a claim about attention, compliance,
+# or intent; *obeyed* is judged by the sender reading the recipient's reply,
+# pane, journal, or artifact.
 #
-# Container: herdr (holds the subagent panes). Inbound updates come from each
-# subagent's Stop/Notification HOOK — a fired event, not a screen scrape.
+# Layout under .swarm/ (one swarm per project; override root with SWARM_DIR):
+#   queue/<name>/*.json        waiting messages (one file = one undelivered claim)
+#   queue/<name>/delivered/    world-readable record: this message consumed a turn
+#   journal/<name>.md          the agent's own words; ALSO the name's tombstone
+#   agents/<name>.json         the durable name -> pane/parent binding
+#   event/<name>.json          the last hook event, as fact (feeds `ps`); no history
+#   settings/<name>.*          spawn plumbing (claude settings, task, launcher, status)
 #
-# Scope:
-#   SWARM   = the project. One swarm per project, rooted at the .swarm dir
-#             ($PWD/.swarm, override with SWARM_DIR). There is no swarm-id: a
-#             swarm holds many operator-rooted agents, so nothing needs naming.
-#             Every verb auto-creates the layout on use; `swarm start` is just
-#             an explicit, idempotent way to do that.
-#   AGENT   = one subagent within the swarm. Its id IS its slugified label
-#             (e.g. `fix-send-race`) — meaningful, addressable, and unique for
-#             the swarm's entire lifetime (reap never frees a name).
-#
-# State layout (flat, directly under the project's .swarm):
-#   .swarm/{agents,updates,settings,state,inbox}/
-#   .swarm/names   — append-only ledger of every minted id
-
-set -euo pipefail
-
-# Resolve this script's REAL location, following symlinks — install.sh symlinks
-# `swarm` into ~/.local/bin, so ${BASH_SOURCE[0]} is the symlink, not the repo.
-# We must dereference it to find bin/ (for the hook) and ../WORLD.md.
-_src="${BASH_SOURCE[0]}"
-while [ -L "$_src" ]; do
-  _dir="$(cd "$(dirname "$_src")" && pwd)"
-  _src="$(readlink "$_src")"
-  case "$_src" in /*) ;; *) _src="$_dir/$_src";; esac   # resolve relative link
-done
-HERE="$(cd "$(dirname "$_src")" && pwd)"
-HOOK="$HERE/swarm-hook.cjs"
-SWARM_DIR="${SWARM_DIR:-$PWD/.swarm}"   # the swarm root (one swarm per project)
-
-die() { echo "swarm: $*" >&2; exit 1; }
-have() { command -v "$1" >/dev/null 2>&1; }
-
-# WORLD.md sits next to this bin/ dir in the install. The CLI is the single
-# source of truth for its location — docs/skills reference `swarm world`, never
-# a hard path, so the package is portable across machines.
-WORLD_DOC="$(cd "$HERE/.." && pwd)/WORLD.md"
-
-# swarm world  — print the world doc (what every agent reads to learn the
-# environment). Path-agnostic entry point: `swarm world` works wherever swarm is
-# installed, so nothing else needs to know the doc's absolute path.
-cmd_world() {
-  [ -f "$WORLD_DOC" ] || die "WORLD.md not found next to swarm (expected $WORLD_DOC)"
-  cat "$WORLD_DOC"
-}
-
-# REPO_ROOT — the git checkout this install lives in (HERE is the resolved bin/).
-REPO_ROOT="$(cd "$HERE/.." && pwd)"
-
-# swarm update [--check] [--pre] [--major]  — update to the latest TAGGED release.
-#   Tags follow semver: vMAJOR.MINOR.PATCH, with pre-releases like v0.3.0-rc1.
-#   Default: newest STABLE tag within the CURRENT major only. Never pulls
-#   arbitrary commits — only releases you deliberately tagged.
-#     --check   report whether an update exists; change nothing.
-#     --pre     also consider pre-release tags (those with a '-', e.g. -rc1).
-#     --major   allow crossing into a new (breaking) major version. Without it,
-#               a new major is reported but NOT applied — so users are never
-#               silently carried across a breaking boundary.
-cmd_update() {
-  local check_only="" pre="" allow_major=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --check) check_only=1; shift;;
-      --pre)   pre=1; shift;;
-      --major) allow_major=1; shift;;
-      *) die "unknown flag: $1 (usage: swarm update [--check] [--pre] [--major])";;
-    esac
-  done
-  have git || die "git not found — needed to update"
-  [ -d "$REPO_ROOT/.git" ] || die "not a git checkout ($REPO_ROOT) — update only works when installed via git clone"
-  git -C "$REPO_ROOT" fetch --tags --quiet origin 2>/dev/null || die "could not fetch from origin (network?)"
-
-  local current; current="$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || echo '')"
-
-  # Pick the target tag with explicit semver logic (don't trust -v:refname for
-  # pre-release ordering). All comparisons happen in python for correctness.
-  local target major_of_current
-  read -r target major_of_current < <(
-    REPO="$REPO_ROOT" CUR="$current" PRE="${pre:-}" python3 <<'PY'
-import os, re, subprocess
-repo=os.environ["REPO"]; cur=os.environ["CUR"]; want_pre=bool(os.environ.get("PRE"))
-tags=subprocess.run(["git","-C",repo,"tag","-l","v*"],capture_output=True,text=True).stdout.split()
-def parse(t):
-    m=re.match(r'^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$', t)
-    if not m: return None
-    maj,mi,pa=int(m[1]),int(m[2]),int(m[3]); pre=m[4]
-    # sort key: (M,m,p, is_stable, pre-ident). stable (pre=None) ranks ABOVE pre.
-    return (maj,mi,pa, 1 if pre is None else 0, pre or "")
-parsed=[(t,parse(t)) for t in tags]; parsed=[(t,k) for t,k in parsed if k]
-if not want_pre: parsed=[(t,k) for t,k in parsed if k[3]==1]  # stable only
-parsed.sort(key=lambda x:x[1])
-target = parsed[-1][0] if parsed else ""
-cm = parse(cur)
-maj_cur = cm[0] if cm else ""
-print(target, maj_cur)
-PY
-  )
-  [ -n "$target" ] || die "no ${pre:+pre-release or }release tags found on origin yet (nothing to update to)"
-
-  if [ "$current" = "$target" ]; then echo "swarm is up to date ($target)"; return 0; fi
-
-  # Is the target a new MAJOR relative to current?
-  local target_major; target_major="${target#v}"; target_major="${target_major%%.*}"
-  local crosses_major=""
-  if [ -n "$major_of_current" ] && [ "$target_major" != "$major_of_current" ]; then crosses_major=1; fi
-
-  local from="${current:-(untagged/dev)}"
-  if [ -n "$crosses_major" ] && [ -z "$allow_major" ]; then
-    echo "a new MAJOR (breaking) release is available: $from -> $target"
-    echo "major versions may break existing swarms/state. Review the CHANGELOG/RELEASING notes,"
-    echo "then run 'swarm update --major' to cross into it."
-    return 0
-  fi
-  if [ -n "$check_only" ]; then
-    echo "update available: $from -> $target${crosses_major:+  (MAJOR/breaking — needs --major)}  (run 'swarm update${crosses_major:+ --major}')"
-    return 0
-  fi
-
-  if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
-    die "you have uncommitted local changes in $REPO_ROOT — commit/stash them before updating"
-  fi
-  echo "updating $from -> $target ..."
-  git -C "$REPO_ROOT" checkout --quiet "$target" || die "checkout $target failed"
-  if [ -x "$REPO_ROOT/install.sh" ]; then
-    ( cd "$REPO_ROOT" && ./install.sh --update ) || die "install.sh failed after update"
-  fi
-  echo "now on $target"
-}
-
-# SWARM_ID is a RETIRED concept (one swarm per project). It is deliberately
-# IGNORED, never an error: agents spawned by an older swarm carry SWARM_ID baked
-# into their pane env, which cannot be changed for a running process. Erroring on
-# it would break every live agent's `swarm` verb the moment the CLI is updated.
-# The note goes to stderr only — stdout of machine-read verbs (start, whoami,
-# spawn) stays clean, and the exit code is untouched.
-if [ -n "${SWARM_ID:-}" ]; then
-  echo "swarm: note: SWARM_ID is ignored (one swarm per project; the swarm-id concept was removed)" >&2
-fi
-
-# Resolve the swarm's dirs and AUTO-INIT them. Idempotent: every verb calls this,
-# so a swarm springs into being on first use and `swarm start` is never required.
-init_swarm_paths() {
-  SWARM_ROOT="$SWARM_DIR"
-  AGENTS_DIR="$SWARM_ROOT/agents"
-  UPDATES_DIR="$SWARM_ROOT/updates"
-  SETTINGS_DIR="$SWARM_ROOT/settings"
-  STATE_DIR="$SWARM_ROOT/state"
-  INBOX_DIR="$SWARM_ROOT/inbox"
-  NAMES_FILE="$SWARM_ROOT/names"   # append-only ledger of every id ever minted
-  mkdir -p "$AGENTS_DIR" "$UPDATES_DIR" "$SETTINGS_DIR" "$STATE_DIR" "$INBOX_DIR" \
-    || die "cannot create swarm layout under $SWARM_ROOT"
-  [ -e "$NAMES_FILE" ] || : > "$NAMES_FILE"
-  seed_names_ledger
-}
-
-# --- agent ids are slugs -------------------------------------------------
-# An agent's id IS its label, slugified. `swarm spawn "..." --label fix-send-race`
-# yields the id `fix-send-race`, and that string is what you send/wait/close on
-# and what every filename under the swarm uses. With no --label the slug is
-# derived from the task's first MEANINGFUL words — never an uninformative
-# `a1`/`agent-1`/`claude`.
-#
-# Uniqueness is for the swarm's whole LIFETIME: a name means exactly one agent,
-# forever. `reap` deletes agents/<id>.json, so agents/ alone cannot answer "was
-# this name ever used?" — the append-only `names` ledger can, and it is never
-# pruned. Two rules keep the ledger complete: init_swarm_paths seeds it from
-# agents/ on every verb (so a record that never went through mint_id is ledgered
-# before reap can delete it), and mint_id checks the ledger UNION the live
-# registry, then appends.
-
-# slugify <text> — lowercase, non-alnum -> '-', collapse runs, strip ends,
-# trim to 30 chars (never ending on a hyphen). Prints "" if nothing survives.
-slugify() {
-  printf '%s' "${1:-}" | python3 -c '
-import sys,re,unicodedata
-# Fold accents first so "café" -> "cafe", not "caf".
-s=unicodedata.normalize("NFKD",sys.stdin.read().lower())
-s="".join(c for c in s if not unicodedata.combining(c))
-s=re.sub(r"[^a-z0-9]+","-",s)
-s=re.sub(r"-{2,}","-",s).strip("-")
-print(s[:30].rstrip("-"))'
-}
-
-# Filler words that carry no information about what an agent DOES. Skipped when
-# deriving a slug from a task so the id names the work, not the grammar.
-_SLUG_FILLER='you are the a an and or of to in on for with please your my this that it its is be do go make just now then so as at by from into we i us'
-
-# derive_slug <task> — the first few meaningful words of the task, slugified.
-# Used when --label is omitted. If EVERY word is filler we keep the words rather
-# than emit nothing; a wholly empty task yields "task". Never uninformative.
-derive_slug() {
-  local words
-  words="$(FILLER="$_SLUG_FILLER" python3 -c '
-import sys,os,re,unicodedata
-s=unicodedata.normalize("NFKD",sys.stdin.read().lower())
-s="".join(c for c in s if not unicodedata.combining(c))
-filler=set(os.environ["FILLER"].split())
-words=[w for w in re.split(r"[^a-z0-9]+", s) if w]
-meaningful=[w for w in words if w not in filler] or words
-# 8 words is plenty to fill a 30-char slug; slugify does the real trimming.
-print(" ".join(meaningful[:8]))' <<<"${1:-}")"
-  local s; s="$(slugify "$words")"
-  printf '%s\n' "${s:-task}"
-}
-
-# minted_names — every id this swarm has EVER used: the append-only ledger,
-# unioned with whatever agents/ currently holds (belt and braces: a hand-created
-# or pre-ledger record still blocks its name).
-minted_names() {
-  { [ -f "$NAMES_FILE" ] && cat "$NAMES_FILE"; } 2>/dev/null || true
-  for f in "$AGENTS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done 2>/dev/null || true
-}
-
-# names_lock / names_unlock — serialize check-and-append on the ledger with an
-# atomic mkdir. Every writer takes it, so two concurrent spawns cannot claim the
-# same name and a seed cannot interleave with a mint.
-names_lock() {
-  mkdir -p "$SWARM_ROOT"
-  local lock="$NAMES_FILE.lock" i=0
-  while ! mkdir "$lock" 2>/dev/null; do
-    i=$((i+1)); [ "$i" -ge 100 ] && { rmdir "$lock" 2>/dev/null || true; break; }
-    sleep 0.1
-  done
-}
-names_unlock() { rmdir "$NAMES_FILE.lock" 2>/dev/null || true; }
-
-# unledgered_names — names agents/ holds that the ledger does not. Read-only, and
-# on the hot path (init_swarm_paths runs it on every verb), so it forks at most
-# once: no basename/grep per registry file, just parameter expansion and a single
-# `grep -vxF -f` of the whole registry against the whole ledger.
-unledgered_names() {
-  local f n registry=""
-  for f in "$AGENTS_DIR"/*.json; do
-    [ -e "$f" ] || continue
-    n="${f##*/}"; registry="$registry${n%.json}"$'\n'
-  done
-  [ -n "$registry" ] || return 0
-  printf '%s' "$registry" | grep -vxF -f "$NAMES_FILE" -- 2>/dev/null || true
-}
-
-# seed_names_ledger — absorb every name agents/ holds into the ledger. Called
-# from init_swarm_paths, i.e. before ANY verb touches the registry, so a record
-# that never went through mint_id (hand-created, restored from a backup, or
-# left by an older layout) is in the ledger before `reap` can delete it. Without
-# this, reap frees such a name and a later spawn re-mints it — lifetime
-# uniqueness violated.
-#
-# Cheap and idempotent: the read-only diff writes nothing in the common case
-# (every registry name already ledgered), so the hot path of `swarm status` and
-# friends stays lock-free and append-free. Only when the diff is non-empty do we
-# take the ledger lock and RE-diff inside it, so a racing seed or mint cannot
-# make us append a name twice.
-seed_names_ledger() {
-  [ -n "$(unledgered_names)" ] || return 0
-  names_lock
-  unledgered_names >> "$NAMES_FILE"   # append-only, re-diffed under the lock
-  names_unlock
-}
-
-# mint_id <base-slug> — claim the first free name in base, base-2, base-3, ...
-# and RECORD it in the ledger. Never returns a name any agent (living, dead, or
-# reaped) has held in this swarm. Check-and-append is serialized by the ledger
-# lock so two concurrent spawns cannot claim the same name.
-mint_id() {
-  local base="$1"
-  [ -n "$base" ] || base="task"
-  names_lock
-  # init_swarm_paths has already absorbed agents/ into the ledger (see
-  # seed_names_ledger), so minted_names' ledger half is authoritative here; the
-  # union is kept as belt and braces for a record written since that seed.
-  local taken cand n=1
-  taken="$(minted_names)"
-  cand="$base"
-  while printf '%s\n' "$taken" | grep -qxF -- "$cand"; do
-    n=$((n+1)); cand="$base-$n"
-  done
-  printf '%s\n' "$cand" >> "$NAMES_FILE"   # append-only: reap must never free a name
-  names_unlock
-  printf '%s\n' "$cand"
-}
-
-json_get() { # json_get <file> <key>  (flat string values only)
-  python3 - "$1" "$2" <<'PY'
-import json,sys
-try:
-    print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
-except Exception:
-    print("")
-PY
-}
-
-# ------------------------------------------------------------------ start
-# swarm start  — explicitly create this project's swarm layout and print its
-# root. There is no id to mint (the project IS the swarm), so this is a trivial
-# idempotent init: safe to run any number of times. Every other verb auto-inits
-# the same way, so `start` is never REQUIRED — it exists for bootstrap scripts
-# and for the operator who wants to see where state will live.
-cmd_start() {
-  [ $# -eq 0 ] || die "unknown flag: $1 (usage: swarm start)"
-  init_swarm_paths   # creates the layout + the names ledger; idempotent
-  echo "$SWARM_ROOT"
-}
-
-# ------------------------------------------------------------------ spawn
-# swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
-cmd_spawn() {
-  init_swarm_paths
-  local task="${1:-}"; shift || true
-  [ -n "$task" ] || die 'spawn needs a task: swarm spawn "<task>" [--label L] [--model M]'
-  local label="" model="" cwd="$PWD" role=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --label) label="$2"; shift 2;;
-      --model) model="$2"; shift 2;;
-      --cwd) cwd="$2"; shift 2;;
-      --role) role="$2"; shift 2;;
-      *) die "unknown flag: $1";;
-    esac
-  done
-  [ "${HERDR_ENV:-}" = "1" ] || die "not inside herdr (HERDR_ENV != 1); spawn needs herdr as the container"
-  have herdr || die "herdr not on PATH"
-
-  # Graph edges recorded on the node:
-  #   task   — what this agent was delegated. The task IS its goal; there is no
-  #            separate "goal" field, and no "role" field — role is emergent
-  #            from graph position (has children => coordinating).
-  #   parent — the agent that spawned this one. If `spawn` runs inside a
-  #            subagent pane, that pane carries SWARM_AGENT_ID (set when ITS
-  #            parent spawned it) — that's the parent. Empty ⇒ this agent's
-  #            parent is the human operator (the root of the graph).
-  local parent="${SWARM_AGENT_ID:-}"
-
-  # The id IS the label, slugified — one concept, not two. With --label the slug
-  # comes from it; without, from the task's first meaningful words. A collision
-  # with ANY name this swarm has ever minted (living, dead, or reaped) takes a
-  # -2/-3/... suffix, so a name identifies one agent for the swarm's lifetime.
-  local base
-  if [ -n "$label" ]; then
-    base="$(slugify "$label")"
-    [ -n "$base" ] || die "--label '$label' slugifies to nothing (needs at least one letter or digit)"
-  else
-    base="$(derive_slug "$task")"
-  fi
-  local id; id="$(mint_id "$base")"
-  label="$id"   # label and id are the same thing; records keep the key for readers
-
-  # Per-subagent settings: wire the Stop + Notification + UserPromptSubmit hooks
-  # to swarm-hook. Stop/Notification report the agent's state to the coordinator
-  # (subagent -> coordinator channel). UserPromptSubmit runs `inbox-check` at
-  # every turn boundary to surface the agent's durable inbox (coordinator ->
-  # subagent channel) into its context. Passed via `claude --settings` so the
-  # GLOBAL ~/.claude/settings.json is never touched. Hooks are additive/merged.
-  # EVERY agent gets the full hook set (all agents are standing — continuity is
-  # how every agent is built, not an opt-in category). Stop/Notification report
-  # state up; UserPromptSubmit surfaces the durable inbox; SessionStart
-  # (startup + compact) re-injects the agent's goal-status checkpoint after a
-  # fresh start or a context compaction; PreCompact records that compaction is
-  # happening (it cannot inject forward). There is NO enforcement hook —
-  # checkpointing is a briefed duty + a judged artifact.
-  local settings="$SETTINGS_DIR/$id.json"
-  python3 - "$settings" "$HOOK" <<'PY'
-import json,sys
-settings_path, hook = sys.argv[1], sys.argv[2]
-def h(ev): return {"matcher":"","hooks":[{"type":"command","command":f"node '{hook}' {ev}"}]}
-json.dump({"hooks":{"Stop":[h("stop")],"Notification":[h("notification")],
-                    "UserPromptSubmit":[h("inbox-check")],
-                    "SessionStart":[h("restore-state")],
-                    "PreCompact":[h("precompact-marker")]}}, open(settings_path,"w"))
-PY
-
-  # Build the claude launch command. Positional prompt = the task (interactive
-  # session, so the pane stays live and Stop fires per turn).
-  # Never put the task on a command line. Multibyte/quote-heavy prompts break
-  # when re-parsed through herdr's pane shell (and `printf %q` emits $'...'
-  # ANSI-C literals that can crash the launch). Instead: write the task to a
-  # file, and write a tiny ALL-ASCII launcher script. `herdr pane run` only
-  # ever sees the launcher's path — zero escaping, zero multibyte on argv.
-  local taskfile="$SETTINGS_DIR/$id.task"
-  local launcher="$SETTINGS_DIR/$id.launch.sh"
-  local statusfile="$SETTINGS_DIR/$id.status"   # launcher writes its start outcome here
-
-  # Prepend a short SITUATIONAL-CONTEXT header to the task. Without it a subagent
-  # only knows its task — not that it lives in a swarm graph, nor that it can
-  # spawn its own children. The header is environmental fact (who you are, what
-  # world you're in, where to read the rules), not instruction; whether/how to
-  # use any of it stays the subagent's judgment. Its own task follows, clearly
-  # delimited. `env_doc` points at the same world description the top coordinator
-  # read. The world is referenced via `swarm world` (a command), not a path, so
-  # it stays correct on any machine the package is installed on.
-  local parent_desc; [ -n "$parent" ] && parent_desc="agent \`$parent\`" || parent_desc="the human operator"
-  {
-    printf 'You are a subagent in a swarm — a graph of Claude agents working toward a goal.\n'
-    printf 'Your agent id: %s. Your parent (who delegated to you and approves your work): %s.\n' "$id" "$parent_desc"
-    printf 'You have the `swarm` CLI: you can see the whole graph (`swarm graph`) and, if this\n'
-    printf 'task is large enough to be worth dividing, spawn your own children to help (`swarm\n'
-    printf 'spawn`). How you reach the goal is yours. The world you operate in — what is\n'
-    printf 'reliable, how work is judged and approved, whom you talk to — run `swarm world` to\n'
-    printf 'read it (do this if you intend to coordinate others). Produce your result as a\n'
-    printf 'concrete, inspectable artifact (code, a PR, a file, a document) so your parent can\n'
-    printf 'judge it without reading your session.\n\n'
-    printf -- '--- RECONCILE, THEN CHECKPOINT (do this before you go idle) ---\n'
-    printf 'Before you go idle — after one quick task, or at the end of a long life — run ONE\n'
-    printf 'ritual: first RECONCILE toward your goal, then write the result to your durable\n'
-    printf 'checkpoint at `%s`.\n\n' "$STATE_DIR/$id.json"
-    printf 'RECONCILE (do not skip to a reflexive "all good" — argue against yourself):\n'
-    printf '  1. State your mission/current task in one sentence FROM YOUR STATE FILE — not a\n'
-    printf '     paraphrase of what you happen to be doing (catches goal drift).\n'
-    printf '  2. Name the concrete evidence that WOULD show you are OFF track — the observation\n'
-    printf '     that, if you saw it, means this will not converge. (Commit to a falsifier.)\n'
-    printf '  3. Now look: is any of that evidence present? For EACH child you have (survey via\n'
-    printf '     `swarm children` + read each child state file at state/<child>.json): is its\n'
-    printf '     checkpoint fresh, its status non-blocked, its delegations actually closing? Is\n'
-    printf '     your own progress materially different from last time, or are you repeating\n'
-    printf '     yourself (a stalled "in-flight" across cycles is presumptive at-risk)?\n'
-    printf '  4. Verdict + the ONE thing most likely to make you miss your goal. Then ACT on it\n'
-    printf '     — you have FULL autonomy over your own layer: steer a child (`swarm send`),\n'
-    printf '     close a child and spawn a different one, spawn more, or (if the gap is beyond\n'
-    printf '     your authority) ESCALATE up (see format below). A childless agent that finds\n'
-    printf '     its task is decomposable delegates here — that is the loop working.\n\n'
-    printf 'CHECKPOINT: write the reconciliation into your state file — mission, tasks[] (each\n'
-    printf 'with status/progress/delegated_to/blockers), overall status/progress_summary, and\n'
-    printf 'context usage. status/blockers ARE the reconciliation output; there is no separate\n'
-    printf 'log. Run `swarm checkpoint --help` for the schema + `--context` for your usage. A\n'
-    printf 'seed checkpoint already holds your mission; grow tasks[] as work arrives.\n\n'
-    printf 'ESCALATION FORMAT (when step 4 exceeds your authority, `swarm send` it to your parent):\n'
-    printf '  GOAL: <your objective>\n'
-    printf '  GAP: <the specific way current setup will NOT converge>\n'
-    printf '  EVIDENCE: <the falsifier from step 3 that is now present>\n'
-    printf '  OPTIONS CONSIDERED: <what you weighed and why each is beyond your authority>\n'
-    printf '  ASK: <the specific decision/action you need>\n\n'
-    printf 'This reconcile-then-checkpoint loop is not policed by any hook — it is your duty and\n'
-    printf 'your checkpoint is the judged artifact. See `swarm world` for the full contract.\n\n'
-    printf -- '--- YOUR TASK ---\n'
-    printf '%s' "$task"
-  } > "$taskfile"
-  rm -f "$statusfile"
-
-  # The launcher ("start shell") pre-flights the harness and records the
-  # outcome to $statusfile BEFORE exec, so spawn can tell whether claude
-  # actually started. If claude is missing or the settings file is bad, it
-  # writes "failed: <reason>" and leaves the pane holding the error instead of
-  # silently dying — the coordinator sees the disruption at spawn time.
-  {
-    echo '#!/usr/bin/env bash'
-    echo 'set -uo pipefail'
-    printf 'STATUS=%q\n' "$statusfile"
-    # 1. harness on PATH?
-    echo 'if ! command -v claude >/dev/null 2>&1; then'
-    echo '  echo "failed: claude not found on PATH" > "$STATUS"'
-    echo '  echo "[swarm] ERROR: claude not found on PATH in this pane" >&2'
-    echo '  exec bash'   # keep pane alive so the human/coordinator can read the error
-    echo 'fi'
-    # 2. settings file readable?
-    printf 'if [ ! -r %q ]; then\n' "$settings"
-    printf '  echo "failed: settings unreadable: %q" > "$STATUS"\n' "$settings"
-    printf '  echo "[swarm] ERROR: settings file unreadable: %q" >&2\n' "$settings"
-    echo '  exec bash'
-    echo 'fi'
-    # read the whole task file verbatim into $PROMPT (preserves unicode, quotes, newlines)
-    printf 'PROMPT="$(cat %q)"\n' "$taskfile"
-    # 3. mark launching, then RUN claude (do NOT exec — exec would replace this
-    #    process and discard our ability to detect an immediate exit). We keep
-    #    the launcher alive as claude's parent so that if claude dies right away
-    #    (bad flag, crash) we overwrite the status with the real exit code. On a
-    #    normal interactive session claude runs until the human/coordinator ends
-    #    it, and this launcher simply waits on it (the pane stays live).
-    echo 'echo "launching" > "$STATUS"'
-    if [ -n "$model" ]; then
-      printf 'claude --settings %q --model %q "$PROMPT"\n' "$settings" "$model"
-    else
-      printf 'claude --settings %q "$PROMPT"\n' "$settings"
-    fi
-    echo 'rc=$?'
-    # If claude exits almost immediately, it (very likely) failed to start; flag
-    # it. A long-lived session that later exits cleanly also lands here, but by
-    # then the agent has done its work and the hook already reported — the
-    # status is only consulted during the spawn readiness window.
-    echo 'if [ "$rc" -ne 0 ]; then echo "failed: claude exited code $rc" > "$STATUS"; fi'
-    # keep the pane on a shell so its output stays inspectable after claude ends
-    echo 'exec bash'
-  } > "$launcher"
-  chmod +x "$launcher"
-
-  # Open a new herdr TAB for this subagent (full-width pane; coordinator's
-  # own view is untouched) and capture its root pane id. The env is set on
-  # the tab's pane so BOTH the child's swarm CLI and its hook resolve state:
-  #   SWARM_DIR      = the swarm root. Its agents/ updates/ inbox/ state/ sit
-  #                    directly beneath — one swarm per project, no nesting.
-  #   SWARM_AGENT_ID = this subagent's stable id (used by the hook + whoami).
-  # The hook resolves its updates/ and inbox/ from SWARM_DIR under this same
-  # contract (see bin/swarm-hook.cjs) — CLI and hook must stay in lockstep.
-  local pane tab
-  local tabjson
-  tabjson=$(herdr tab create --cwd "$cwd" --no-focus --label "$id" \
-           --env "SWARM_DIR=$SWARM_DIR" \
-           --env "SWARM_AGENT_ID=$id" --env "SWARM_AGENT_LABEL=$label")
-  pane=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null || true)
-  tab=$(printf '%s' "$tabjson" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["tab"]["tab_id"])' 2>/dev/null || true)
-  [ -n "$pane" ] || die "herdr tab create failed"
-  # Run the launcher by path — plain ASCII, no prompt on the command line.
-  herdr pane run "$pane" "$launcher"
-
-  # Register the subagent NOW, before the readiness wait. The reliable record
-  # of "this agent exists" is the registry + the hook — NOT a screen-detection
-  # poll. Registering first means a slow-to-detect-but-actually-running agent
-  # is never lost from the roster.
-  ROLE="${role:-}" python3 - "$AGENTS_DIR/$id.json" "$id" "$label" "$pane" "$model" "$cwd" "$task" "$parent" <<'PY'
-import json,sys,os
-_,f,id,label,pane,model,cwd,task,parent = sys.argv
-rec={"id":id,"label":label,"pane":pane,"model":model,"cwd":cwd,"task":task,"parent":parent}
-if os.environ.get("ROLE"): rec["role"]=os.environ["ROLE"]
-json.dump(rec,open(f,"w"))
-PY
-
-  # Seed EVERY agent's goal-status checkpoint (Thread C) — all agents are standing.
-  # mission = --role if given, else derived from the label/task; tasks[] starts
-  # with the delegated task; the agent grows it. Seeding means the restore hook
-  # always has a file to inject and the agent starts from a well-formed envelope.
-  ROLE="${role:-}" LABEL="$label" MODEL="$model" TASK="$task" AID="$id" \
-    python3 - "$STATE_DIR/$id.json" <<'PY'
-import json,sys,os,time,re
-f=sys.argv[1]
-role=os.environ.get("ROLE","").strip()
-task=os.environ.get("TASK","").strip()
-label=os.environ.get("LABEL","").strip()   # == the agent's slug id
-
-def clip(s,limit):
-    """Shorten to <=limit chars WITHOUT cutting mid-word.
-
-    A string that already fits is returned byte-for-byte: no ellipsis, no
-    reformatting. Otherwise cut at the last whitespace inside the budget and
-    mark the elision, so the hook never re-injects a mangled half-word.
-    """
-    if len(s)<=limit: return s             # already fits: reproduce it EXACTLY
-    s=" ".join(s.split())
-    if len(s)<=limit: return s
-    head=s[:limit-1]                       # leave room for the ellipsis
-    cut=head.rsplit(None,1)[0] if " " in head else head
-    return cut.rstrip(" ,;:.-")+"…"
-
-def gist(s,limit):
-    """A clean one-liner for s: prefer its first sentence, else a word-safe clip."""
-    if len(s)<=limit: return s              # already fits: reproduce it EXACTLY
-    first=re.split(r'(?<=[.!?])\s+',s,maxsplit=1)[0] if s else ""
-    first=" ".join(first.split())
-    if first and len(first)<=limit: return first
-    return clip(s,limit)
-
-# mission: explicit role wins; else derive a sensible one-liner from the slug + task.
-if role: mission=role
-elif label: mission=clip(f"{label}: {gist(task,100)}",120)
-else: mission=gist(task,120) or "mission to be refined from my task"
-json.dump({
-  "agent":os.environ["AID"],"role":role,
-  "model":os.environ.get("MODEL",""),"updated_ts":int(time.time()*1000),"seq":0,
-  "mission":mission,
-  "tasks":[{"id":"t1","title":gist(task,120),
-            "status":"in-progress","progress":"just spawned","delegated_to":[],"blockers":[]}],
-  "status":"on-track","progress_summary":"seeded at spawn; not yet reconciled",
-  "open_threads":[],"context":{},"work_cache":{}
-},open(f,"w"))
-PY
-
-  # Confirm the harness STARTED, using the LAUNCHER'S OWN signal — the status
-  # file it writes ("launching" once claude is exec'd, "failed: ..." if
-  # pre-flight fails). This is a real fired event, not herdr's flaky
-  # screen-detection of agent==claude (which lags on cold/slow starts and gave
-  # false "did not start" negatives that killed live agents).
-  #
-  # Outcomes:
-  #   failed   -> launcher detected a real problem (claude missing / bad
-  #               settings / immediate exit). Tear the dead tab down, error.
-  #   started  -> status is "launching": claude was exec'd successfully. Done.
-  #   unknown  -> timed out with NO status at all. Ambiguous, NOT proof of
-  #               death. Keep the agent (already registered), warn, return ok.
-  local ready_timeout="${SWARM_READY_TIMEOUT:-30}"
-  local t0; t0=$(date +%s) ; local outcome="unknown"
-  while :; do
-    if [ -f "$statusfile" ]; then
-      if grep -q '^failed' "$statusfile" 2>/dev/null; then outcome="failed"; break; fi
-      if grep -q '^launching' "$statusfile" 2>/dev/null; then outcome="started"; break; fi
-    fi
-    if [ $(( $(date +%s) - t0 )) -ge "$ready_timeout" ]; then outcome="unknown"; break; fi
-    sleep 1
-  done
-
-  if [ "$outcome" = "failed" ]; then
-    local reason; reason=$(cat "$statusfile" 2>/dev/null || echo "no status recorded")
-    # Only tear down on a CONFIRMED failure — never on ambiguity.
-    if [ -n "$tab" ]; then herdr tab close "$tab" >/dev/null 2>&1 || true
-    else herdr pane close "$pane" >/dev/null 2>&1 || true; fi
-    # The registry record goes; the NAME stays burned in the ledger. A failed
-    # spawn still consumed that id (its settings/state/task files bear it), and
-    # a name must only ever mean one agent.
-    rm -f "$AGENTS_DIR/$id.json"
-    die "subagent $id did not start: $reason  [pane $pane]"
-  fi
-
-  if [ "$outcome" = "unknown" ]; then
-    # Started shell never recorded status within the window. The agent is
-    # very likely running fine (slow launcher/FS); do NOT kill it. Warn so the
-    # coordinator knows to verify via the update inbox, and keep the agent.
-    echo "swarm: warning: $id launch unconfirmed after ${ready_timeout}s (no status file yet); keeping it — verify via 'swarm updates --id $id'  [pane $pane]" >&2
-  fi
-
-  echo "$id"  # coordinator uses this id for send/wait
-}
-
-# ------------------------------------------------------------------ send
-# swarm send <id> --stdin        (recommended: body read from stdin)
-# swarm send <id> "<message>"    (short, quote-free strings only)
-#
-# A positional body is a shell word. Backticks and $(...) are EXECUTED by the
-# caller's shell, and an apostrophe terminates a single-quoted string, before
-# swarm is invoked — so the tool cannot see, warn about, or recover the damage.
-# Observed four times across two agents: one send delivered zero bytes, one
-# arrived with words deleted mid-sentence. `--stdin` never makes the body a
-# shell word. `cmd_spawn` already writes its task to a file for this reason.
-#
-# Durable inbox delivery. Instead of typing the message into the target's live
-# TUI pane (fragile, no delivery guarantee), we write ONE JSON message file to
-# the target's durable inbox and then fire a best-effort "doorbell" — a short
-# non-empty prompt ("check inbox") submitted to the pane — to trigger a turn
-# boundary now so the agent's UserPromptSubmit inbox-check hook picks the message
-# up in near-realtime. (A BARE Enter is a no-op in Claude Code: an empty prompt
-# does NOT fire UserPromptSubmit, so the doorbell must submit non-empty text. The
-# doorbell text itself is irrelevant — the hook injects the real message content
-# regardless.) The inbox FILE is the source of truth: if the pane is
-# missing/unavailable the message is already durably written and will be picked
-# up on the agent's next turn, so a missing doorbell only delays pickup — it
-# never loses a message.
-#
-# `operator` is a valid target too: it is the human root, WORLD.md's terminal
-# escalation address. It is not an agent — no registry record, no pane, no
-# lifecycle — so it skips exactly two things and nothing else: the registry
-# existence guard, and the doorbell (there is no pane to ring). The message file
-# it receives is byte-for-byte the same shape an agent gets, in inbox/operator/.
-# Every other id still fails hard on a typo.
-cmd_send() {
-  init_swarm_paths
-  local id="" msg="" from_stdin="" have_msg=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --stdin) from_stdin=1; shift;;
-      -*)      die "unknown flag: $1";;   # `send --help` is handled by the dispatcher
-      *)       if [ -z "$id" ]; then id="$1"; else msg="$1"; have_msg=1; fi; shift;;
-    esac
-  done
-
-  # `--stdin` reads the body as BYTES off stdin, so it never becomes a shell word.
-  # That is the whole point: a body containing backticks, $(...), or an apostrophe
-  # is mangled or destroyed by the CALLER's shell long before this function runs,
-  # and swarm cannot see or recover it. `cmd_spawn` already writes its task to a
-  # file for exactly this reason (see the note above it). Passing both a positional
-  # body and --stdin is an error rather than a silent precedence rule — quietly
-  # ignoring one of two bodies is the same class of trap.
-  if [ -n "$from_stdin" ]; then
-    [ -z "$have_msg" ] || die "send: --stdin takes the body from stdin; do not also pass a positional <message>"
-    [ ! -t 0 ] || die "send --stdin: no message on stdin (pipe or redirect one in)"
-    msg="$(cat; printf x)"; msg="${msg%x}"   # preserve trailing newlines exactly
-    [ -n "$msg" ] || die "send --stdin: empty message on stdin"
-  fi
-
-  [ -n "$id" ] && [ -n "$msg" ] || die 'send needs: swarm send <id> "<message>"  (or: … <id> --stdin)'
-
-  # Size limit — enforced at the SOURCE, before anything is written.
-  #
-  # The delivery hook's injection CAP is 8000 chars TOTAL (header, per-message
-  # framing, and trailer come out of that same budget). A message that cannot fit
-  # one turn's injection whole must either be truncated or held back, and both are
-  # ways of not delivering what the sender wrote. So the send limit sits
-  # meaningfully below 8000, and any ACCEPTED message is guaranteed to fit a
-  # single turn's injection intact. That guarantee is what makes the cap honest.
-  #
-  # 6000 bytes. Measured over every message this swarm has ever sent (n=75):
-  # median 3201, p90 5133, max 11103. A 6000-byte limit accepts 97.3% (73/75) and
-  # rejects only the two largest — both of which are exactly the "paste a file
-  # into a message" case this error tells you to fix. Bytes, not characters: the
-  # inbox record is UTF-8 on disk and the pipe buffer counts bytes.
-  local SEND_LIMIT=6000
-  local nbytes; nbytes=$(printf %s "$msg" | wc -c | tr -d ' ')
-  if [ "$nbytes" -gt "$SEND_LIMIT" ]; then
-    die "message too big ($nbytes > $SEND_LIMIT); store large content as a file and reference its path in the message."
-  fi
-
-  # Validate the target exists (and get its pane for the doorbell). The operator
-  # has neither: it is a durable-file-only mailbox.
-  local pane=""
-  if [ "$id" != "operator" ]; then
-    local reg="$AGENTS_DIR/$id.json"; [ -e "$reg" ] || die "unknown agent: $id"
-    pane="$(json_get "$reg" pane)"
-  fi
-
-  # Sender: the calling agent's id if we're a subagent, else "operator"
-  # (a human/root coordinator that has no agent id of its own).
-  local from="${SWARM_AGENT_ID:-operator}"
-
-  # Write the message atomically (tmp + rename) into the target's inbox. The
-  # filename is <ts_ms>-<from>.json so files sort by arrival time.
-  local inbox="$INBOX_DIR/$id"
-  mkdir -p "$inbox" || die "cannot create inbox dir: $inbox"
-  local ts; ts="$(date +%s%3N)"
-  # date +%3N is GNU-only; fall back to a millisecond stamp via python if needed.
-  case "$ts" in *N|"") ts="$(python3 -c 'import time;print(int(time.time()*1000))')";; esac
-  local file="$inbox/$ts-$from.json"
-  local tmp="$file.tmp"
-  TO="$id" FROM="$from" TS="$ts" BODY="$msg" OUT="$tmp" python3 - <<'PY'
-import json,os
-rec={"id":f"{os.environ['FROM']}-{os.environ['TS']}",
-     "to":os.environ["TO"],"from":os.environ["FROM"],
-     "ts":int(os.environ["TS"]),"type":"message",
-     "body":os.environ["BODY"],"read":False}
-json.dump(rec,open(os.environ["OUT"],"w"))
-PY
-  mv -f "$tmp" "$file" || { rm -f "$tmp"; die "failed to write inbox message for $id"; }
-
-  # Doorbell (best-effort): submit a short NON-EMPTY prompt ("check inbox") to the
-  # pane. A bare Enter is a no-op — Claude Code does not fire UserPromptSubmit for
-  # an empty prompt — so we must submit real text for the inbox-check hook to run
-  # and surface the message now. The doorbell text is never the message itself
-  # (the hook injects the durable inbox content regardless). If the pane is
-  # missing/unavailable we do NOT fail: the file is already durable.
-  #
-  # The operator has no pane BY DESIGN, so it gets no doorbell and no warning —
-  # a missing pane is not an anomaly there. The human reads it with `swarm
-  # updates`.
-  if [ "$id" = "operator" ]; then
-    :
-  elif [ -n "$pane" ] && ring_doorbell "$pane"; then
-    :
-  else
-    echo "swarm: note: doorbell to $id skipped (pane unavailable); message is durably queued and will be picked up on $id's next turn" >&2
-  fi
-}
-
-# Ring the doorbell: submit a short non-empty prompt to the pane so the target's
-# UserPromptSubmit inbox-check hook fires. herdr's send-text delivers via
-# bracketed paste (arrives asynchronously), so we wait until the pasted text has
-# settled in the prompt box before pressing Enter, then confirm the box drained —
-# retrying Enter a bounded number of times. Returns 0 on a submitted doorbell,
-# non-zero if the pane looks unavailable (so the caller can note it and move on).
-ring_doorbell() {
-  local pane="$1" prev="" cur="" i settled=0
-  herdr pane send-text "$pane" 'check inbox' >/dev/null 2>&1 || return 1
-  # Phase 1 — wait for the pasted text to settle (bounded ~4s).
-  for i in $(seq 1 20); do
-    cur="$(herdr pane read "$pane" --source visible --lines 40 2>/dev/null \
-           | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//')"
-    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then settled=1; break; fi
-    prev="$cur"; sleep 0.2
-  done
-  # Phase 2 — submit and confirm the box drained; retry Enter if not (bounded).
-  local attempt
-  for attempt in 1 2 3 4 5; do
-    herdr pane send-keys "$pane" Enter >/dev/null 2>&1 || return 1
-    sleep 0.4
-    cur="$(herdr pane read "$pane" --source visible --lines 40 2>/dev/null \
-           | grep -a '❯' | tail -1 | sed 's/^[[:space:]]*❯[[:space:]]*//')"
-    [ -z "$cur" ] && return 0
-    sleep 0.3
-  done
-  # Never confirmed an empty box, but we did send text + Enter; treat as rung
-  # (best-effort). The durable inbox guarantees delivery regardless.
-  return 0
-}
-
-# ------------------------------------------------------------------ updates
-# swarm updates [--id X] [--json]   — read inbound hook records.
-#
-# `updates` is the "what came in for me" verb, so when the OPERATOR runs it
-# (SWARM_AGENT_ID unset/empty — the same test cmd_send uses to name the human
-# root) it ALSO shows inbox/operator/: the escalations agents sent up. Agents
-# get their inbox injected by the inbox-check hook; the operator has no hook, so
-# this is its read path. An --id filter targets a specific AGENT's reports, so it
-# suppresses the operator inbox. An empty inbox is a silent no-op.
-#
-# READING NEVER DESTROYS. `updates` — in EVERY form, including --json — leaves
-# the operator's mail exactly where it found it. Consuming it takes a deliberate
-# second step: `swarm inbox ack <id>`.
-#
-# It used to mark read. `cmd_updates` printed, flushed, then called mark_read(),
-# which moved every surfaced message into read/ — on the --json path too. So any
-# script polling `swarm updates --json` silently consumed the operator's
-# escalations and left no trace on any terminal. The operator has no hook and no
-# turn: unlike an agent, nothing re-offers a message it never saw. Destroying on
-# read was therefore strictly worse here than anywhere else in the system, and it
-# is now gone. See `cmd_inbox` for the read/ack verbs that replace it.
-cmd_updates() {
-  init_swarm_paths
-  local only_id="" as_json=""
-  while [ $# -gt 0 ]; do
-    case "$1" in --id) only_id="$2"; shift 2;; --json) as_json=1; shift;; *) die "unknown flag: $1";; esac
-  done
-  # The operator (no SWARM_AGENT_ID) also drains its own inbox; agents never do.
-  local op_inbox=""
-  if [ -z "${SWARM_AGENT_ID:-}" ] && [ -z "$only_id" ]; then op_inbox="$INBOX_DIR/operator"; fi
-  python3 - "$UPDATES_DIR" "$only_id" "${as_json:-}" "$op_inbox" <<'PY'
-import json,os,sys
-d,only,as_json,op = sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
-recs=[]
-for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(d,fn)))
-    except: continue
-    if only and r.get("id")!=only: continue
-    recs.append(r)
-
-# A message written before the id field existed has no `id`. The filename IS the
-# id, reordered: `<ts>-<from>.json` <-> `<from>-<ts>`. Derive it on load, so every
-# reader below sees a claimable id instead of the `?` placeholder — an unackable
-# message is permanently outstanding once reading stopped consuming.
-def with_id(fn,r):
-    if not r.get("id"):
-        stem=fn[:-len(".json")]
-        ts,_,frm=stem.partition("-")
-        if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
-    return r
-
-# Outstanding operator mail = UNACKED mail = *.json directly under inbox/operator/
-# (never rendered) PLUS inbox/operator/rendered/ (shown once, still unacked). Only
-# inbox/operator/read/ is done. Same three-state layout, same filter, same sort as
-# the agent inbox-check hook. The operator has no hook, so rendered/ is normally
-# empty in its box — but the definition of "outstanding" is one definition.
-mail=[]
-if op and os.path.isdir(op):
-    for d in (op, os.path.join(op,"rendered")):
-        if not os.path.isdir(d): continue
-        for fn in sorted(os.listdir(d)):
-            if not fn.endswith(".json"): continue
-            try: r=json.load(open(os.path.join(d,fn)))
-            except: continue
-            if isinstance(r.get("body"),str): mail.append((fn,with_id(fn,r)))
-    mail.sort(key=lambda x: int(x[1].get("ts") or 0))
-
-# Reading is NON-DESTRUCTIVE: nothing is moved into read/ here, on any path.
-# `swarm inbox ack <id>` is the only thing that consumes operator mail.
-
-if as_json:
-    # Shape depends on WHO asks, never on whether mail happens to exist:
-    #   agents / --id  -> the historical bare array of update records
-    #   operator       -> {"updates":[...], "inbox":[...]}  (inbox may be [])
-    # A poller therefore sees one stable schema, empty inbox or not.
-    print(json.dumps({"updates":recs,"inbox":[r for _,r in mail]},indent=2) if op
-          else json.dumps(recs,indent=2))
-    sys.exit(0)
-
-import datetime
-if not recs and not mail:
-    print("(no updates)"); sys.exit(0)
-for r in recs:
-    t=datetime.datetime.fromtimestamp(r.get("ts",0)/1000).strftime("%H:%M:%S")
-    print(f"[{t}] {r.get('id')} {r.get('label','')} {r.get('state','').upper()}: {r.get('summary','') or '(no summary)'}")
-if mail:
-    print(f"\n[swarm inbox] {len(mail)} unread message(s) to operator:")
-    for _,r in mail:
-        t=datetime.datetime.fromtimestamp(int(r.get("ts") or 0)/1000).strftime("%H:%M:%S")
-        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}] ---\n{r.get('body','')}")
-    print(f"\nThese stay unread until acknowledged: swarm inbox ack {mail[-1][1].get('id','<id>')}")
-PY
-}
-
-# ------------------------------------------------------------------- inbox
-# swarm inbox read [--json]     — show MY unacked messages. Never consumes.
-# swarm inbox ack <message-id>  — consume everything up to and including <id>.
-#
-# THREE states on disk (operator ruling, 2026-07-09). A mailbox holds:
-#   inbox/<me>/*.json            never delivered   -> outstanding
-#   inbox/<me>/rendered/*.json   delivered, unacked-> outstanding (agents only:
-#                                the hook renders; nothing else writes here)
-#   inbox/<me>/read/*.json       acked             -> done
-# "Unacked" (what `read` shows and what `ack` sweeps) is the union of the first
-# two. Being SHOWN a message is not acknowledging it — that conflation is the bug
-# proposal 005 documents happening in the wild.
-#
-# WHOSE inbox: the caller's. An agent (SWARM_AGENT_ID set) reads inbox/<id>/; the
-# operator (unset) reads inbox/operator/. Same layout, same files, same records —
-# but deliberately NOT the same code path as the agent delivery hook, which is
-# Node. That duplication is load-bearing, not laziness: the hook writes its
-# payload to a ~64 KiB pipe and Node discards whatever is still queued at
-# process.exit(), which is how G17 destroyed every message over ~64 KB. Python
-# flushes on exit. The operator's mailbox is the one inbox G17 could never reach,
-# and it was spared *by accident* — because it is read from here. Unifying the two
-# readers would hand the operator's channel the agent path's bug. Proposal 005's
-# verdict is "unify nothing", and this comment is why.
-#
-# WHAT ACK MEANS: acknowledgement is CUMULATIVE over arrival order (`ts`, which is
-# embedded in every message id as `<from>-<ts>`). `ack X` consumes X and every
-# outstanding message that arrived before it. Three rules make that deliberate
-# rather than a footgun, and all three are enforced below:
-#
-#   1. `read` PRINTS IDS. You cannot ack what you were never shown.
-#   2. `ack` NAMES THE HIGHEST ID being claimed — never a count, never a range.
-#   3. THERE IS NO `--all`. Not a hidden one, not an alias. Acking is a claim
-#      about specific messages you have read; a verb that means "whatever is in
-#      there" is a claim about nothing.
-#
-# And the sharp edge, called out in the proposal (~L208): `ack N+2` silently
-# consumes N+1. That is the adopted semantics — a monotonic watermark, the same
-# prefix-ack the injection cap has always performed implicitly. What we refuse is
-# for it to be *silent*: ack names every id it swept, so consuming an unread
-# instruction is something you can see you did. An id that is not currently
-# outstanding is an ERROR, never a silent no-op — otherwise a typo'd ack, or one
-# replayed against an already-drained inbox, would report success having done
-# nothing at all.
-cmd_inbox() {
-  init_swarm_paths
-  local sub="${1:-}"; shift || true
-  case "$sub" in
-    read|ack) :;;
-    "") die 'inbox needs: swarm inbox read [--json] | swarm inbox ack <message-id>';;
-    *) die "unknown inbox subcommand: $sub (expected: read | ack)";;
-  esac
-
-  # The caller's own mailbox. Agents never read another agent's inbox.
-  local me="${SWARM_AGENT_ID:-operator}"
-  local box="$INBOX_DIR/$me"
-
-  local as_json="" want_id=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --json) as_json=1; shift;;
-      # Named explicitly so the refusal is a message, not an "unknown flag". An
-      # ack-all is the one thing this design will not have: acking is a claim
-      # about messages you have read, and "--all" claims nothing in particular.
-      --all) die "there is no 'swarm inbox $sub --all'. Ack names the highest message id you are claiming: swarm inbox ack <message-id>";;
-      -*) die "unknown flag: $1";;
-      *) [ -z "$want_id" ] || die "ack takes exactly one message id"; want_id="$1"; shift;;
-    esac
-  done
-
-  if [ "$sub" = "ack" ]; then
-    [ -n "$want_id" ] || die "ack needs the highest message id you are claiming: swarm inbox ack <message-id> (see 'swarm inbox read'). There is no ack-all."
-    [ -z "$as_json" ] || die "ack takes no --json"
-  else
-    [ -z "$want_id" ] || die "read takes no arguments"
-  fi
-
-  SUB="$sub" BOX="$box" ME="$me" WANT="$want_id" AS_JSON="${as_json:-}" python3 - <<'PY'
-import json,os,sys,datetime
-
-sub,box,me,want,as_json = (os.environ["SUB"],os.environ["BOX"],os.environ["ME"],
-                           os.environ["WANT"],os.environ["AS_JSON"])
-
-# A message written before the id field existed has no `id`. The filename IS the
-# id, reordered: `<ts>-<from>.json` <-> `<from>-<ts>`. Derive it on load, so a
-# legacy message can be named — and therefore acked. Without this it displays as
-# `[id ?]` and, since reading no longer consumes, stays outstanding forever.
-def with_id(fn,r):
-    if not r.get("id"):
-        stem=fn[:-len(".json")]
-        ts,_,frm=stem.partition("-")
-        if ts.isdigit() and frm: r["id"]=f"{frm}-{ts}"
-    return r
-
-# OUTSTANDING = UNACKED = *.json directly under the box (never rendered) PLUS
-# everything under rendered/ (shown to the agent once, still unacknowledged).
-# Only read/ is finished. Identical filter and sort to the agent hook, so both
-# readers agree on what "outstanding" and "arrival order" mean.
-#
-# Carrying rendered/ here is load-bearing, not tidiness: after the hook renders a
-# message the agent can no longer see it under inbox/, and if `read` did not show
-# it the agent could not learn the id it needs to ack — a self-lockout with no
-# exit. `read` shows it; `ack` sweeps it.
-mail=[]                                     # [(dir, fn, rec)]
-for d in (box, os.path.join(box,"rendered")):
-    if not os.path.isdir(d): continue
-    for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".json"): continue
-        try: r=json.load(open(os.path.join(d,fn)))
-        except Exception: continue          # unreadable/corrupt: never crash a reader
-        if isinstance(r.get("body"),str): mail.append((d,fn,with_id(fn,r)))
-mail.sort(key=lambda x: int(x[2].get("ts") or 0))
-def is_rendered(d): return os.path.basename(d)=="rendered"
-
-def ts_of(r):
-    try: return int(r.get("ts") or 0)
-    except Exception: return 0
-
-if sub == "read":
-    if as_json:
-        # Bare array of the on-disk records, unchanged. `delivered` is derived
-        # (the file's location), added as an extra key — readers that ignore it
-        # see exactly the record they saw before.
-        print(json.dumps([dict(r,delivered=is_rendered(d)) for d,_,r in mail],indent=2)); sys.exit(0)
-    if not mail:
-        print(f"[swarm inbox] {me}: no unacked messages"); sys.exit(0)
-    print(f"[swarm inbox] {me}: {len(mail)} unacked message(s):")
-    for d,_,r in mail:
-        t=datetime.datetime.fromtimestamp(ts_of(r)/1000).strftime("%H:%M:%S")
-        seen=" [already delivered to your context; unacked]" if is_rendered(d) else " [not yet delivered]"
-        print(f"\n--- from {r.get('from','?')} ({t}) [id {r.get('id','?')}]{seen} ---\n{r.get('body','')}")
-    print(f"\nStill unacked. To consume through the last one: swarm inbox ack {mail[-1][2].get('id','<id>')}")
-    sys.exit(0)
-
-# ------------------------------------------------------------------- ack
-# The named id must be OUTSTANDING right now. Not "already acked", not "never
-# existed", not "sitting in someone else's box" — outstanding here, in this
-# mailbox. Anything else is an error with a nonzero exit, because the caller
-# believes it consumed something and must find out that it did not.
-def already_acked(mid):
-    """Was `mid` acknowledged earlier? Purely to make the error message useful."""
-    rd=os.path.join(box,"read")
-    if not os.path.isdir(rd): return False
-    for f in os.listdir(rd):
-        if not f.endswith(".json"): continue
-        try:
-            # Same id derivation as the unread loader: a legacy message that was
-            # already acked still has no `id` field, and must still be recognised.
-            if with_id(f,json.load(open(os.path.join(rd,f)))).get("id")==mid: return True
-        except Exception: continue
-    return False
-
-target=[(d,fn,r) for d,fn,r in mail if r.get("id")==want]
-if not target:
-    if already_acked(want):
-        print(f"swarm: message '{want}' is already acknowledged (nothing to do)",file=sys.stderr)
-    else:
-        print(f"swarm: no outstanding message with id '{want}' in {me}'s inbox",file=sys.stderr)
-    known=sorted(r.get("id","?") for _,_,r in mail)
-    print(f"swarm: outstanding ids: {', '.join(known)}" if known
-          else "swarm: (inbox is empty — nothing is outstanding)",file=sys.stderr)
+# Hook entrypoints (argv-dispatched; wired per agent via `claude --settings`):
+#   deliver   UserPromptSubmit — inject exactly ONE queued message, oldest first
+#   event     Stop/Notification — overwrite the event fact; on Stop, re-ring
+#   restore   SessionStart — re-inject the original task + the journal tail
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
+JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
+LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
+NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}$"
+
+# ---------------------------------------------------------------- primitives
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def die(msg):
+    print(f"swarm: {msg}", file=sys.stderr)
     sys.exit(1)
 
-# Cumulative prefix: this message and everything that arrived at/before it —
-# across BOTH outstanding states. A rendered-but-unacked message and a message
-# that was never rendered are both outstanding, and arrival order is the `ts`,
-# not the directory. `ack` sweeps the prefix from wherever each file sits.
-cutoff = ts_of(target[0][2])
-prefix = [(d,fn,r) for d,fn,r in mail if ts_of(r) <= cutoff]
 
-rd=os.path.join(box,"read")
-try: os.makedirs(rd,exist_ok=True)
-except OSError as e:
-    print(f"swarm: cannot create {rd}: {e}",file=sys.stderr); sys.exit(1)
+def root_dir():
+    return os.environ.get("SWARM_DIR") or os.path.join(os.getcwd(), ".swarm")
 
-acked=[]
-for d,fn,r in prefix:
+
+def my_name():
+    return os.environ.get("SWARM_AGENT_ID") or "operator"
+
+
+def q_dir(root, name):
+    return os.path.join(root, "queue", name)
+
+
+def delivered_dir(root, name):
+    return os.path.join(q_dir(root, name), "delivered")
+
+
+def journal_path(root, name):
+    return os.path.join(root, "journal", f"{name}.md")
+
+
+def agent_rec_path(root, name):
+    return os.path.join(root, "agents", f"{name}.json")
+
+
+def event_path(root, name):
+    return os.path.join(root, "event", f"{name}.json")
+
+
+def settings_dir(root):
+    return os.path.join(root, "settings")
+
+
+def write_atomic(path, text):
+    # Inherited mechanism: tmp + rename. A concurrent reader never sees a
+    # half-written file; the rename IS the state change.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def read_json(path):
     try:
-        os.replace(os.path.join(d,fn),os.path.join(rd,fn))    # atomic; from inbox/ or rendered/
-        acked.append(r)
-    except OSError as e:
-        print(f"swarm: failed to ack {r.get('id','?')}: {e}",file=sys.stderr); sys.exit(1)
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
 
-# Name every id consumed. `ack N+2` really does take N+1 with it; the operator's
-# safety rule is that this is visible, not that it cannot happen.
-print(f"acked {len(acked)} message(s) through {want}:")
-for r in acked:
-    mark = "" if r.get("id")==want else "  (swept by cumulative ack)"
-    print(f"  {r.get('id','?')}  from {r.get('from','?')}{mark}")
-left=len(mail)-len(acked)
-print(f"{left} message(s) still unacked." if left else "Inbox is now empty.")
-PY
-}
 
-# ------------------------------------------------------------------ wait
-# swarm wait <id> [--timeout SEC]  — block until the agent's NEWEST report is a
-# stop state (done | question | blocked | idle), then print it. Driven by the
-# fired hook, with a timeout backstop (never hangs). "question" and "blocked"
-# both mean the agent yielded and needs the coordinator; "done" (and its
-# post-completion "idle" follow-up) mean finished — the coordinator still
-# verifies by reading the pane.
-#
-# Only considers records newer than wait's start (a "since" mark), so a stale
-# `done` from a previous turn doesn't satisfy a fresh wait.
-cmd_wait() {
-  init_swarm_paths
-  local id="${1:-}"; shift || true
-  [ -n "$id" ] || die "wait needs: swarm wait <id> [--timeout SEC]"
-  local timeout=600
-  while [ $# -gt 0 ]; do case "$1" in --timeout) timeout="$2"; shift 2;; *) die "unknown flag: $1";; esac; done
-  local start; start=$(date +%s)
-  local since_ms=$(( start * 1000 ))
-  while :; do
-    local hit
-    hit=$(python3 - "$UPDATES_DIR" "$id" "$since_ms" <<'PY'
-import json,os,sys
-d,only,since=sys.argv[1],sys.argv[2],int(sys.argv[3])
-# newest record for this agent at/after `since`
-best=None
-for fn in (sorted(os.listdir(d)) if os.path.isdir(d) else []):
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(d,fn)))
-    except: continue
-    if r.get("id")!=only: continue
-    if int(r.get("ts",0)) < since: continue
-    if best is None or int(r.get("ts",0)) >= int(best.get("ts",0)): best=r
-if best and best.get("state") in ("done","question","blocked","idle"):
-    print(json.dumps(best))
-else:
-    print("")
-PY
-)
-    if [ -n "$hit" ]; then echo "$hit"; return 0; fi
-    if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
-      echo "swarm: wait timed out for $id after ${timeout}s" >&2; return 1
-    fi
-    sleep 2
-  done
-}
+def read_stdin_json():
+    if sys.stdin.isatty():
+        return None
+    try:
+        raw = sys.stdin.read()
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
 
-# live_panes — the set of pane ids herdr currently reports (ground truth for
-# whether a registered subagent still exists). Empty if herdr isn't reachable.
-live_panes() {
-  herdr pane list 2>/dev/null \
-    | python3 -c 'import sys,json
-try: d=json.load(sys.stdin)
-except: sys.exit(0)
-for p in d.get("result",{}).get("panes",[]): print(p.get("pane_id",""))' 2>/dev/null || true
-}
 
-# ------------------------------------------------------------------ list
-# Reconciles the registry against live herdr panes: a subagent whose pane no
-# longer exists is DEAD (stale). Truth = herdr, not the on-disk registry.
-# --json emits records with a "live" field; --live-only hides dead ones.
-cmd_list() {
-  local as_json="" live_only=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; --live-only) live_only=1; shift;; *) die "unknown flag: $1";; esac; done
-  init_swarm_paths
-  local panes; panes="$(live_panes)"
-  AGENTS_DIR="$AGENTS_DIR" PANES="$panes" AS_JSON="${as_json:-}" LIVE_ONLY="${live_only:-}" python3 <<'PY'
-import json,os,sys
-d=os.environ["AGENTS_DIR"]
-live=set(l for l in os.environ.get("PANES","").splitlines() if l)
-have_herdr = bool(live)  # if we got any panes, herdr answered; else can't judge
-as_json=os.environ.get("AS_JSON"); live_only=os.environ.get("LIVE_ONLY")
-rows=[]
-for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(d,fn)))
-    except: continue
-    pane=r.get("pane","")
-    # unknown if herdr didn't answer; else alive iff pane is in the live set
-    r["live"] = (pane in live) if have_herdr else None
-    rows.append(r)
-if live_only: rows=[r for r in rows if r["live"]]
-if as_json:
-    print(json.dumps(rows,indent=2)); sys.exit(0)
-if not rows:
-    print("(no agents)"); sys.exit(0)
-for r in rows:
-    state = "live" if r["live"] else ("DEAD" if r["live"] is False else "?")
-    print(f"{r.get('id')}\t{r.get('label','')}\t{r.get('model','') or '-'}\t{state}\tpane={r.get('pane','')}")
-PY
-}
+def load_agents(root):
+    d = os.path.join(root, "agents")
+    out = {}
+    if os.path.isdir(d):
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".json"):
+                continue
+            r = read_json(os.path.join(d, fn))
+            if r and r.get("name"):
+                out[r["name"]] = r
+    return out
 
-# ------------------------------------------------------------------ checkpoint
-# swarm checkpoint --help        — print the goal-status state-file schema.
-# swarm checkpoint --context     — read THIS agent's own transcript (resolved by
-#                                  id via state/<id>.transcript, the pointer the
-#                                  hook records) and print its context-window
-#                                  occupancy, so the agent can drop it into its
-#                                  state file. Never falls back to a glob: the
-#                                  newest .jsonl on disk is usually a sibling's.
-# Every agent writes its own state/<id>.json (it's a plain JSON file it fully
-# controls); this verb is a convenience: the schema reference + the verified
-# context-usage reader. It does not write the file for the agent.
-cmd_checkpoint() {
-  local mode="${1:-}"
-  case "$mode" in
-    --help|"" )
-      cat <<'EOF'
-swarm checkpoint — goal-status continuity, kept by EVERY agent (Thread C).
 
-You maintain: .swarm/state/<your-id>.json
-Write it yourself before going idle. Schema:
+def parents_of(agents):
+    return {n: (a.get("parent") or "operator") for n, a in agents.items()}
 
-  {
-    "agent":"<your-slug-id>","role":"...","model":"opus","updated_ts":<ms>,"seq":<n++>,
-    "mission":"why you exist (stable)",
-    "tasks":[ {"id":"t1","title":"...","status":"in-progress|done|blocked|at-risk",
-               "progress":"one line","delegated_to":[{"agent":"csv-importer","expected_artifact":"PR","status":"..."}],
-               "blockers":[]} ],
-    "status":"on-track|at-risk|blocked",
-    "progress_summary":"overall: is my structure right for my load?",
-    "open_threads":[{"id":"...","state":"..."}],
-    "context": <run: swarm checkpoint --context>,
-    "work_cache":{}          // optional per-role efficiency cache (e.g. a manifest ref)
-  }
 
-Reconcile PER TASK ("can I prove convergence on this task?") + one stream-level
-check ("am I structured right — delegate more? wrap up before context runs out?"),
-then write status/blockers to reflect it. Bump seq each time.
+def fmt_ts(ms):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(int(ms) / 1000))
+    except Exception:
+        return "?"
 
-  swarm checkpoint --context   # prints the "context" block for your state file
 
---context prints {"tokens_used":<n>,"transcript":"<path>"} for YOUR OWN transcript,
-resolved by your agent id from the pointer swarm-hook records (state/<id>.transcript).
-If no hook has fired yet it prints {} and explains why on stderr — it will never
-guess, because the newest transcript on disk is usually a sibling agent's.
-EOF
-      ;;
-    --context )
-      # Read the CALLING agent's OWN transcript. Resolution is deterministic and
-      # by-identity — never "newest .jsonl on the machine":
-      #   1. $CLAUDE_TRANSCRIPT_PATH, if the caller explicitly set it (escape hatch).
-      #   2. state/<my-id>.transcript — the pointer swarm-hook records from the
-      #      transcript_path Claude puts on EVERY hook payload. This is the normal path.
-      # There is deliberately NO glob fallback. Every agent in a project shares one
-      # ~/.claude/projects/<slug>/ dir, so the newest .jsonl there is routinely a
-      # SIBLING's — the old fallback silently reported another agent's token count.
-      # A wrong number that looks right is worse than no number: if we cannot prove
-      # the transcript is ours, we report `{}` (unknown) and say why on stderr.
-      # The occupancy = cache_read + cache_creation + input from the last usage block.
-      init_swarm_paths
-      CLAUDE_TRANSCRIPT="${CLAUDE_TRANSCRIPT_PATH:-}" \
-      SWARM_AGENT_ID="${SWARM_AGENT_ID:-}" STATE_DIR="$STATE_DIR" python3 - <<'PY'
-import json,os,sys
-tp=os.environ.get("CLAUDE_TRANSCRIPT","").strip()
-me=os.environ.get("SWARM_AGENT_ID","").strip()
-why=""
-if tp and not os.path.exists(tp):
-    why="CLAUDE_TRANSCRIPT_PATH is set but does not exist"; tp=""
-if not tp:
-    # The pointer the hook records for THIS agent, by id. No id => not a swarm
-    # subagent (e.g. the operator's root shell): nothing to resolve, and guessing
-    # would hand back some agent's transcript at random.
-    if not me:
-        why="SWARM_AGENT_ID is unset (not a swarm subagent)"
-    else:
-        ptr=os.path.join(os.environ["STATE_DIR"], me+".transcript")
+def fmt_age(ms):
+    s = max(0, int(ms / 1000))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+# ---------------------------------------------------------- message delivery
+# A message is a claim on one turn. These functions are the whole of delivery;
+# they are pure file logic so tests can exercise them without a pane.
+
+def relation(sender, recipient, parent_of):
+    """The sender's relation to the recipient, from the recipient's seat.
+
+    Structural sender class (design §3.4b): the header names who is speaking
+    and where they stand, so a directive can never arrive framed as chatter.
+    parent_of maps agent name -> parent name ('operator' at the roots).
+    """
+    if sender == "operator":
+        return "the OPERATOR (the human at the root)"
+    if parent_of.get(recipient) == sender:
+        return "your parent"
+    if parent_of.get(sender) == recipient:
+        return "your child"
+    sp = parent_of.get(sender)
+    if sp and sp == parent_of.get(recipient):
+        return "your sibling"
+    return "another agent"
+
+
+def list_waiting(root, name):
+    """All waiting messages for `name`, oldest first: [(ts, fn, rec)]."""
+    d = q_dir(root, name)
+    out = []
+    if os.path.isdir(d):
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".json"):
+                continue
+            p = os.path.join(d, fn)
+            if not os.path.isfile(p):
+                continue  # skips delivered/ and anything else odd
+            r = read_json(p)
+            if r and isinstance(r.get("body"), str):
+                out.append((int(r.get("ts") or 0), fn, r))
+    out.sort(key=lambda c: (c[0], c[1]))
+    return out
+
+
+def select_next(root, name):
+    """The ONE message this turn: the oldest. Returns (fn, rec, n_more) or None."""
+    waiting = list_waiting(root, name)
+    if not waiting:
+        return None
+    _, fn, rec = waiting[0]
+    return fn, rec, len(waiting) - 1
+
+
+def count_junk(root, name):
+    """Queue files that LOOK like messages but do not parse as one. Counted so
+    `ps` can show them (ruling R4): an honest unknown beats an invisible file.
+    Unreachable via send (atomic JSON writes); a crashed writer could strand one."""
+    d = q_dir(root, name)
+    n = 0
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            p = os.path.join(d, fn)
+            if not fn.endswith(".json") or not os.path.isfile(p):
+                continue
+            r = read_json(p)
+            if not (r and isinstance(r.get("body"), str)):
+                n += 1
+    return n
+
+
+def delivery_head(rec, rel):
+    return (f"[swarm message] from {rec.get('from', '?')} — {rel} — "
+            f"sent {fmt_ts(rec.get('ts'))}\n\n")
+
+
+def build_delivery(fn, rec, rel, to):
+    """The exact text injected into the recipient's turn: whole, sender-headed.
+
+    The injection is head + body, nothing else: no queue-depth trailer (ruling
+    R1 — `ps` shows q=, and the stop re-ring makes a backlog self-draining),
+    so an accepted message is delivered whole unconditionally.
+
+    Returns None when not even a truncation marker fits (a hand-crafted file;
+    send refuses anything that cannot fit whole): the caller must deliver
+    NOTHING and leave the file queued — never delivered ≠ dropped, and a bare
+    header claiming delivery would be the lie WORLD.md forbids (ruling R2).
+    """
+    head = delivery_head(rec, rel)
+    text = head + rec.get("body", "")
+    if len(text) > TURN_CAP:
+        note = f"\n[truncated — full body on disk: queue/{to}/delivered/{fn}]"
+        room = TURN_CAP - len(head) - len(note)
+        if room <= 0:
+            return None
+        text = head + rec.get("body", "")[:room] + note
+    return text
+
+
+def send_size_error(rec, rel):
+    """Refusal reason if this message cannot fit one turn's injection, else None.
+
+    Delivery injects exactly head + body, so this check IS the delivery size:
+    an accepted message is delivered whole at any queue depth. One number, no
+    arithmetic for senders to learn: it fits or you send a file path.
+    """
+    n = len(delivery_head(rec, rel)) + len(rec.get("body", ""))
+    if n > TURN_CAP:
+        return (f"message too big: delivering it would take {n} chars against "
+                f"the {TURN_CAP}-char turn cap — put it in a file, send the path")
+    return None
+
+
+def emit_hook_output(obj):
+    """Write hook JSON to stdout and WAIT for it to drain. True = delivered.
+
+    The G17 discipline, inherited: side effects are conditional on the bytes
+    actually leaving. Python's write()/flush() block until the pipe took the
+    bytes or raise — unlike node, which discarded its queued stdout at exit
+    and silently destroyed every payload over the ~64 KiB pipe buffer.
+    """
+    try:
+        sys.stdout.write(json.dumps(obj))
+        sys.stdout.flush()
+        return True
+    except OSError:
+        # Point fd 1 at /dev/null so the interpreter's own exit-flush of the
+        # broken pipe cannot fail after our exit(0) — without this, python
+        # dies with status 120 and the "any error -> exit 0" promise is false
+        # (ruling R3). The undelivered bytes are already accounted for: the
+        # caller keeps the message queued.
         try:
-            with open(ptr) as fh: tp=fh.read().strip()
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         except OSError:
-            why=f"no transcript recorded yet for '{me}' (no hook has fired); {ptr} is absent"
+            pass
+        return False
+
+
+def next_delivery(root, name, parent_of):
+    """The queue head as it would be delivered: (fn, ctx). ctx is None for an
+    undeliverable head (ruling R2), the whole result is None on an empty queue.
+    The ONE definition of deliverability — deliver_once injects with it and the
+    stop re-ring rings by it, so they cannot disagree (ruling R7)."""
+    sel = select_next(root, name)
+    if not sel:
+        return None
+    fn, rec, _ = sel
+    return fn, build_delivery(fn, rec,
+                              relation(rec.get("from", "?"), name, parent_of),
+                              name)
+
+
+def deliver_once(root, name, parent_of, emit):
+    """Deliver at most ONE message: emit it, and move it to delivered/ ONLY
+    after the emit reports the bytes drained. On a failed emit the file stays
+    put and is offered whole again next turn — the safe direction to fail."""
+    nd = next_delivery(root, name, parent_of)
+    if not nd:
+        return False
+    fn, ctx = nd
+    if ctx is None:
+        # Undeliverable (ruling R2): emit nothing, move nothing. The file
+        # stays visible in `ps` q= — and it blocks the queue behind it, which
+        # is deliberate: silently skipping it would hide a file that only a
+        # hand-crafted write can produce.
+        return False
+    ok = emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                      "additionalContext": ctx}})
+    if ok:
+        try:
+            os.makedirs(delivered_dir(root, name), exist_ok=True)
+            os.replace(os.path.join(q_dir(root, name), fn),
+                       os.path.join(delivered_dir(root, name), fn))
+        except OSError:
+            pass  # worst case: re-delivered next turn; never lost
+    return ok
+
+
+# ----------------------------------------------------------- restore payload
+
+def journal_tail(path, cap=JOURNAL_TAIL_CAP):
+    """The journal's last `cap` chars; a truncation marker points at the rest."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return ""
+    if len(text) <= cap:
+        return text
+    return (f"[…journal truncated to its last {cap} chars — "
+            f"read the full file: {path}]\n") + text[-cap:]
+
+
+def build_restore(task_text, jpath, source):
+    """SessionStart injection: the original task + the journal tail."""
+    resumed = ("AFTER A CONTEXT COMPACTION — your working memory was just "
+               "summarized away; your journal is your most reliable record"
+               if source == "compact" else "a fresh session")
+    tail = journal_tail(jpath)
+    return (f"[swarm restore] You are resuming {resumed}.\n\n"
+            f"--- YOUR ORIGINAL TASK ---\n{task_text}\n\n"
+            f"--- YOUR JOURNAL (tail) ---\n{tail or '(journal is empty)'}\n\n"
+            f"Continue from where the journal leaves off, and keep appending "
+            f"to it as you work.")
+
+
+# --------------------------------------------------------------- event facts
+
+def last_assistant_text(transcript_path):
+    """The last assistant words from the transcript, whitespace-collapsed."""
+    try:
+        if not transcript_path or not os.path.exists(transcript_path):
+            return ""
+        with open(transcript_path) as f:
+            lines = [l for l in f.read().split("\n") if l]
+        for line in reversed(lines):
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            msg = o.get("message")
+            if not msg or msg.get("role") != "assistant":
+                continue
+            c = msg.get("content")
+            if isinstance(c, str):
+                text = c
+            elif isinstance(c, list):
+                text = " ".join(b.get("text", "") for b in c
+                                if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                text = ""
+            text = " ".join(text.split())
+            if text:
+                return text
+        return ""
+    except Exception:
+        return ""
+
+
+def record_event(root, name, kind, last_words, ts):
+    """Overwrite the ONE per-agent event fact: event name, ts, last words.
+    No history, no done/question/blocked taxonomy, no heuristics — `ps` shows
+    the fact and the pane is one command away."""
+    write_atomic(event_path(root, name), json.dumps(
+        {"event": kind, "ts": ts, "last_words": (last_words or "")[:LAST_WORDS_CAP]}))
+
+
+# ------------------------------------------------------------------ ps view
+
+def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
+    """The one view. Pure: every input is a plain value, so it tests offline.
+
+    agents:  {name: record}         live:  set of live pane ids, or None (herdr unknown)
+    queues:  {name: waiting-count}  events:{name: event fact or None}
+    op_mail: [(from, ts)] waiting operator messages, oldest first
+    junk:    {name: unparseable-queue-file count} (ruling R4; may be None)
+
+    Dead agents render compactly — names only, one shared line (ruling R5):
+    the living tree stays one screen however long the swarm's history grows.
+    A live agent under a dead parent reattaches to its nearest living ancestor
+    so hiding the dead never orphans the living.
+    """
+    junk = junk or {}
+    lines = []
+    if op_mail:
+        lines.append(f"operator — {len(op_mail)} message(s) waiting for the human "
+                     f"(queue/operator/):")
+        for frm, ts in op_mail:
+            lines.append(f"    from {frm}, {fmt_age(now - ts)} ago")
+    else:
+        lines.append("operator — no waiting mail")
+
+    def is_dead(a):
+        return live is not None and a.get("pane") not in live
+    dead = sorted(n for n, a in agents.items() if is_dead(a))
+    shown_set = {n for n in agents if n not in dead}
+
+    def eff_parent(n):
+        # nearest non-dead ancestor; a chain that leaves the records keeps its
+        # last (unknown) name so the orphan line below can report it
+        p = agents[n].get("parent") or "operator"
+        seen = set()
+        while p in agents and p not in shown_set and p not in seen:
+            seen.add(p)
+            p = agents[p].get("parent") or "operator"
+        return p
+
+    kids = {}
+    for n in shown_set:
+        kids.setdefault(eff_parent(n), []).append(n)
+    for k in kids:
+        kids[k].sort()
+
+    def q_of(n):
+        return f"q={queues.get(n, 0)}" + (f"+{junk[n]}?" if junk.get(n) else "")
+
+    def walk(name, prefix, is_last):
+        a = agents[name]
+        branch = "└─ " if is_last else "├─ "
+        you = " (you)" if name == me_name else ""
+        ev = events.get(name)
+        idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
+        alive = "live" if live is not None else "?"
+        lines.append(f"{prefix}{branch}{name}{you} [{alive}] {q_of(name)} {idle}")
+        if ev and ev.get("last_words"):
+            cont = "   " if is_last else "│  "
+            lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
+        ch = kids.get(name, [])
+        for i, c in enumerate(ch):
+            walk(c, prefix + ("   " if is_last else "│  "), i == len(ch) - 1)
+
+    roots = kids.get("operator", [])
+    if not agents:
+        lines.append("(no agents)")
+    for i, r in enumerate(roots):
+        walk(r, "", i == len(roots) - 1)
+    # A live agent whose parent chain ends at an unknown name still renders
+    # (flat), so nothing alive can be invisible to the one view.
+    in_tree = set()
+
+    def collect(n):
+        in_tree.add(n)
+        for c in kids.get(n, []):
+            collect(c)
+    for r in roots:
+        collect(r)
+    for n in sorted(shown_set - in_tree):
+        a = agents[n]
+        alive = "live" if live is not None else "?"
+        lines.append(f"?─ {n} [parent {a.get('parent', '?')} unknown] "
+                     f"[{alive}] {q_of(n)}")
+    if dead:
+        lines.append(f"dead: {', '.join(dead)}")
+    return "\n".join(lines)
+
+
+def subtree(agents, root_name):
+    """root_name + every descendant, by walking recorded parent edges."""
+    kids = {}
+    for n, a in agents.items():
+        kids.setdefault(a.get("parent") or "operator", []).append(n)
+    out, stack, seen = [], [root_name], set()
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        if x in agents:
+            out.append(x)
+        stack.extend(kids.get(x, []))
+    return out
+
+
+# ---------------------------------------------------------------- herdr edge
+# Everything below talks to a live pane. Exempt from unit tests by the brief;
+# kept thin so the logic above stays pure.
+
+def herdr_json(args, timeout=15):
+    try:
+        p = subprocess.run(["herdr"] + args, capture_output=True, text=True,
+                           timeout=timeout)
+        return json.loads(p.stdout)
+    except Exception:
+        return None
+
+
+def live_pane_set():
+    d = herdr_json(["pane", "list"])
+    if not d:
+        return None  # herdr unreachable: liveness unknown, never asserted
+    return {p.get("pane_id") for p in d.get("result", {}).get("panes", [])
+            if p.get("pane_id")}
+
+
+def pane_prompt_line(pane):
+    try:
+        p = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible",
+                            "--lines", "40"], capture_output=True, text=True,
+                           timeout=10)
+        rows = [l for l in p.stdout.splitlines() if "❯" in l]
+        return rows[-1].split("❯", 1)[1].strip() if rows else ""
+    except Exception:
+        return ""
+
+
+def ring_doorbell(pane, text="check queue"):
+    """Submit a short non-empty prompt to a pane so UserPromptSubmit fires and
+    `deliver` runs. send-text arrives via bracketed paste, so wait for the
+    prompt box to settle before Enter, then confirm it drained (bounded
+    retries). Best-effort by contract: the queue file is already durable, so
+    every failure here only delays pickup to the next natural turn."""
+    try:
+        p = subprocess.run(["herdr", "pane", "send-text", pane, text],
+                           capture_output=True, timeout=10)
+        if p.returncode != 0:
+            return False
+    except Exception:
+        return False
+    prev = None
+    for _ in range(20):
+        cur = pane_prompt_line(pane)
+        if cur and cur == prev:
+            break
+        prev = cur
+        time.sleep(0.2)
+    for _ in range(5):
+        try:
+            p = subprocess.run(["herdr", "pane", "send-keys", pane, "Enter"],
+                               capture_output=True, timeout=10)
+            if p.returncode != 0:
+                return False
+        except Exception:
+            return False
+        time.sleep(0.4)
+        if pane_prompt_line(pane) == "":
+            return True
+        time.sleep(0.3)
+    return True  # text + Enter went out; treat as rung (queue is durable anyway)
+
+
+# -------------------------------------------------------------- hook verbs
+
+def cmd_deliver():
+    # UserPromptSubmit. Bulletproof: any error -> exit 0, no output, turn intact.
+    if my_name() == "operator":
+        sys.exit(0)
+    read_stdin_json()  # drain the payload; delivery needs nothing from it
+    try:
+        root = root_dir()
+        deliver_once(root, my_name(), parents_of(load_agents(root)),
+                     emit_hook_output)
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+def cmd_event(kind):
+    # Stop/Notification. Record the fact; on Stop with a non-empty queue,
+    # re-ring our own doorbell so the queue keeps draining while we idle.
+    if kind not in ("stop", "notification"):
+        die(f"event: unknown kind '{kind}' (stop | notification)")
+    if my_name() == "operator":
+        sys.exit(0)
+    payload = read_stdin_json() or {}
+    root, name = root_dir(), my_name()
+    try:
+        record_event(root, name, kind,
+                     last_assistant_text(payload.get("transcript_path") or ""),
+                     now_ms())
+    except Exception:
+        pass
+    # >>> THE ONE UNPROVEN MECHANISM (design §6.3): the stop re-ring. <<<
+    # One-per-turn needs the queue to keep draining after the agent goes idle:
+    # on Stop, ring our OWN pane's doorbell (same primitive as send's) — but
+    # only if the head is DELIVERABLE (ruling R7): ringing for a head that
+    # build_delivery refuses would loop forever (ring, empty turn, Stop, still
+    # queued, ring...) burning tokens with nobody watching. If the ring proves
+    # unreliable, later messages stall until the next natural turn —
+    # degradation, never loss: the queue files are durable and `deliver` picks
+    # them up whenever the next turn comes.
+    if kind == "stop":
+        try:
+            nd = next_delivery(root, name, parents_of(load_agents(root)))
+            if nd and nd[1] is not None:
+                rec = read_json(agent_rec_path(root, name))
+                if rec and rec.get("pane"):
+                    ring_doorbell(rec["pane"])
+        except Exception:
+            pass
+    sys.exit(0)
+
+
+def cmd_restore():
+    # SessionStart (startup or post-compaction): original task + journal tail.
+    if my_name() == "operator":
+        sys.exit(0)
+    payload = read_stdin_json() or {}
+    root, name = root_dir(), my_name()
+    try:
+        task = ""
+        try:
+            with open(os.path.join(settings_dir(root), f"{name}.task")) as f:
+                task = f.read()
+        except OSError:
+            pass
+        emit_hook_output({"hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": build_restore(task, journal_path(root, name),
+                                               payload.get("source") or "startup")}})
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+# --------------------------------------------------------------- CLI verbs
+
+def claim_name(root, name):
+    """Atomically claim `name` by creating its journal — the tombstone. The
+    journal file existing IS 'this name was used'; no ledger, no suffixing.
+    Raises FileExistsError on a name ever used."""
+    jpath = journal_path(root, name)
+    os.makedirs(os.path.dirname(jpath), exist_ok=True)
+    fd = os.open(jpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    return fd
+
+
+def spawn_header(name, parent):
+    parent_desc = ("the human operator" if parent == "operator"
+                   else f"agent `{parent}`")
+    return (
+        f"You are agent {name} in a swarm — a tree of Claude agents. Your parent, "
+        f"who judges and approves your work: {parent_desc}.\n"
+        f"You have the `swarm` CLI: `swarm spawn <name> \"<task>\"` to delegate, "
+        f"`swarm send <name>` to message (a message is a claim on one turn), "
+        f"`swarm ps` to see the whole tree, `swarm world` for the full contract — "
+        f"read it before coordinating others.\n\n"
+        f"Your duties (briefed, not enforced): keep your journal at "
+        f".swarm/journal/{name}.md — append timestamped entries in your own words "
+        f"as you work, and always before going idle; a reconciliation entry names "
+        f"its falsifier (the observation that would show you are off track). "
+        f"Report to your parent when done or stuck. Produce concrete, inspectable "
+        f"artifacts — all work, including yours, is judged by reading it, never "
+        f"by claims.\n\n--- YOUR TASK ---\n")
+
+
+def write_launcher(launcher, statusfile, settings, taskfile, model):
+    # Inherited mechanism (G14): the task lives in a FILE; herdr only ever sees
+    # the launcher's path — zero escaping, zero multibyte on argv. The launcher
+    # pre-flights and records its outcome to the status file, so spawn can tell
+    # a started harness from a dead one by a fired signal, not a screen scrape.
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        f"STATUS={shlex.quote(statusfile)}",
+        "if ! command -v claude >/dev/null 2>&1; then",
+        '  echo "failed: claude not found on PATH" > "$STATUS"',
+        '  echo "[swarm] ERROR: claude not found on PATH in this pane" >&2',
+        "  exec bash",
+        "fi",
+        f"if [ ! -r {shlex.quote(settings)} ]; then",
+        f'  echo "failed: settings unreadable: {settings}" > "$STATUS"',
+        "  exec bash",
+        "fi",
+        f'PROMPT="$(cat {shlex.quote(taskfile)})"',
+        'echo "launching" > "$STATUS"',
+        (f'claude --settings {shlex.quote(settings)} --model {shlex.quote(model)} "$PROMPT"'
+         if model else f'claude --settings {shlex.quote(settings)} "$PROMPT"'),
+        "rc=$?",
+        'if [ "$rc" -ne 0 ]; then echo "failed: claude exited code $rc" > "$STATUS"; fi',
+        "exec bash",  # keep the pane inspectable after claude ends
+    ]
+    with open(launcher, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(launcher, 0o755)
+
+
+def cmd_spawn(argv):
+    if len(argv) < 2:
+        die('spawn needs: swarm spawn <name> "<task>" [--model M] [--cwd DIR]')
+    name, task = argv[0], argv[1]
+    rest, model, cwd = argv[2:], "", os.getcwd()
+    while rest:
+        if rest[0] == "--model" and len(rest) > 1:
+            model, rest = rest[1], rest[2:]
+        elif rest[0] == "--cwd" and len(rest) > 1:
+            cwd, rest = rest[1], rest[2:]
         else:
-            if not tp:
-                why=f"{ptr} is empty"
-            elif not os.path.exists(tp):
-                why=f"recorded transcript for '{me}' no longer exists: {tp}"; tp=""
-if not tp:
-    # HONEST UNKNOWN. Same empty-object shape the no-usage case has always
-    # returned, so `"context": <this>` stays schema-valid for the state file.
-    print(f"swarm checkpoint --context: transcript unknown — {why}", file=sys.stderr)
-    print(json.dumps({})); sys.exit(0)
-last=None
-with open(tp) as fh:
-    for line in fh:
-        try: rec=json.loads(line)
-        except: continue
-        u=(rec.get("message") or {}).get("usage") or rec.get("usage")
-        if isinstance(u,dict) and any(k in u for k in ("input_tokens","cache_read_input_tokens")):
-            last=u
-if not last:
-    print(json.dumps({})); sys.exit(0)
-used=(last.get("cache_read_input_tokens",0)+last.get("cache_creation_input_tokens",0)
-      +last.get("input_tokens",0))
-out={"tokens_used":used,"transcript":tp}
-# window: caller passes --model via env if known; else omit pct
-print(json.dumps(out))
-PY
-      ;;
-    * ) die "checkpoint: unknown mode '$mode' (use --help or --context)";;
-  esac
-}
+            die(f"spawn: unknown flag {rest[0]}")
+    import re as _re
+    if not _re.match(NAME_RE, name):
+        die(f"bad name '{name}': lowercase letters, digits, hyphens (max 40). "
+            f"The name is chosen, not derived — pick one that names the work.")
+    if name in ("operator", "delivered"):
+        die(f"'{name}' is reserved")
+    if not task.strip():
+        die("spawn needs a non-empty task")
+    if os.environ.get("HERDR_ENV") != "1":
+        die("not inside herdr (HERDR_ENV != 1); spawn needs herdr as the container")
 
-# ------------------------------------------------------------------ reap
-# Prune registry entries whose herdr pane is gone (stale from prior runs or
-# agents that died after starting). Safe: only removes entries herdr confirms
-# are dead; never touches live ones or anything if herdr is unreachable.
-#
-# Reap NEVER frees a NAME. The reaped agent's id stays in the swarm's `names`
-# ledger forever, so a later spawn with the same label gets `<slug>-2` rather
-# than resurrecting a dead agent's identity on top of its surviving state/,
-# inbox/, settings/ and updates/ records.
-cmd_reap() {
-  init_swarm_paths
-  local panes; panes="$(live_panes)"
-  [ -n "$panes" ] || die "herdr unreachable — refusing to reap (cannot confirm which panes are dead)"
-  local removed=0
-  for f in "$AGENTS_DIR"/*.json; do
-    [ -e "$f" ] || continue
-    local pane; pane="$(json_get "$f" pane)"
-    if ! printf '%s\n' "$panes" | grep -qx "$pane"; then
-      echo "reaped $(basename "$f" .json) (pane $pane gone)"
-      rm -f "$f"; removed=$((removed+1))
-    fi
-  done
-  [ "$removed" -eq 0 ] && echo "(nothing to reap — all registered agents are live)"
-}
+    root = root_dir()
+    parent = my_name()
 
-# ------------------------------------------------------------------ status
-# swarm status [--json]  — reconciled snapshot of this project's swarm: how many
-# agents, each agent's live/DEAD + latest reported state (done/blocked/none).
-# This is what a restarting coordinator reads to decide how to continue.
-#
-# Exit codes: 0 always (on a readable layout). Exit 3 is RETIRED: it once meant
-# "SWARM_ID set but no such swarm on disk", which is unreachable now that every
-# verb auto-inits the layout — a swarm cannot be missing. An agentless swarm is a
-# fact ("0 agent(s)"), not an error. Exit 3 is not reused for anything else.
-cmd_status() {
-  local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
-  init_swarm_paths
-  local panes; panes="$(live_panes)"
-  SWARM_ROOT="$SWARM_ROOT" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
-import json,os,sys
-root=os.environ["SWARM_ROOT"]; ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
-live=set(l for l in os.environ.get("PANES","").splitlines() if l)
-have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+    # Claim the name FIRST: journal-as-tombstone. A name ever used errors here.
+    try:
+        fd = claim_name(root, name)
+    except FileExistsError:
+        die(f"name '{name}' was already used (journal/{name}.md exists); "
+            f"a name is one agent, forever — pick another")
+    with os.fdopen(fd, "w") as f:
+        f.write(f"# journal of {name}\n\n## {fmt_ts(now_ms())} — spawned\n"
+                f"Task from {parent}: {task}\n")
 
-# latest reported state per agent from the update inbox (files sort by ts in name)
-last={}
-for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(ud,fn)))
-    except: continue
-    aid=r.get("id")
-    if aid: last[aid]={"state":r.get("state",""),"summary":r.get("summary",""),"ts":r.get("ts",0)}
+    # Spawn plumbing: settings (hooks -> this file), task file, launcher.
+    sdir = settings_dir(root)
+    os.makedirs(sdir, exist_ok=True)
+    self_path = shlex.quote(os.path.realpath(__file__))
 
-agents=[]
-for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
-    if not fn.endswith(".json"): continue
-    try: a=json.load(open(os.path.join(ad,fn)))
-    except: continue
-    pane=a.get("pane","")
-    a["live"]=(pane in live) if have_herdr else None
-    rep=last.get(a.get("id"))
-    a["reported"]=rep["state"] if rep else "none"
-    a["last_summary"]=rep["summary"] if rep else ""
-    agents.append(a)
+    def h(cmd):
+        return {"matcher": "", "hooks": [{"type": "command",
+                                          "command": f"{self_path} {cmd}"}]}
+    settings = os.path.join(sdir, f"{name}.json")
+    write_atomic(settings, json.dumps({"hooks": {
+        "UserPromptSubmit": [h("deliver")],
+        "Stop": [h("event stop")],
+        "Notification": [h("event notification")],
+        "SessionStart": [h("restore")]}}))
+    taskfile = os.path.join(sdir, f"{name}.task")
+    write_atomic(taskfile, spawn_header(name, parent) + task)
+    statusfile = os.path.join(sdir, f"{name}.status")
+    try:
+        os.unlink(statusfile)
+    except OSError:
+        pass
+    launcher = os.path.join(sdir, f"{name}.launch.sh")
+    write_launcher(launcher, statusfile, settings, taskfile, model)
 
-if as_json:
-    print(json.dumps({"swarm_root":root,"herdr_reachable":have_herdr,"agents":agents},indent=2)); sys.exit(0)
+    # One tab per agent: the pane is what makes the society observable.
+    d = herdr_json(["tab", "create", "--cwd", cwd, "--no-focus", "--label", name,
+                    "--env", f"SWARM_DIR={root}", "--env", f"SWARM_AGENT_ID={name}"])
+    pane = tab = ""
+    try:
+        pane = d["result"]["root_pane"]["pane_id"]
+        tab = d["result"]["tab"]["tab_id"]
+    except Exception:
+        pass
+    if not pane:
+        die("herdr tab create failed")
+    subprocess.run(["herdr", "pane", "run", pane, launcher], capture_output=True)
 
-n=len(agents); live_n=sum(1 for a in agents if a["live"]); dead_n=sum(1 for a in agents if a["live"] is False)
-print(f"swarm at {root} — {n} agent(s): {live_n} live, {dead_n} DEAD" + ("" if have_herdr else "  (herdr unreachable — live/DEAD unknown)"))
-for a in agents:
-    lv = "live" if a["live"] else ("DEAD" if a["live"] is False else "?")
-    print(f"  {a.get('id')}  {a.get('label','')}  [{lv}]  reported={a['reported'].upper() or 'NONE'}  {('· '+a['last_summary'][:60]) if a['last_summary'] else ''}")
-PY
-}
+    # Record the binding BEFORE the readiness wait: the record + the launcher
+    # signal are the truth; a slow start must never lose the agent.
+    write_atomic(agent_rec_path(root, name), json.dumps(
+        {"name": name, "parent": parent, "pane": pane, "tab": tab,
+         "model": model, "cwd": cwd, "task": task, "ts": now_ms()}))
 
-# ------------------------------------------------------------------ close
-# swarm close [<agent-id>] [--self]  — close herdr tab(s) for the active swarm.
-#   swarm close <id>          closes <id> AND its whole subtree (all descendants).
-#                             This is "approve & clean up": when you approve a
-#                             delegated agent's work, its children were part of
-#                             producing it, so the whole subtree is done together.
-#   swarm close <id> --self   close ONLY <id>, leave its children running (rare).
-#   swarm close               closes ALL agents in the swarm.
-# Never deletes state — the .swarm/ dir stays as a paper trail.
-cmd_close() {
-  init_swarm_paths
-  local one="" self=""
-  while [ $# -gt 0 ]; do
-    case "$1" in --self) self=1; shift;; -*) die "unknown flag: $1";; *) one="$1"; shift;; esac
-  done
+    # Readiness = the launcher's own fired signal. Ambiguity is life: only a
+    # CONFIRMED "failed" tears down; a silent timeout keeps the agent.
+    timeout = int(os.environ.get("SWARM_READY_TIMEOUT", "30"))
+    t0, outcome = time.time(), "unknown"
+    while True:
+        try:
+            with open(statusfile) as f:
+                s = f.read()
+            if s.startswith("failed"):
+                outcome = "failed"
+                break
+            if s.startswith("launching"):
+                outcome = "started"
+                break
+        except OSError:
+            pass
+        if time.time() - t0 >= timeout:
+            break
+        time.sleep(1)
+    if outcome == "failed":
+        with open(statusfile) as f:
+            reason = f.read().strip()
+        if tab:
+            subprocess.run(["herdr", "tab", "close", tab], capture_output=True)
+        try:
+            os.unlink(agent_rec_path(root, name))  # binding goes; tombstone stays
+        except OSError:
+            pass
+        die(f"agent {name} did not start: {reason}")
+    if outcome == "unknown":
+        print(f"swarm: warning: {name} launch unconfirmed after {timeout}s; "
+              f"keeping it — check its pane", file=sys.stderr)
+    print(name)
 
-  # Compute the target set of agent ids.
-  local targets
-  if [ -z "$one" ]; then
-    targets=$(for f in "$AGENTS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done)
-  elif [ -n "$self" ]; then
-    targets="$one"
-  else
-    # <id> + all descendants (walk the parent edges).
-    targets=$(AGENTS_DIR="$AGENTS_DIR" ROOT="$one" python3 <<'PY'
-import json,os
-ad=os.environ["AGENTS_DIR"]; root=os.environ["ROOT"]
-parent={}
-for fn in os.listdir(ad) if os.path.isdir(ad) else []:
-    if not fn.endswith(".json"): continue
-    try: a=json.load(open(os.path.join(ad,fn)))
-    except: continue
-    if a.get("id"): parent[a["id"]]=a.get("parent","")
-kids={}
-for c,p in parent.items(): kids.setdefault(p,[]).append(c)
-out=[]; stack=[root]
-seen=set()
-while stack:
-    x=stack.pop()
-    if x in seen: continue
-    seen.add(x)
-    if x in parent: out.append(x)     # only real, registered agents
-    stack.extend(kids.get(x,[]))
-print("\n".join(out))
-PY
-)
-    [ -n "$targets" ] || die "unknown agent: $one"
-  fi
 
-  local closed=0 tid
-  for aid in $targets; do
-    local f="$AGENTS_DIR/$aid.json"; [ -e "$f" ] || continue
-    local pane; pane="$(json_get "$f" pane)"
-    [ -n "$pane" ] || continue
-    tid=$(herdr pane get "$pane" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("pane",{}).get("tab_id","") or "")' 2>/dev/null || true)
-    if [ -n "$tid" ]; then herdr tab close "$tid" >/dev/null 2>&1 && { echo "closed $aid (tab $tid)"; closed=$((closed+1)); }
-    else herdr pane close "$pane" >/dev/null 2>&1 && { echo "closed $aid (pane $pane)"; closed=$((closed+1)); }
-    fi
-  done
-  [ "$closed" -eq 0 ] && echo "(nothing to close)"
-  echo "state kept at $SWARM_ROOT"
-}
+def cmd_send(argv):
+    to, body, from_stdin, have_pos = "", "", False, False
+    rest = list(argv)
+    while rest:
+        a = rest.pop(0)
+        if a == "--stdin":
+            from_stdin = True
+        elif a.startswith("-"):
+            die(f"send: unknown flag {a}")
+        elif not to:
+            to = a
+        else:
+            body, have_pos = a, True
+    if from_stdin:
+        # Bytes off stdin, never a shell word: a positional body containing
+        # backticks/$()/apostrophes is mangled by the CALLER's shell before we
+        # can see it. Passing both is an error, not a precedence rule.
+        if have_pos:
+            die("send: --stdin takes the body from stdin; drop the positional message")
+        if sys.stdin.isatty():
+            die("send --stdin: no message on stdin (pipe or redirect one in)")
+        body = sys.stdin.read()
+    if not to or not body:
+        die('send needs: swarm send <name> --stdin   (or: swarm send <name> "<msg>")')
 
-# ------------------------------------------------------------------ graph
-# swarm graph [--json]  — render the LIVING society: the parent->children tree
-# of currently-alive agents in the active swarm, each showing its task, last
-# reported state, and last words. Dead agents are NOT shown (a dead agent's
-# worth already flowed up to its parent as status; its corpse isn't part of the
-# living society). If a live agent's parent is dead, it REPARENTS to the nearest
-# living ancestor (else the operator) — so hiding the dead never orphans the
-# living. Root children hang under "operator" (the human). Role is emergent, not
-# shown as a field: a node with children is coordinating, a leaf is working.
-cmd_graph() {
-  local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
-  init_swarm_paths
-  local panes; panes="$(live_panes)"
-  AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
-import json,os,sys
-ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
-live=set(l for l in os.environ.get("PANES","").splitlines() if l)
-have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+    root = root_dir()
+    agents = load_agents(root)
+    if to != "operator" and to not in agents:
+        die(f"unknown agent: {to}")
+    sender = my_name()
+    ts = now_ms()
+    rec = {"to": to, "from": sender, "ts": ts, "body": body}
+    fn = f"{ts}-{sender}.json"
+    err = send_size_error(rec, relation(sender, to, parents_of(agents)))
+    if err:
+        die(err)
+    write_atomic(os.path.join(q_dir(root, to), fn), json.dumps(rec))
 
-last={}
-for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(ud,fn)))
-    except: continue
-    if r.get("id"): last[r["id"]]={"state":r.get("state",""),"summary":r.get("summary","")}
+    # Doorbell, best-effort. The operator is a mailbox, not a node: no pane,
+    # no doorbell, no warning — the human sees the mail at the top of `ps`.
+    if to != "operator":
+        pane = agents[to].get("pane", "")
+        if not (pane and ring_doorbell(pane)):
+            print(f"swarm: note: doorbell to {to} skipped (pane unavailable); "
+                  f"message is durably queued for {to}'s next turn", file=sys.stderr)
 
-allnodes={}
-for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
-    if not fn.endswith(".json"): continue
-    try: a=json.load(open(os.path.join(ad,fn)))
-    except: continue
-    aid=a.get("id")
-    if not aid: continue
-    a["live"]=(a.get("pane","") in live) if have_herdr else None
-    rep=last.get(aid)
-    a["reported"]=rep["state"] if rep else "none"
-    a["last_summary"]=rep["summary"] if rep else ""
-    allnodes[aid]=a
 
-def is_live(a): return a["live"] is not False  # True or None(unknown) count as shown
+def cmd_ps(argv):
+    if argv:
+        die("ps takes no arguments")
+    root = root_dir()
+    agents = load_agents(root)
+    live = live_pane_set()
+    queues = {n: len(list_waiting(root, n)) for n in agents}
+    junk = {n: count_junk(root, n) for n in agents}
+    events = {n: read_json(event_path(root, n)) for n in agents}
+    op_mail = [(r.get("from", "?"), int(r.get("ts") or 0))
+               for _, _, r in list_waiting(root, "operator")]
+    out = render_ps(agents, live, queues, events, my_name(), op_mail, now_ms(),
+                    junk)
+    if live is None and agents:
+        out += "\n(herdr unreachable — liveness unknown)"
+    print(out)
 
-# LIVING society only. A live node whose parent is dead/missing reparents to its
-# nearest LIVING ancestor; if none, it becomes a root under the operator.
-def nearest_living_parent(aid):
-    p=allnodes[aid].get("parent","")
-    seen=set()
-    while p and p in allnodes and p not in seen:
-        seen.add(p)
-        if is_live(allnodes[p]): return p
-        p=allnodes[p].get("parent","")   # skip dead ancestor, keep climbing
-    return ""  # no living ancestor -> operator
 
-nodes={aid:a for aid,a in allnodes.items() if is_live(a)}
-kids={}; roots=[]
-for aid in nodes:
-    p=nearest_living_parent(aid)
-    if p in nodes: kids.setdefault(p,[]).append(aid)
-    else: roots.append(aid)
-for k in kids: kids[k].sort()
-roots.sort()
+def cmd_close(argv):
+    if len(argv) != 1:
+        die("close needs exactly one name: swarm close <name>")
+    root = root_dir()
+    agents = load_agents(root)
+    name = argv[0]
+    if name not in agents:
+        die(f"unknown agent: {name}")
+    for aid in subtree(agents, name):
+        a = agents[aid]
+        closed = False
+        if a.get("tab"):
+            p = subprocess.run(["herdr", "tab", "close", a["tab"]],
+                               capture_output=True)
+            closed = p.returncode == 0
+        if not closed and a.get("pane"):
+            p = subprocess.run(["herdr", "pane", "close", a["pane"]],
+                               capture_output=True)
+            closed = p.returncode == 0
+        print(f"closed {aid}" if closed else f"{aid}: pane already gone")
+    print(f"files stay under {root} (journal, queue, delivered)")
 
-if as_json:
-    def build(aid):
-        a=nodes[aid]
-        return {"id":aid,"label":a.get("label",""),"task":a.get("task",""),
-                "reported":a["reported"],"last_summary":a["last_summary"],
-                "children":[build(c) for c in kids.get(aid,[])]}
-    print(json.dumps({"operator_children":[build(r) for r in roots]},indent=2)); sys.exit(0)
 
-if not nodes:
-    print("swarm — no living agents"); sys.exit(0)
-print("swarm — living graph of work (operator is the root)")
-print("operator (human)")
-def render(aid, prefix, is_last):
-    a=nodes[aid]
-    branch = "└─ " if is_last else "├─ "
-    coord = " ·coordinating" if kids.get(aid) else ""
-    print(f"{prefix}{branch}{aid} [{a.get('label','')}] ({a['reported'].upper()}){coord}")
-    cont = "   " if is_last else "│  "
-    task=a.get("task","")
-    if task: print(f"{prefix}{cont}   task: {task[:80]}")
-    if a["last_summary"]: print(f"{prefix}{cont}   last: {a['last_summary'][:80]}")
-    ch=kids.get(aid,[])
-    for i,c in enumerate(ch):
-        render(c, prefix+cont, i==len(ch)-1)
-for i,r in enumerate(roots):
-    render(r, "", i==len(roots)-1)
-PY
-}
+def cmd_world():
+    # WORLD.md sits at the repo root, one level above bin/ (realpath first:
+    # the installed `swarm` is a symlink into the checkout)
+    doc = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "WORLD.md")
+    try:
+        with open(doc) as f:
+            sys.stdout.write(f.read())
+    except OSError:
+        die(f"WORLD.md not found at the repo root (expected {doc})")
 
-# ------------------------------------------------------------------ whoami
-# swarm whoami  — who am I in the graph? Prints my own agent id. Identity comes
-# from SWARM_AGENT_ID, which herdr bakes into this pane's environment at spawn
-# time (inherited by every shell in the pane — it cannot be lost). Empty means
-# I was NOT spawned by `swarm`, i.e. I am the operator's own coordinator: the
-# root of the graph. `--id` prints the bare id (empty for root) for scripting.
-cmd_whoami() {
-  local raw=""
-  [ "${1:-}" = "--id" ] && { echo "${SWARM_AGENT_ID:-}"; return 0; }
-  if [ -n "${SWARM_AGENT_ID:-}" ]; then echo "$SWARM_AGENT_ID"
-  else echo "operator (root — you were started directly, not spawned by swarm)"; fi
-}
 
-# ------------------------------------------------------------------ parent
-# swarm parent  — who delegated to me / approves my work? Prints my parent's id,
-# or "operator" if I am a root. Resolves my own registry entry and reads its
-# parent field.
-cmd_parent() {
-  init_swarm_paths
-  local me="${SWARM_AGENT_ID:-}"
-  if [ -z "$me" ]; then echo "operator (you are a root — the human is your parent)"; return 0; fi
-  local f="$AGENTS_DIR/$me.json"
-  if [ ! -e "$f" ]; then echo "operator (no registry entry for '$me' in this swarm)"; return 0; fi
-  local p; p="$(json_get "$f" parent)"
-  if [ -n "$p" ]; then echo "$p"; else echo "operator (your parent is the human)"; fi
-}
+USAGE = """swarm (simplest) — four verbs. An agent is a session in a pane with a
+name, a parent, and a journal. A message is a claim on one turn.
 
-# ------------------------------------------------------------------ children
-# swarm children [--json]  — the agents THIS agent directly spawned (parent ==
-# my SWARM_AGENT_ID), each with live/dead, last reported state, and last words.
-# Deliberately ONE layer only: you are responsible for your direct children;
-# their children are THEIR job to watch. If a grandchild stalls, that surfaces
-# to you as your child reporting it — you never reach past your own layer.
-# Use this to monitor the work you delegated and re-plan around any that died.
-cmd_children() {
-  init_swarm_paths
-  local as_json=""
-  while [ $# -gt 0 ]; do case "$1" in --json) as_json=1; shift;; *) die "unknown flag: $1";; esac; done
-  local me="${SWARM_AGENT_ID:-}"   # empty => I am the operator's coordinator (root)
-  local panes; panes="$(live_panes)"
-  ME="$me" AGENTS_DIR="$AGENTS_DIR" UPDATES_DIR="$UPDATES_DIR" PANES="$panes" AS_JSON="${as_json:-}" python3 <<'PY'
-import json,os,sys
-me=os.environ.get("ME",""); ad=os.environ["AGENTS_DIR"]; ud=os.environ["UPDATES_DIR"]
-live=set(l for l in os.environ.get("PANES","").splitlines() if l)
-have_herdr=bool(live); as_json=os.environ.get("AS_JSON")
+  swarm spawn <name> "<task>" [--model M] [--cwd DIR]   create a child; the name
+                                is chosen, not derived; a name ever used errors
+  swarm send <name> --stdin     message an agent or `operator` (body from stdin —
+  swarm send <name> "<msg>"     recommended; a positional body is a shell word).
+                                Delivered whole, ONE per turn, oldest first. Must
+                                fit one turn's injection (8000 chars) or send
+                                refuses: put it in a file, send the path.
+  swarm ps                      the one view: tree, liveness, queue depth,
+                                idle-since, last words; operator mail on top
+  swarm close <name>            end an agent and its subtree; files stay
+  swarm world                   print the contract (two screens)
 
-last={}
-for fn in sorted(os.listdir(ud)) if os.path.isdir(ud) else []:
-    if not fn.endswith(".json"): continue
-    try: r=json.load(open(os.path.join(ud,fn)))
-    except: continue
-    if r.get("id"): last[r["id"]]={"state":r.get("state",""),"summary":r.get("summary","")}
+State: ./.swarm (override with SWARM_DIR). Journals at .swarm/journal/<name>.md —
+world-readable; read your children's. deliver/event/restore are hook entrypoints
+(wired automatically at spawn), not for humans."""
 
-mine=[]
-for fn in sorted(os.listdir(ad)) if os.path.isdir(ad) else []:
-    if not fn.endswith(".json"): continue
-    try: a=json.load(open(os.path.join(ad,fn)))
-    except: continue
-    if a.get("parent","")!=me: continue     # DIRECT children only
-    a["live"]=(a.get("pane","") in live) if have_herdr else None
-    rep=last.get(a.get("id"))
-    a["reported"]=rep["state"] if rep else "none"
-    a["last_summary"]=rep["summary"] if rep else ""
-    mine.append(a)
 
-if as_json:
-    out=[{"id":a["id"],"label":a.get("label",""),"task":a.get("task",""),
-          "live":a["live"],"reported":a["reported"],"last_summary":a["last_summary"],
-          "pane":a.get("pane","")} for a in mine]
-    print(json.dumps({"parent":me or "operator","children":out},indent=2)); sys.exit(0)
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        sys.exit(0 if argv else 1)
+    verb, rest = argv[0], argv[1:]
+    if verb == "spawn":
+        cmd_spawn(rest)
+    elif verb == "send":
+        cmd_send(rest)
+    elif verb == "ps":
+        cmd_ps(rest)
+    elif verb == "close":
+        cmd_close(rest)
+    elif verb == "world":
+        cmd_world()
+    elif verb == "deliver":
+        cmd_deliver()
+    elif verb == "event":
+        cmd_event(rest[0] if rest else "")
+    elif verb == "restore":
+        cmd_restore()
+    else:
+        print(USAGE, file=sys.stderr)
+        die(f"unknown verb: {verb}")
 
-who = me or "you (operator's coordinator)"
-if not mine:
-    print(f"{who} — no direct children"); sys.exit(0)
-print(f"{who} — direct children:")
-for a in mine:
-    lv = "live" if a["live"] else ("DEAD" if a["live"] is False else "?")
-    print(f"  {a['id']} [{a.get('label','')}]  ({lv}/{a['reported'].upper()})  {a.get('pane','')}")
-    task=a.get("task","")
-    if task: print(f"       task: {task[:80]}")
-    if a["last_summary"]: print(f"       last: {a['last_summary'][:80]}")
-PY
-}
 
-# Per-verb `--help`: one usage line per verb, printed to stdout with exit 0.
-# `checkpoint --help` is NOT routed here — that verb owns --help as its schema
-# printer. An unknown flag still dies (exit 1) via each verb's own parser.
-verb_usage() {
-  case "$1" in
-    world)   echo "swarm world";;
-    update)  echo "swarm update [--check] [--pre] [--major]";;
-    start)   echo "swarm start";;
-    spawn)   echo 'swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]';;
-    send)    printf '%s\n' \
-               'swarm send <agent-id|operator> --stdin      # body read from stdin (recommended)' \
-               'swarm send <agent-id|operator> "<message>"  # short, quote-free strings only' \
-               '' \
-               'PREFER --stdin for anything you did not hand-check: a positional body is a' \
-               'shell word, so backticks, $(...), and apostrophes are evaluated or eaten by' \
-               'YOUR shell before swarm ever sees them. Agents write prose; prose has' \
-               'apostrophes. Pipe or redirect instead:' \
-               '' \
-               '    swarm send cos --stdin < message.txt' \
-               '    printf %s "$body" | swarm send cos --stdin' \
-               '' \
-               'The body must be <= 6000 bytes: the delivery hook injects at most 8000' \
-               'chars per turn, so a larger message could not be delivered whole. Store' \
-               'large content as a file and reference its path in the message.';;
-    updates) echo "swarm updates [--id <agent-id>] [--json]   (never consumes mail)";;
-    inbox)   printf '%s\n' \
-               'swarm inbox read [--json]        my unacked messages (never consumes)' \
-               'swarm inbox ack <message-id>     consume up to and including <message-id>' \
-               '' \
-               'Unacked = messages not yet delivered to your context PLUS messages already' \
-               'delivered but never acknowledged. A message is injected in full exactly' \
-               'once; after that it is re-listed by id, every turn, until you ack it.' \
-               '' \
-               'Ack is cumulative over arrival order and names every id it consumes.' \
-               'It must name an id that is currently outstanding. There is no ack-all.';;
-    wait)    echo "swarm wait <agent-id> [--timeout SEC]";;
-    list)    echo "swarm list [--json] [--live-only]";;
-    status)  echo "swarm status [--json]";;
-    whoami)  echo "swarm whoami";;
-    parent)  echo "swarm parent";;
-    graph)   echo "swarm graph [--json]";;
-    children) echo "swarm children [--json]";;
-    close)   echo "swarm close [<id>] [--self]";;
-    reap)    echo "swarm reap";;
-    *) return 1;;
-  esac
-}
-if [ "${2:-}" = "--help" ] && [ "${1:-}" != "checkpoint" ] && verb_usage "${1:-}" >/dev/null 2>&1; then
-  verb_usage "$1"; exit 0
-fi
-
-case "${1:-}" in
-  world)   shift; cmd_world "$@";;
-  update)  shift; cmd_update "$@";;
-  start)   shift; cmd_start "$@";;
-  spawn)   shift; cmd_spawn "$@";;
-  send)    shift; cmd_send "$@";;
-  updates) shift; cmd_updates "$@";;
-  inbox)   shift; cmd_inbox "$@";;
-  wait)    shift; cmd_wait "$@";;
-  list)    shift; cmd_list "$@";;
-  checkpoint) shift; cmd_checkpoint "$@";;
-  status)   shift; cmd_status "$@";;
-  whoami)   shift; cmd_whoami "$@";;
-  parent)   shift; cmd_parent "$@";;
-  graph)    shift; cmd_graph "$@";;
-  children) shift; cmd_children "$@";;
-  close)    shift; cmd_close "$@";;
-  reap)    shift; cmd_reap "$@";;
-  *) cat >&2 <<EOF
-swarm — spawn/send/receive for a coordinating agent (herdr container).
-
-The PROJECT is the SWARM: one swarm per project, rooted at ./.swarm (override
-with SWARM_DIR). There is no swarm-id. Every verb creates the layout on first
-use, so nothing has to be started or exported before you spawn.
-
-An AGENT's id IS its label, slugified: 'swarm spawn "..." --label fix-send-race'
-prints and is addressed as 'fix-send-race'. With no --label the slug comes from
-the task's first meaningful words. A name is unique for the swarm's whole life —
-a collision (even with a reaped agent) gets a -2/-3/... suffix.
-
-  swarm world                            print the world doc (what agents read)
-  swarm update [--check] [--pre] [--major]  update to latest tagged release
-                                         (--pre: incl pre-releases; --major: cross breaking)
-  swarm start                            create the layout; prints the swarm root
-                                         (idempotent; never required)
-  swarm spawn "<task>" [--label L] [--model M] [--cwd DIR] [--role R]
-                                         prints the agent's id = slugify(L)
-  swarm checkpoint --help | --context    goal-status continuity (every agent)
-  swarm send  <agent-id|operator> "<message>"   'operator' = the human root (durable file, no pane)
-                                         bodies over 6000 bytes are rejected — send a file path
-  swarm updates [--id <agent-id>] [--json]   agent reports; as operator, also SHOWS its inbox
-                                         (reading never consumes; see 'swarm inbox ack')
-  swarm inbox read [--json]              my unacked messages (never consumes)
-  swarm inbox ack <message-id>           consume up to and including <message-id> (no ack-all)
-                                         a delivered message stays unacked, and is re-listed
-                                         by id every turn, until you ack it
-  swarm wait  <agent-id> [--timeout SEC]
-  swarm list  [--json] [--live-only]     agents in this swarm (marks DEAD)
-  swarm status [--json]                  reconciled snapshot (restart: read this)
-  swarm whoami                           my own agent id (operator if root)
-  swarm parent                           who delegated to / approves me
-  swarm graph [--json]                   the LIVING tree of work (dead hidden)
-  swarm children [--json]                YOUR direct children (one layer down)
-  swarm close [<id>] [--self]            close <id>+subtree (--self: just <id>); keeps state
-  swarm reap                             prune dead agents in this swarm
-
-Typical start (no bootstrap needed):
-  id=\$(swarm spawn "build the CSV importer" --label csv-importer)   # -> csv-importer
-  swarm wait "\$id"; swarm close "\$id"
-On restart:
-  swarm status     # see what's there, then decide: resume / spawn more / close
-EOF
-     exit 1;;
-esac
+if __name__ == "__main__":
+    main(sys.argv[1:])

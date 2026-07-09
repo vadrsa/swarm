@@ -1,4 +1,4 @@
-"""Tests for simplest/swarm — every pure-file behavior.
+"""Tests for bin/swarm — every pure-file behavior.
 
 Runnable as `python3 -m unittest test_swarm -v` or `python3 -m pytest test_swarm.py`.
 Live-pane behaviors (doorbell, stop re-ring) are exempt per the brief; their
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SWARM = os.path.join(HERE, "swarm")
+SWARM = os.path.join(os.path.dirname(HERE), "bin", "swarm")
 
 loader = importlib.machinery.SourceFileLoader("swarmmod", SWARM)
 spec = importlib.util.spec_from_loader("swarmmod", loader)
@@ -391,6 +391,21 @@ class TestPs(unittest.TestCase):
                           events={"boss": None, "kid": None, "dead": None,
                                   "lost": None})
         self.assertIn("lost [parent vanished unknown]", out)
+
+
+class TestWorldResolution(Base):
+    def test_world_via_symlink_from_foreign_cwd(self):
+        # the install model: ~/.local/bin/swarm is a symlink into the checkout;
+        # `swarm world` must find WORLD.md at the repo root regardless of cwd
+        link = os.path.join(self.root, "swarm")
+        os.symlink(SWARM, link)
+        foreign = os.path.join(self.root, "elsewhere")
+        os.makedirs(foreign)
+        p = subprocess.run([link, "world"], cwd=foreign,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("THE WORLD", p.stdout)
+        self.assertIn("four verbs", p.stdout)
 
 
 class TestSubtree(unittest.TestCase):
