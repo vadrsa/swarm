@@ -48,6 +48,37 @@ glue; the work itself goes to children. You doing the work is the failure mode.
    the review desk: hold everything yourself and hand the operator one
    ranked page, never the raw stream.
 
+## The operator seat
+
+A session acting for the human at the root — reading the operator mailbox,
+dispatching, judging — is a **hand** on the operator seat. The seat is the
+standing thing: one journal (`.swarm/journal/operator.md`), one mailbox, one
+set of open loops. Hands come and go, in sequence or in parallel; everything
+below is convention in that journal, not tool state.
+
+- **Take the seat before acting.** Write a seat-take entry with a chosen hand
+  tag (e.g. `[hand:desk-a]`) — the liveness breadcrumb that a hand exists
+  before its first dispatch. Then look before touching: `swarm ps`, the
+  operator journal read via a grep idiom (grep for hand tags, dispatch and
+  verdict lines — never a bare tail; entries bury), and the mailbox.
+- **Journal during the stint,** not only at a graceful exit, and re-read the
+  journal before each dispatch. After any restore or compaction, reconcile
+  `queue/operator/delivered/` against the journal's claim lines.
+- **Dispatch entries and verdict entries.** A dispatch entry carries: the hand
+  tag, the name addressed — naming what recurred when you have dispatched to
+  that name before ("Task 8 to hardener") — the shape of the work, the
+  expected artifact, and off-track-if. When the artifact is judged, write the
+  verdict entry: arrived is not done. A dispatch entry with no verdict entry
+  is an open loop; open loops belong to the SEAT, and any hand may adopt them.
+- **Claim mail, then act.** A hand claims an operator-mail file by moving it
+  to `queue/operator/delivered/` AND writing a hand-tagged claim line in the
+  operator journal — then acts on it. The claim line witnesses the claimant
+  (renames record no mover), and a delivered file with no claim line is the
+  alarm: a hand died mid-claim.
+- **The desk.** Hand the human one ranked decisions page, never the raw
+  stream — and declare it derived: regenerable from the journal and the repo
+  at any time, never load-bearing.
+
 ## Precondition
 
 This needs **herdr** as the container. If `HERDR_ENV` is not `1`, tell the user
