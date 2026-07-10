@@ -106,3 +106,24 @@ PR-A subtree closed (`warm-coord-1`, `warm-worker-1`; artifacts in session
 scratchpad `warm-1/`). PR-B: hand-B's tab closed by the kill (that was the
 experiment); hand-A's tab left open for the operator; sandbox
 `/tmp/swarm-sandbox-2h` left intact for inspection (journal, delivered/, desk/).
+
+## Addendum — the mystery prompt in hand-A's pane (resolved, hazard-checked)
+
+**Identity (VERIFIED):** the unsent composer text was Claude Code's prompt-suggestion
+feature. The pane shows the harness's recap block — *"※ recap: … Next action:
+reconcile my restatement with hand-B's conflicting speed-over-correctness version.
+(disable recaps in /config)"* — and the composer line is the suggestion derived from
+it. Harness UI, not typed input; no delivery trace anywhere, consistent with nothing
+having been sent.
+
+**Hazard check (MEASURED, one trial): NULL.** With the suggestion sitting in the
+composer, I rang the pane with the doorbell's exact mechanics (`herdr pane send-text`
++ settle + `Enter`). The send-text **replaced** the suggestion — after it, the
+composer contained only `check queue` — and Enter submitted only that. The suggestion
+did not co-submit; a ring over a pending suggestion cannot make an agent act on a
+prompt nobody sent. No WATCHLIST line warranted on this evidence (single trial, this
+harness version — if suggestion UI behavior changes, the 30-second recheck is: plant
+any suggestion via a recap, send-text over it, read what submits).
+
+Sandbox torn down after this check (hand-A tab closed; /tmp/swarm-sandbox-2h files
+left on disk).
