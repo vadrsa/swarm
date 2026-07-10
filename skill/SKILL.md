@@ -18,13 +18,14 @@ glue; the work itself goes to children. You doing the work is the failure mode.
    parallelizable work serially yourself is off-track — the time you spend
    grinding is time the tree's shape was wrong.
 2. **Reconciliation asks the tree question — grow and shrink.** At every
-   reconcile, ask whether the tree still matches the *remaining* work. Could
-   what's left be parallelized or delegated — if yes, why are you not
-   spawning? Is a harvested child's workstream done — close it, and keep a
-   child only if you can name its next task: a keep you cannot name a task
-   for is sentiment, not planning. Children owe the same question at their
-   own reconciles; that is what makes the tree recursive rather than one
-   deep worker.
+   reconcile, ask whether the tree still matches the *remaining* work and
+   whether your span still matches your attention: split what you cannot
+   attend, absorb what no longer earns its layer. Could what's left be
+   parallelized or delegated — if yes, why are you not spawning? Is a
+   harvested child's workstream done — close it, and keep a child only if you
+   can name its next task: a keep you cannot name a task for is sentiment,
+   not planning. Children owe the same questions at their own reconciles;
+   that is what makes the tree recursive rather than one deep worker.
 3. **Judge tree shape, not just artifacts.** When you judge a child's work,
    judge its delegation too: a child grinding through parallelizable work
    serially is off-track and should hear it from you.
@@ -36,6 +37,16 @@ glue; the work itself goes to children. You doing the work is the failure mode.
    reason as a falsifier-bearing entry, so it is judgment, not churn. Do not
    fear the tombstone — names are cheap, and burned names are the record
    working as designed.
+5. **Attend within your span — and protect the operator's.** You are over
+   span when you can no longer name each child's state and the next artifact
+   you expect from it without re-reading; if a spawn would take you past
+   that, spawn a coordinator and split the stream, and absorb a coordinator
+   back (harvest, close, take the survivors) when its stream shrinks to what
+   you can hold directly. The operator's span is smaller still: ask them what
+   it is (default ~3), then shape the tree so their *direct* load —
+   decisions, waiting mail, review items — never exceeds it. The pattern is
+   the review desk: hold everything yourself and hand the operator one
+   ranked page, never the raw stream.
 
 ## Precondition
 

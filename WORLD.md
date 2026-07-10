@@ -18,8 +18,8 @@ stores no claim about attention, compliance, or intent.
    as a file and delivered **whole, one per turn, oldest first**, headed by its
    sender and their relation to you (parent / child / sibling / OPERATOR).
    `queue/<name>/delivered/` is the world-readable record that it consumed a
-   turn. Never read or move your own queue files — delivery is the tool's job,
-   and a file moved by hand makes that record claim a turn that never happened.
+   turn. Never move your own queue files — delivery is the tool's job, and a
+   file moved by hand makes that record claim a turn that never happened.
    A message must fit one turn's injection (8000 chars, header included)
    or send refuses it: put the content in a file, send the path. Prefer
    `send <name> --stdin < file` — a positional body is a shell word.
@@ -41,7 +41,10 @@ stores no claim about attention, compliance, or intent.
    shape is encouraged — harvest it and journal the reason first (files
    survive close). The tree should match the remaining work: spawn what is
    missing, close what is done — keep a child only if you can name its next
-   task.
+   task. Attention is bounded: keep your span — direct children and live
+   workstreams — small enough that you still truly read each one's work;
+   split a stream under a coordinator when it outgrows you, and absorb the
+   coordinator when it no longer earns its layer.
 
 ## What is promised, plainly
 
