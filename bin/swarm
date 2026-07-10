@@ -658,7 +658,18 @@ def spawn_header(name, parent):
         f"its falsifier (the observation that would show you are off track). "
         f"Report to your parent when done or stuck. Produce concrete, inspectable "
         f"artifacts — all work, including yours, is judged by reading it, never "
-        f"by claims.\n\n--- YOUR TASK ---\n")
+        f"by claims.\n\n"
+        f"Delegate by default: keep judgment, verification, and glue; spawn "
+        f"children for the work itself — doing parallelizable work serially "
+        f"yourself is off-track. Each reconciliation, ask whether the tree still "
+        f"matches the remaining work: spawn what is missing, and close harvested "
+        f"children whose workstream is done — keep a child only if you can name "
+        f"its next task. "
+        f"When you judge a child's work, judge its delegation too. Closing a "
+        f"subtree to re-form a better shape is normal and encouraged — harvest "
+        f"its journal and artifacts first, journal the reason; files survive "
+        f"close, and burned names are the record working as designed.\n\n"
+        f"--- YOUR TASK ---\n")
 
 
 def write_launcher(launcher, statusfile, settings, taskfile, model):
