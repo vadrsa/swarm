@@ -75,6 +75,15 @@ below is convention in that journal, not tool state.
   operator journal — then acts on it. The claim line witnesses the claimant
   (renames record no mover), and a delivered file with no claim line is the
   alarm: a hand died mid-claim.
+- **Standing goals live in the journal, or not at all.** Periodically write a
+  `STANDING GOALS` entry — each goal with its falsifier. A restatement MUST
+  cite the entry it supersedes: two hands restating without citations lose
+  one hand's update silently, and the citation is what makes a crossed write
+  detectable — reconcile it, never newest-wins. Read goals via a grep idiom,
+  never a tail (entries bury), and let the pattern match entry markers and
+  hand tags, never a timestamp format — hands demonstrably write different
+  ones. A goal agreed out of band — a pane chat, a human aside — does not
+  exist until it is written here.
 - **The desk.** Hand the human one ranked decisions page, never the raw
   stream — and declare it derived: regenerable from the journal and the repo
   at any time, never load-bearing.
