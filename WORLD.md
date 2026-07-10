@@ -41,7 +41,10 @@ stores no claim about attention, compliance, or intent.
    shape is encouraged — harvest it and journal the reason first (files
    survive close). The tree should match the remaining work: spawn what is
    missing, close what is done — keep a child only if you can name its next
-   task.
+   task. Attention is bounded: keep your span — direct children and live
+   workstreams — small enough that you still truly read each one's work;
+   split a stream under a coordinator when it outgrows you, and absorb the
+   coordinator when it no longer earns its layer.
 
 ## What is promised, plainly
 
