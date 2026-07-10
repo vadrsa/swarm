@@ -582,6 +582,27 @@ def ring_doorbell(pane, text="check queue"):
     return True  # text + Enter went out; treat as rung (queue is durable anyway)
 
 
+def ring_doorbell_once(pane, text="check queue"):
+    """One-attempt ring for the Stop hook, which blocks its own agent's next
+    turn until it returns: one send-text, a short pause for the paste to land,
+    one Enter — never a pane read, never a settle loop. Field evidence
+    (2026-07-10): the full ring's settle loop spun ~20 x 10s herdr reads
+    against a loaded pane, freezing the agent ~3 minutes while deliverable
+    mail waited. A ring skipped or missed here is degradation, never loss —
+    the queue file is durable and the next natural turn delivers it."""
+    try:
+        p = subprocess.run(["herdr", "pane", "send-text", pane, text],
+                           capture_output=True, timeout=5)
+        if p.returncode != 0:
+            return False
+        time.sleep(0.5)
+        p = subprocess.run(["herdr", "pane", "send-keys", pane, "Enter"],
+                           capture_output=True, timeout=5)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
 # -------------------------------------------------------------- hook verbs
 
 def cmd_deliver():
@@ -615,8 +636,10 @@ def cmd_event(kind):
         pass
     # >>> THE ONE UNPROVEN MECHANISM (design §6.3): the stop re-ring. <<<
     # One-per-turn needs the queue to keep draining after the agent goes idle:
-    # on Stop, ring our OWN pane's doorbell (same primitive as send's) — but
-    # only if the head is DELIVERABLE (ruling R7): ringing for a head that
+    # on Stop, ring our OWN pane's doorbell — the single-attempt variant, not
+    # send's settle-and-confirm ring: this hook blocks the agent's next turn,
+    # so it must return fast rather than poll a busy pane. Ring only if the
+    # head is DELIVERABLE (ruling R7): ringing for a head that
     # build_delivery refuses would loop forever (ring, empty turn, Stop, still
     # queued, ring...) burning tokens with nobody watching. If the ring proves
     # unreliable, later messages stall until the next natural turn —
@@ -628,7 +651,7 @@ def cmd_event(kind):
             if nd and nd[1] is not None:
                 rec = read_json(agent_rec_path(root, name))
                 if rec and rec.get("pane"):
-                    ring_doorbell(rec["pane"])
+                    ring_doorbell_once(rec["pane"])
         except Exception:
             pass
     sys.exit(0)
