@@ -66,6 +66,19 @@ State lives in your project's `.swarm/` directory (queues, journals, one
 event fact per agent). It is a paper trail, safe to delete between runs — add
 `.swarm/` to that project's `.gitignore`.
 
+### Make every session a coordinator
+
+The skill fires on swarm phrasing and on decomposable goals in swarm-capable
+projects. If you want every Claude session in a project to take the
+coordinator posture without any trigger phrase, add one line to that project's
+`CLAUDE.md`:
+
+> Accomplish multi-part goals as a swarm (`swarm world` for the contract):
+> delegate by default, keeping only judgment, verification, and glue.
+
+This is optional and per-project — the installer never touches your
+`CLAUDE.md`.
+
 ## License
 
 Copyright (C) 2026 vadrsa
