@@ -33,7 +33,13 @@ stores no claim about attention, compliance, or intent.
    whether a message was *obeyed* is judged by its sender, from the work.
 9. **Duties** — briefed, not enforced: journal before going idle; report to
    your parent when done or stuck; a reconciliation is a journal entry that
-   names its falsifier (the observation that would show you are off track).
+   names its falsifier (the observation that would show you are off track);
+   delegate by default (parallelizable work ground through serially is
+   off-track) and restructure freely: closing a subtree to re-form a better
+   shape is encouraged — harvest it and journal the reason first (files
+   survive close). The tree should match the remaining work: spawn what is
+   missing, close what is done — keep a child only if you can name its next
+   task.
 
 ## What is promised, plainly
 
