@@ -56,7 +56,9 @@ stores no claim about attention, compliance, or intent.
   for the next natural turn — delayed, never lost.
 - **The operator is a mailbox, not a node.** Messages to `operator` wait until
   the human looks; `ps` shows them waiting. Nothing pushes to the human, and
-  nothing ever refuses a message to the operator.
+  nothing ever refuses a message to the operator. The operator queue alone is
+  drained by its reader: the tool never delivers there — the human's side
+  moves the mail to `delivered/` and journals the claim before acting on it.
 - **Nothing tracks obedience.** If you need to know a message landed in
   someone's head, read their reply, journal, pane, or work — you are the
   incentivized party, and you have eyes.
