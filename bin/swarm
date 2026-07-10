@@ -924,7 +924,10 @@ def cmd_send(argv):
         pane = agents[to].get("pane", "")
         if not (pane and ring_doorbell(pane)):
             print(f"swarm: note: doorbell to {to} skipped (pane unavailable); "
-                  f"message is durably queued for {to}'s next turn", file=sys.stderr)
+                  f"message is durably queued — if {to} is closed (see the "
+                  f"dead: line in swarm ps) it will never be delivered; look "
+                  f"for a successor in its journal or its parent's",
+                  file=sys.stderr)
 
 
 def cmd_ps(argv):
