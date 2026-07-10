@@ -176,6 +176,8 @@ away").
 The corrected model is a **ladder**, and doctrine-bearing agents demonstrably
 pick the cheapest sufficient rung:
 
+0. **A warm name** — before spawning fresh: is this shape of work already
+   owned by a warm name? Reuse is cheaper than any rung above it.
 1. **Parallel tool batches** — seconds-scale, needs nothing.
 2. **Harness subagents** — minutes-scale, token-light, fire-and-forget; ~10-way
    parallelism; invisible to `ps`, costs no identity.
