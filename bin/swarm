@@ -32,7 +32,7 @@ import time
 TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
-NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}$"
+NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 
 # ---------------------------------------------------------------- primitives
 
@@ -247,6 +247,32 @@ def send_size_error(rec, rel):
         return (f"message too big: delivering it would take {n} chars against "
                 f"the {TURN_CAP}-char turn cap — put it in a file, send the path")
     return None
+
+
+def queue_put(root, rec):
+    """Create rec's queue file without ever overwriting one. Two sends from
+    one sender to one recipient in the same millisecond collide on
+    {ts}-{from}.json, and tmp+rename would silently replace the first — the
+    drop WORLD.md forbids. So claim the name with O_CREAT|O_EXCL and on
+    collision bump ts by 1 and retry (bounded): the second message lands a
+    millisecond later instead of vanishing. The exclusive create replaces
+    tmp+rename here; a reader that catches the file mid-write skips it as
+    unparseable and finds it whole next pass — delayed, never lost. Returns
+    the filename; raises FileExistsError if the bump space is exhausted."""
+    d = q_dir(root, rec["to"])
+    os.makedirs(d, exist_ok=True)
+    for _ in range(1000):
+        fn = f"{rec['ts']}-{rec['from']}.json"
+        try:
+            fd = os.open(os.path.join(d, fn),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            rec["ts"] += 1
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(rec))
+        return fn
+    raise FileExistsError(f"queue name space exhausted near {fn}")
 
 
 def emit_hook_output(obj):
@@ -836,13 +862,14 @@ def cmd_send(argv):
     if to != "operator" and to not in agents:
         die(f"unknown agent: {to}")
     sender = my_name()
-    ts = now_ms()
-    rec = {"to": to, "from": sender, "ts": ts, "body": body}
-    fn = f"{ts}-{sender}.json"
+    rec = {"to": to, "from": sender, "ts": now_ms(), "body": body}
     err = send_size_error(rec, relation(sender, to, parents_of(agents)))
     if err:
         die(err)
-    write_atomic(os.path.join(q_dir(root, to), fn), json.dumps(rec))
+    try:
+        queue_put(root, rec)
+    except OSError as e:
+        die(f"could not queue message: {e}")
 
     # Doorbell, best-effort. The operator is a mailbox, not a node: no pane,
     # no doorbell, no warning — the human sees the mail at the top of `ps`.

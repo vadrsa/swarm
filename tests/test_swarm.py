@@ -483,5 +483,67 @@ class TestReRingDecision(Base):
         self.assertEqual(len(sent_texts()), 1)  # deliverable head: one ring
 
 
+class TestNameEdges(Base):
+    """Regression: NAME_RE anchored with $ let 'abc\\n' pass (Python's $
+    matches before a trailing newline), claiming journal/'abc\\n'.md — a
+    DISTINCT tombstone that renders identically to abc's. \\Z closes it."""
+
+    def test_trailing_newline_names_fail_the_regex(self):
+        import re
+        for bad in ("abc\n", "abc-\n"):
+            self.assertIsNone(re.match(sw.NAME_RE, bad),
+                              f"{bad!r} must not validate")
+        self.assertIsNotNone(re.match(sw.NAME_RE, "abc"))
+
+    def test_spawn_refuses_trailing_newline_name_before_tombstone(self):
+        # a real `swarm spawn` process: the refusal must land BEFORE the name
+        # is claimed, so no journal/'abc\n'.md tombstone ever exists
+        env = dict(os.environ, SWARM_DIR=self.root, HERDR_ENV="1")
+        p = subprocess.run([SWARM, "spawn", "abc\n", "task"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("bad name", p.stderr)
+        self.assertFalse(os.path.isdir(os.path.join(self.root, "journal")),
+                         "refused name must not claim a tombstone")
+
+
+class TestQueuePut(Base):
+    """Regression: cmd_send named the queue file {ts}-{sender}.json and wrote
+    it via tmp+rename, so a same-millisecond same-sender same-recipient
+    collision silently replaced the first message — the drop WORLD.md
+    forbids. queue_put claims the name with O_EXCL and bumps ts until free."""
+
+    def test_same_ms_collision_keeps_both_messages_in_order(self):
+        fn1 = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                       "body": "first"})
+        fn2 = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                       "body": "second"})
+        self.assertNotEqual(fn1, fn2)
+        d = sw.q_dir(self.root, "a")
+        self.assertTrue(os.path.exists(os.path.join(d, fn1)))
+        self.assertTrue(os.path.exists(os.path.join(d, fn2)))
+        # oldest-first order preserved: the first send stays the queue head
+        w = sw.list_waiting(self.root, "a")
+        self.assertEqual([r["body"] for _, _, r in w], ["first", "second"])
+
+    def test_bump_lands_on_the_next_free_millisecond(self):
+        for i in range(3):
+            msg(self.root, "a", "p", 1000 + i, f"pre {i}")
+        fn = sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                      "body": "late"})
+        self.assertEqual(fn, "1003-p.json")
+        w = sw.list_waiting(self.root, "a")
+        self.assertEqual([r["body"] for _, _, r in w],
+                         ["pre 0", "pre 1", "pre 2", "late"])
+
+    def test_exhausted_bump_space_raises_never_overwrites(self):
+        for i in range(1000):
+            msg(self.root, "a", "p", 1000 + i, f"pre {i}")
+        with self.assertRaises(FileExistsError):
+            sw.queue_put(self.root, {"to": "a", "from": "p", "ts": 1000,
+                                     "body": "one too many"})
+        self.assertEqual(len(sw.list_waiting(self.root, "a")), 1000)
+
+
 if __name__ == "__main__":
     unittest.main()
