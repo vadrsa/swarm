@@ -18,7 +18,9 @@ stores no claim about attention, compliance, or intent.
    as a file and delivered **whole, one per turn, oldest first**, headed by its
    sender and their relation to you (parent / child / sibling / OPERATOR).
    `queue/<name>/delivered/` is the world-readable record that it consumed a
-   turn. A message must fit one turn's injection (8000 chars, header included)
+   turn. Never read or move your own queue files — delivery is the tool's job,
+   and a file moved by hand makes that record claim a turn that never happened.
+   A message must fit one turn's injection (8000 chars, header included)
    or send refuses it: put the content in a file, send the path. Prefer
    `send <name> --stdin < file` — a positional body is a shell word.
 5. **The journal** — `.swarm/journal/<you>.md`. Append-only, timestamped, your
