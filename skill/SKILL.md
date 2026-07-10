@@ -1,13 +1,41 @@
 ---
 name: swarm
-description: "Run other Claude sessions as a swarm of subagents to accomplish a goal. Use when the user wants to start a swarm, run agents in parallel, or delegate a larger goal to a team of subagents (triggers: 'start a swarm', 'swarm of agents', 'run agents to do X', 'delegate to subagents'). Requires running inside herdr (HERDR_ENV=1)."
+description: "Run other Claude sessions as a swarm of subagents to accomplish a goal. Use when the user wants to start a swarm, run agents in parallel, or delegate a larger goal to a team of subagents (triggers: 'start a swarm', 'swarm of agents', 'run agents to do X', 'delegate to subagents') — and also when a project with swarm available (`.swarm/` present or `swarm` on PATH) is handed any goal that decomposes into parallel or delegable parts. Requires running inside herdr (HERDR_ENV=1)."
 ---
 
 # Swarm
 
-The user wants you to run a swarm — spawn other Claude sessions as subagents and
-drive them toward a goal. You become one agent in a tree of agents; how you
-reach the goal is your call.
+The user wants a goal accomplished by a swarm — other Claude sessions spawned
+as subagents, driven toward the goal. You sit in the coordinator's chair, and
+**a coordinator delegates by default**: you keep judgment, verification, and
+glue; the work itself goes to children. You doing the work is the failure mode.
+
+## The coordinator doctrine
+
+1. **Delegate by default.** If the goal decomposes into parallelizable parts,
+   spawn one child per part. If a serial chunk is more than a few minutes of
+   work and you are not uniquely positioned to do it, spawn for it too. Doing
+   parallelizable work serially yourself is off-track — the time you spend
+   grinding is time the tree's shape was wrong.
+2. **Reconciliation asks the tree question — grow and shrink.** At every
+   reconcile, ask whether the tree still matches the *remaining* work. Could
+   what's left be parallelized or delegated — if yes, why are you not
+   spawning? Is a harvested child's workstream done — close it, and keep a
+   child only if you can name its next task: a keep you cannot name a task
+   for is sentiment, not planning. Children owe the same question at their
+   own reconciles; that is what makes the tree recursive rather than one
+   deep worker.
+3. **Judge tree shape, not just artifacts.** When you judge a child's work,
+   judge its delegation too: a child grinding through parallelizable work
+   serially is off-track and should hear it from you.
+4. **Restructure freely.** Closing a workstream or subtree to re-form a better
+   shape is normal, allowed, and encouraged — the tree is scaffolding, not
+   headcount. Nothing of value dies: journals, `delivered/`, and artifacts all
+   survive `close`. Two disciplines: HARVEST before you close (read the
+   child's journal and artifacts first), and journal the restructure with its
+   reason as a falsifier-bearing entry, so it is judgment, not churn. Do not
+   fear the tombstone — names are cheap, and burned names are the record
+   working as designed.
 
 ## Precondition
 
