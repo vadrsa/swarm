@@ -53,6 +53,9 @@ record shows the convention failing.
   "promptly" to "on its next turn" so the promise matches reality (a false sentence is the
   worse bug). If prompt delivery is genuinely needed, the re-ring's retry belongs in herdr
   (the thing that owns panes and timers), not in a daemon bolted onto the CLI.
+- **RESIDUAL (2026-07-10):** the Stop-path ring is a single attempt with no settle/confirm
+  loop (the loop blocked a busy pane ~3m — field evidence 2026-07-10, finding 1), so under
+  load the ring may be skipped and pickup waits for the next natural turn — delayed, never lost.
 
 ## 4. Journals rot into mush (free text was too free)
 

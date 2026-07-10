@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -481,6 +482,39 @@ class TestReRingDecision(Base):
         os.unlink(evil)                      # now the head is the real message
         stop()
         self.assertEqual(len(sent_texts()), 1)  # deliverable head: one ring
+
+    def test_stop_ring_is_bounded_against_a_busy_pane(self):
+        # regression, field evidence 2026-07-10 (WATCHLIST #3): the ring's
+        # settle loop spun ~20 x 10s herdr reads against a loaded pane,
+        # blocking `event stop` — and with it the agent's next turn — for
+        # ~3 minutes while deliverable mail waited. The Stop-path ring is a
+        # single attempt: it never reads the pane, and a busy pane cannot
+        # hold the hook beyond a small bound.
+        bindir = os.path.join(self.root, "fakebin")
+        os.makedirs(bindir)
+        log = os.path.join(self.root, "herdr.log")
+        with open(os.path.join(bindir, "herdr"), "w") as f:
+            f.write('#!/usr/bin/env bash\n'
+                    'echo "$@" >> "%s"\n'
+                    'if [ "$1 $2" = "pane read" ]; then sleep 3; fi\n'
+                    'echo "{}"\n' % log)
+        os.chmod(os.path.join(bindir, "herdr"), 0o755)
+        os.makedirs(os.path.join(self.root, "agents"))
+        with open(sw.agent_rec_path(self.root, "kid"), "w") as f:
+            json.dump({"name": "kid", "parent": "operator", "pane": "p1"}, f)
+        msg(self.root, "kid", "boss", 1000, "deliverable mail")
+        env = dict(os.environ, SWARM_DIR=self.root, SWARM_AGENT_ID="kid",
+                   PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        t0 = time.time()
+        subprocess.run([SWARM, "event", "stop"], env=env, input=b"{}",
+                       capture_output=True, timeout=60)
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 10,
+                        "a busy pane must not block `event stop`")
+        with open(log) as f:
+            calls = f.read()
+        self.assertIn("pane send-text p1", calls)  # the ring was attempted
+        self.assertNotIn("pane read", calls)       # and never polls the pane
 
 
 class TestNameEdges(Base):
