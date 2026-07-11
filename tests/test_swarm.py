@@ -579,5 +579,31 @@ class TestQueuePut(Base):
         self.assertEqual(len(sw.list_waiting(self.root, "a")), 1000)
 
 
+class TestRegisteredHook(Base):
+    """HOOK-WIRING §2: the two-line marker is registration; any defect in it
+    means unarmed (None), which is the fail-open branch."""
+
+    def _marker(self, text):
+        d = os.path.join(self.root, "engine")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "hook"), "w") as f:
+            f.write(text)
+
+    def test_absent_marker_is_none(self):
+        self.assertIsNone(sw.registered_hook(self.root))
+
+    def test_two_line_marker_returns_name_and_command(self):
+        self._marker("decision-engine\n/abs/path/swarm engine-hook\n")
+        self.assertEqual(sw.registered_hook(self.root),
+                         ("decision-engine", "/abs/path/swarm engine-hook"))
+
+    def test_malformed_markers_are_none(self):
+        for bad in ("", "\n", "only-one-line", "name-but-blank-command\n\n",
+                    "\n/cmd only, no name\n"):
+            self._marker(bad)
+            self.assertIsNone(sw.registered_hook(self.root),
+                              f"{bad!r} must read as unarmed")
+
+
 if __name__ == "__main__":
     unittest.main()

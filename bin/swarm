@@ -33,6 +33,10 @@ TURN_CAP = 8000          # the ONE size number: a message fits one turn's inject
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
+# Sender-side bound on one cold engine-hook invocation (HOOK-WIRING §6: a cold
+# model decision is tens of seconds; timeouts are modal, and a timeout is a
+# pass). Env-overridable like SWARM_READY_TIMEOUT, mostly for the drills.
+ENGINE_HOOK_TIMEOUT = int(os.environ.get("SWARM_ENGINE_HOOK_TIMEOUT", "60"))
 
 # ---------------------------------------------------------------- primitives
 
@@ -273,6 +277,21 @@ def queue_put(root, rec):
             f.write(json.dumps(rec))
         return fn
     raise FileExistsError(f"queue name space exhausted near {fn}")
+
+
+def registered_hook(root):
+    """The engine hook, if configured: (wire_name, command) from the two-line
+    marker .swarm/engine/hook — line 1 the identity the tool injects into the
+    cold invocation, line 2 the command (HOOK-WIRING §2). None on ANY error:
+    an absent, empty, or malformed marker means unarmed, and unarmed means
+    the send path is byte-identical to a world with no hook (fail-open)."""
+    try:
+        with open(os.path.join(root, "engine", "hook")) as f:
+            lines = f.read().splitlines()
+        name, command = lines[0].strip(), lines[1].strip()
+        return (name, command) if name and command else None
+    except Exception:
+        return None
 
 
 def emit_hook_output(obj):
