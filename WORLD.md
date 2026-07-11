@@ -59,6 +59,18 @@ stores no claim about attention, compliance, or intent.
   nothing ever refuses a message to the operator. The operator queue alone is
   drained by its reader: the tool never delivers there — the human's side
   moves the mail to `delivered/` and journals the claim before acting on it.
+- **A configured send middleware sits on the send path.** When `.swarm/config`
+  carries a `[middleware]` section, every `swarm send` runs its command in the
+  sender's process, before the message is queued, with the full envelope —
+  from, to, ts, body — on stdin. Its exit code is the whole verdict: 0 passes
+  the message through (queued for its recipient unchanged); 100 means the
+  middleware handled it itself, in its own wire name, and nothing is queued;
+  any other exit, a timeout, or no middleware configured passes the message
+  through unchanged — fail-open in code, chosen so an incidental failure can
+  never be misread as a deliberate drop, and a broken middleware degrades to
+  no middleware. Nothing accepted is ever silently dropped: a send whose
+  process dies while the middleware runs never returned, and its sender —
+  watching its own command fail — retries.
 - **Nothing tracks obedience.** If you need to know a message landed in
   someone's head, read their reply, journal, pane, or work — you are the
   incentivized party, and you have eyes.
