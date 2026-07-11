@@ -54,11 +54,21 @@ stores no claim about attention, compliance, or intent.
 - **Promptness is best-effort.** Send rings the recipient's pane; on Stop an
   agent with waiting mail re-rings its own. If a ring fails, the message waits
   for the next natural turn — delayed, never lost.
-- **The operator is a mailbox, not a node.** Messages to `operator` wait until
-  the human looks; `ps` shows them waiting. Nothing pushes to the human, and
-  nothing ever refuses a message to the operator. The operator queue alone is
-  drained by its reader: the tool never delivers there — the human's side
-  moves the mail to `delivered/` and journals the claim before acting on it.
+- **The operator is a mailbox, not a node.** Messages to `operator` are queued
+  in `queue/operator/` and never refused or dropped; `ps` shows them waiting,
+  and nothing pushes to the human. When an engine hook is configured
+  (`.swarm/engine/hook`), the tool invokes it — cold, per message, with a
+  timeout — *after* the message is durably queued, in its own wire name from
+  the marker. The hook may, within the timeout, claim a grant-covered message
+  (moving it to `delivered/` with a hand-tagged claim line and answering the
+  asker in the engine's own name) — but it holds no priority over the human:
+  an operator-bound message is ordinary waiting mail from the instant it is
+  queued, and whichever hand's `mv` lands first wins. On timeout, crash, or
+  with no hook configured, the message simply waits, exactly as before. The
+  human's side — the human, or a hand seated in writing — moves the mail to
+  `delivered/` and journals the claim before acting on it; this tool-invoked
+  hook counts as such a hand, and is the first tool-invoked mover of operator
+  mail the contract admits.
 - **Nothing tracks obedience.** If you need to know a message landed in
   someone's head, read their reply, journal, pane, or work — you are the
   incentivized party, and you have eyes.
