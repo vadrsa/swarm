@@ -33,6 +33,17 @@ TURN_CAP = 8000          # the ONE size number: a message fits one turn's inject
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
+# Sender-side bound on one middleware invocation (a slow middleware must fail
+# open, never stall the sender). Default; .swarm/config's [middleware] timeout
+# overrides it. Env-overridable like SWARM_READY_TIMEOUT.
+MIDDLEWARE_TIMEOUT = int(os.environ.get("SWARM_MIDDLEWARE_TIMEOUT", "60"))
+# The ONE deliberate middleware verdict: exit 100 = HANDLED (don't queue).
+# 100 sits above the shell's reserved codes (126-128, 130) and the ordinary
+# error codes (1-2), so an incidental failure — crash, set -e, command not
+# found — can never be misread as a deliberate HANDLED. Everything except
+# 100 queues the message: exit 0 is the common pass, and every other exit,
+# timeout, or kill fails OPEN.
+MIDDLEWARE_HANDLED_EXIT = 100
 
 # ---------------------------------------------------------------- primitives
 
@@ -273,6 +284,72 @@ def queue_put(root, rec):
             f.write(json.dumps(rec))
         return fn
     raise FileExistsError(f"queue name space exhausted near {fn}")
+
+
+def read_flat_toml(path):
+    """Minimal TOML for .swarm/config's flat shape — [section], key = value
+    (quoted string or bare int), # comments — used only where the stdlib
+    tomllib (py3.11+) is unavailable. Not a general TOML parser."""
+    out, section = {}, None
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+                out.setdefault(section, {})
+                continue
+            if "=" not in line or section is None:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if v[:1] in "\"'":
+                end = v.find(v[0], 1)
+                if end > 0:
+                    out[section][k] = v[1:end]
+            else:
+                v = v.split("#", 1)[0].strip()
+                try:
+                    out[section][k] = int(v)
+                except ValueError:
+                    out[section][k] = v
+    return out
+
+
+def registered_middleware(root):
+    """The send middleware, if configured: (identity, command, timeout) from
+    the [middleware] section of .swarm/config (TOML, world-readable):
+
+        [middleware]
+        command  = "python3 /path/to/mw.py"  # required; args allowed (the
+                                             # git core.editor pattern)
+        identity = "middleware"              # optional; the SWARM_AGENT_ID
+                                             # injected, default "middleware"
+        timeout  = 60                        # optional; seconds
+
+    ONE middleware only — a single [middleware] section; a chain belongs
+    inside the middleware, not in the tool. The tool carries NO policy about
+    what the middleware does. None on ANY error — no file, no section, no
+    command key, unparseable — means no middleware, and cmd_send is
+    byte-identical to today (fail-open)."""
+    try:
+        path = os.path.join(root, "config")
+        try:
+            import tomllib
+            with open(path, "rb") as f:
+                conf = tomllib.load(f)
+        except ImportError:
+            conf = read_flat_toml(path)
+        mw = conf.get("middleware") or {}
+        command = str(mw.get("command") or "").strip()
+        if not command:
+            return None
+        identity = str(mw.get("identity") or "").strip() or "middleware"
+        timeout = int(mw.get("timeout") or MIDDLEWARE_TIMEOUT)
+        return identity, command, timeout
+    except Exception:
+        return None
 
 
 def emit_hook_output(obj):
@@ -913,14 +990,53 @@ def cmd_send(argv):
     err = send_size_error(rec, relation(sender, to, parents_of(agents)))
     if err:
         die(err)
-    try:
-        queue_put(root, rec)
-    except OSError as e:
-        die(f"could not queue message: {e}")
+    # Send middleware — admission control (HOOK-WIRING §13): when a
+    # middleware is configured in .swarm/config, EVERY send runs it here, in
+    # the sender's process, BEFORE the queue write, with the full envelope
+    # (from/to/ts/body) on stdin. The message does not exist in any queue
+    # until the middleware passes it — admission is a code fact, not a
+    # tendency. The tool carries NO policy about what the middleware does;
+    # the verdict is its EXIT CODE alone (stdout is never parsed):
+    #   - exit 0        -> PASS: queue_put below (next() — success = continue);
+    #   - exit 100      -> HANDLED: deliberate don't-pass — the middleware
+    #     owned the message (answered/dropped/forwarded via its own sends,
+    #     in its own wire name); nothing queued here;
+    #   - any other exit / timeout / killed / not configured -> FAIL-OPEN:
+    #     queued unchanged — crash, set -e, command-not-found all pass
+    #     through safely; a broken middleware degrades to no middleware
+    #     IN CODE (100 is the only don't-queue value precisely so an
+    #     incidental failure can never read as a deliberate drop).
+    # If the SENDER's process dies while the middleware runs, this send
+    # never returned and the message was never ACCEPTED — the sender
+    # observes its own failed command and retries per its briefing
+    # (producer-side-interceptor semantics; "nothing silently dropped"
+    # governs accepted messages, and an unaccepted send has the sender as
+    # its observer).
+    proceed = True
+    reg = registered_middleware(root)
+    if reg and sender != reg[0]:  # recursion guard: its own sends bypass
+        identity, command, timeout = reg
+        # Inject the swarm env contract: a bare subprocess inherits the
+        # SENDER's env, and anything the middleware sends would be attributed
+        # to the original sender. The config identity IS what is injected.
+        env = {**os.environ, "SWARM_AGENT_ID": identity, "SWARM_DIR": root}
+        try:
+            p = subprocess.run(shlex.split(command), input=json.dumps(rec),
+                               text=True, env=env,
+                               timeout=timeout, capture_output=True)
+            proceed = p.returncode != MIDDLEWARE_HANDLED_EXIT
+        except Exception:
+            pass  # timeout/kill/crash: fail open, queue below
+    if proceed:
+        try:
+            queue_put(root, rec)
+        except OSError as e:
+            die(f"could not queue message: {e}")
 
-    # Doorbell, best-effort. The operator is a mailbox, not a node: no pane,
-    # no doorbell, no warning — the human sees the mail at the top of `ps`.
-    if to != "operator":
+    # Doorbell, best-effort, only for mail that was actually queued. The
+    # operator is a mailbox, not a node: no pane, no doorbell, no warning —
+    # the human sees the mail at the top of `ps`.
+    if proceed and to != "operator":
         pane = agents[to].get("pane", "")
         if not (pane and ring_doorbell(pane)):
             print(f"swarm: note: doorbell to {to} skipped (pane unavailable); "
@@ -1000,7 +1116,8 @@ name, a parent, and a journal. A message is a claim on one turn.
 
 State: ./.swarm (override with SWARM_DIR). Journals at .swarm/journal/<name>.md —
 world-readable; read your children's. deliver/event/restore are hook entrypoints
-(wired automatically at spawn), not for humans."""
+(wired automatically at spawn), not for humans. A send middleware, if configured
+in .swarm/config ([middleware] section), is run by send itself before queuing."""
 
 
 def main(argv):
