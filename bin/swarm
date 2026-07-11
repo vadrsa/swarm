@@ -933,9 +933,28 @@ def cmd_send(argv):
     if err:
         die(err)
     try:
-        queue_put(root, rec)
+        fn = queue_put(root, rec)  # DURABLE FIRST — the hook below can never un-write it
     except OSError as e:
         die(f"could not queue message: {e}")
+
+    # Engine hook (HOOK-WIRING §3): cold, per-message, timeout-bounded, and
+    # FAIL-OPEN by construction — operator-bound mail only, only when the
+    # marker is configured, never for the engine's own sends (the recursion
+    # guard). The message is ALREADY durable above, so the hook can only
+    # claim it (move to delivered/ and answer) or leave it; timeout, crash,
+    # or an absent marker leave it queued — byte-identical to no hook at all.
+    reg = registered_hook(root)
+    if to == "operator" and reg and sender != reg[0]:
+        eng_name, command = reg
+        # Inject the swarm env contract (§7): a bare subprocess inherits the
+        # SENDER's env, and the reply would launder under the asker's name or
+        # the OPERATOR header. Line 1 of the marker IS the injected identity.
+        env = {**os.environ, "SWARM_AGENT_ID": eng_name, "SWARM_DIR": root}
+        try:
+            subprocess.run(command.split() + [fn], env=env,
+                           timeout=ENGINE_HOOK_TIMEOUT, capture_output=True)
+        except Exception:
+            pass  # timeout or crash: the message already waits for the human
 
     # Doorbell, best-effort. The operator is a mailbox, not a node: no pane,
     # no doorbell, no warning — the human sees the mail at the top of `ps`.

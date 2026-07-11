@@ -372,5 +372,85 @@ class TestEdgesFoundReading(Base):
         self.assertEqual(rec["body"], "hand-dropped")
 
 
+class TestEngineHookSendPath(Base):
+    """HOOK-WIRING §3/§4: write-first durability (H-F1) and the fail-open
+    branch (H-F2) — hook absent, timing out, or crashing leaves an
+    operator-bound send byte-identical to a world with no hook."""
+
+    def _arm(self, script_body):
+        d = os.path.join(self.root, "engine")
+        os.makedirs(d, exist_ok=True)
+        hook = os.path.join(self.bindir, "hookcmd")
+        with open(hook, "w") as f:
+            f.write("#!/usr/bin/env bash\n" + script_body + "\n")
+        os.chmod(hook, 0o755)
+        with open(os.path.join(d, "hook"), "w") as f:
+            f.write(f"decision-engine\n{hook}\n")
+        return hook
+
+    def test_hf1_message_durable_in_queue_before_hook_runs(self):
+        witness = os.path.join(self.root, "witness")
+        self._arm(f'[ -f "$SWARM_DIR/queue/operator/$1" ] && '
+                  f'echo "present as $SWARM_AGENT_ID" > {witness}')
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="for the human")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(witness) as f:
+            self.assertEqual(f.read().strip(), "present as decision-engine",
+                             "file must be durable, and identity injected, "
+                             "before the hook sees it")
+        self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
+
+    def test_hf2_no_marker_is_todays_send_exactly(self):
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="plain mail")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        w = sw.list_waiting(self.root, "operator")
+        self.assertEqual([r["body"] for _, _, r in w], ["plain mail"])
+        self.assertEqual(w[0][2]["from"], "kid")
+        self.assertFalse(os.path.isdir(sw.delivered_dir(self.root, "operator")))
+
+    def test_hf2_hook_timeout_leaves_message_and_bounds_the_send(self):
+        self._arm("sleep 30")
+        t0 = time.time()
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid",
+                       "SWARM_ENGINE_HOOK_TIMEOUT": "1"},
+                      stdin_text="hook will time out")
+        elapsed = time.time() - t0
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(elapsed, 20, "send must return at ~T, not the hook's leisure")
+        w = sw.list_waiting(self.root, "operator")
+        self.assertEqual([r["body"] for _, _, r in w], ["hook will time out"])
+        self.assertFalse(os.path.isdir(sw.delivered_dir(self.root, "operator")))
+
+    def test_hf2_hook_crash_leaves_message(self):
+        self._arm("exit 1")
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="hook will crash")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
+        self.assertFalse(os.path.isdir(sw.delivered_dir(self.root, "operator")))
+
+    def test_hf4_guards_no_hook_off_the_operator_path(self):
+        witness = os.path.join(self.root, "witness")
+        self._arm(f"touch {witness}")
+        os.makedirs(os.path.join(self.root, "agents"), exist_ok=True)
+        with open(sw.agent_rec_path(self.root, "kid"), "w") as f:
+            json.dump({"name": "kid", "parent": "operator", "pane": "nope"}, f)
+        # a non-operator send must not invoke the hook...
+        run_swarm(["send", "kid", "hello"], {"SWARM_DIR": self.root})
+        self.assertFalse(os.path.exists(witness), "hook fired off the operator path")
+        # ...and neither must the engine's own operator-bound send (recursion)
+        run_swarm(["send", "operator", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "decision-engine"},
+                  stdin_text="engine escalating")
+        self.assertFalse(os.path.exists(witness), "hook fired on the engine's own send")
+        self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
