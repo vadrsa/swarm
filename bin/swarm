@@ -698,6 +698,96 @@ def cmd_restore():
     sys.exit(0)
 
 
+def engine_decide(name, rec, grants):
+    """The model-call site, smallest honest version (HOOK-WIRING §11 step 4):
+    one cold `claude -p` over the quoted grants and the message. Returns
+    (cited_grant, reply) only when the model output is exactly the ANSWER
+    shape AND the cited grant is one actually found in the journal — any
+    other output, exit code, timeout, or absence of claude is a PASS."""
+    prompt = (
+        f"You are {name}, the decision engine on a swarm operator mailbox. "
+        f"One message addressed to the human operator is below, with every "
+        f"grant line found in the operator journal. A grant is standing, "
+        f"written authority from the human. Decide strictly from the grants.\n"
+        f"If exactly one grant plainly covers this message, output exactly:\n"
+        f"ANSWER\nGRANT: <that grant line, copied verbatim>\n"
+        f"<the reply to send back to the sender, complete and self-contained>\n"
+        f"Otherwise — no grant covers it, grants conflict, or you are unsure "
+        f"— output exactly:\nPASS\n"
+        f"Never invent authority beyond the quoted grants; when in doubt, "
+        f"PASS. The human reads everything you pass, and an over-broad "
+        f"auto-answer is worse than a slow human answer.\n\n"
+        f"GRANTS:\n" + "\n".join(grants) + "\n\n"
+        f"MESSAGE from {rec.get('from', '?')} "
+        f"(sent {fmt_ts(rec.get('ts'))}):\n{rec.get('body', '')}")
+    try:
+        p = subprocess.run(["claude", "-p", prompt], capture_output=True,
+                           text=True, timeout=ENGINE_HOOK_TIMEOUT)
+        lines = p.stdout.strip().splitlines()
+        if (p.returncode == 0 and len(lines) >= 3
+                and lines[0].strip() == "ANSWER"
+                and lines[1].strip().startswith("GRANT:")):
+            cited = lines[1].strip()[len("GRANT:"):].strip()
+            reply = "\n".join(lines[2:]).strip()
+            if reply and any(cited in g for g in grants):
+                return cited, reply
+    except Exception:
+        pass
+    return None
+
+
+def cmd_engine_hook(argv):
+    # Cold, per-message, tool-invoked (HOOK-WIRING §3): decide ONE queued
+    # operator message against the grant lines in the operator journal.
+    # Pass = exit 0 touching NOTHING — the file already waits under its true
+    # sender. Answer = the claim ritual, strictly ordered: mv to delivered/
+    # (mv-and-abort: if the human's mv won, ours raises and we stop), the
+    # hand-tagged claim line quoting the grant, then the reply to the asker
+    # as my_name() — which the send path's env injection makes the engine's
+    # wire name. Any error anywhere = pass: the message is already durable.
+    if len(argv) != 1:
+        die("engine-hook needs exactly one queue filename")
+    root, name, fn = root_dir(), my_name(), argv[0]
+    src = os.path.join(q_dir(root, "operator"), fn)
+    rec = read_json(src)
+    if not (rec and isinstance(rec.get("body"), str)):
+        sys.exit(0)  # already claimed, or unreadable: pass
+    try:
+        with open(journal_path(root, "operator")) as f:
+            grants = [l.strip() for l in f if "GRANT:" in l]
+    except OSError:
+        grants = []
+    if not grants:
+        sys.exit(0)  # nothing is granted: everything passes to the human
+    verdict = engine_decide(name, rec, grants)
+    if not verdict:
+        sys.exit(0)
+    grant, reply = verdict
+    asker = rec.get("from", "?")
+    out = {"to": asker, "from": name, "ts": now_ms(),
+           "body": (f"[AUTO-ANSWER from {name} — the human has NOT read your "
+                    f"message; answered under standing grant: {grant}]\n\n"
+                    f"{reply}")}
+    agents = load_agents(root)
+    if send_size_error(out, relation(name, asker, parents_of(agents))):
+        sys.exit(0)  # an answer that cannot be sent whole is a pass, not a claim
+    try:
+        os.makedirs(delivered_dir(root, "operator"), exist_ok=True)
+        os.replace(src, os.path.join(delivered_dir(root, "operator"), fn))
+    except OSError:
+        sys.exit(0)  # the human's mv won the race: abort, touch nothing
+    with open(journal_path(root, "operator"), "a") as f:
+        f.write(f"\n[hand:{name}] CLAIM {fn} — auto-answered under: {grant}\n")
+    try:
+        queue_put(root, out)
+        a = agents.get(asker)
+        if a and a.get("pane"):
+            ring_doorbell_once(a["pane"])
+    except Exception:
+        pass  # claim line stands; the seat's reconcile catches a lost reply
+    sys.exit(0)
+
+
 # --------------------------------------------------------------- CLI verbs
 
 def claim_name(root, name):
@@ -1038,7 +1128,8 @@ name, a parent, and a journal. A message is a claim on one turn.
 
 State: ./.swarm (override with SWARM_DIR). Journals at .swarm/journal/<name>.md —
 world-readable; read your children's. deliver/event/restore are hook entrypoints
-(wired automatically at spawn), not for humans."""
+(wired automatically at spawn), not for humans; engine-hook is invoked by send
+itself when .swarm/engine/hook is configured (rm the marker to disarm)."""
 
 
 def main(argv):
@@ -1062,6 +1153,8 @@ def main(argv):
         cmd_event(rest[0] if rest else "")
     elif verb == "restore":
         cmd_restore()
+    elif verb == "engine-hook":
+        cmd_engine_hook(rest)
     else:
         print(USAGE, file=sys.stderr)
         die(f"unknown verb: {verb}")

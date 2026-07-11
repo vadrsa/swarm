@@ -452,5 +452,102 @@ class TestEngineHookSendPath(Base):
         self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
 
 
+class TestEngineHookVerb(Base):
+    """HOOK-WIRING §7/§11 step 4: the engine-hook verb end to end through a
+    real operator-bound send — identity injection (H-F3), pass-is-absence,
+    and the H-F7 orphan grep."""
+
+    GRANT = "GRANT: widget schedule questions -> answer 'weekly, Mondays'"
+
+    def _fixture(self, claude_script):
+        os.makedirs(os.path.join(self.root, "engine"), exist_ok=True)
+        with open(os.path.join(self.root, "engine", "hook"), "w") as f:
+            f.write(f"decision-engine\n{SWARM} engine-hook\n")
+        jp = sw.journal_path(self.root, "operator")
+        os.makedirs(os.path.dirname(jp), exist_ok=True)
+        with open(jp, "w") as f:
+            f.write(f"# operator ledger\n\n{self.GRANT}\n")
+        os.makedirs(os.path.join(self.root, "agents"), exist_ok=True)
+        with open(sw.agent_rec_path(self.root, "kid"), "w") as f:
+            json.dump({"name": "kid", "parent": "operator", "pane": "nope"}, f)
+        with open(os.path.join(self.bindir, "claude"), "w") as f:
+            f.write("#!/usr/bin/env bash\n" + claude_script + "\n")
+        os.chmod(os.path.join(self.bindir, "claude"), 0o755)
+        return {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid",
+                "PATH": self.bindir + ":/usr/bin:/bin"}
+
+    def _send(self, env, body="when do widget tests run?"):
+        return run_swarm(["send", "operator", "--stdin"], env, stdin_text=body)
+
+    def test_hf3_answered_file_claimed_and_reply_is_from_engine(self):
+        env = self._fixture(
+            "printf 'ANSWER\\nGRANT: widget schedule questions -> answer "
+            "'\\''weekly, Mondays'\\''\\nAll clear: weekly, on Mondays.\\n'")
+        p = self._send(env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(sw.list_waiting(self.root, "operator"), [])
+        delivered = os.listdir(sw.delivered_dir(self.root, "operator"))
+        self.assertEqual(len(delivered), 1)
+        with open(sw.journal_path(self.root, "operator")) as f:
+            ledger = f.read()
+        self.assertIn(f"[hand:decision-engine] CLAIM {delivered[0]}", ledger)
+        self.assertIn("weekly, Mondays", ledger)   # the claim line quotes the grant
+        w = sw.list_waiting(self.root, "kid")
+        self.assertEqual(len(w), 1)
+        self.assertEqual(w[0][2]["from"], "decision-engine",
+                         "the reply must be from the engine's wire name — "
+                         "never OPERATOR, never the asker (H-F3)")
+        self.assertIn("AUTO-ANSWER", w[0][2]["body"])
+        self.assertIn("the human has NOT read", w[0][2]["body"])
+
+    def test_hf3_pass_is_absence_message_waits_under_true_sender(self):
+        env = self._fixture("printf 'PASS\\n'")
+        p = self._send(env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        w = sw.list_waiting(self.root, "operator")
+        self.assertEqual(len(w), 1)
+        self.assertEqual(w[0][2]["from"], "kid",
+                         "a passed message keeps its true sender (H-F3a)")
+        self.assertEqual(sw.list_waiting(self.root, "kid"), [])
+        with open(sw.journal_path(self.root, "operator")) as f:
+            self.assertNotIn("CLAIM", f.read())
+
+    def test_invented_grant_is_a_pass(self):
+        env = self._fixture(
+            "printf 'ANSWER\\nGRANT: authority I invented just now\\nsure!\\n'")
+        self._send(env)
+        self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
+        self.assertEqual(sw.list_waiting(self.root, "kid"), [])
+
+    def test_no_grants_passes_without_calling_the_model(self):
+        witness = os.path.join(self.root, "model-called")
+        env = self._fixture(f"touch {witness}; printf 'ANSWER\\noops\\n'")
+        with open(sw.journal_path(self.root, "operator"), "w") as f:
+            f.write("# operator ledger with no grants\n")
+        self._send(env)
+        self.assertFalse(os.path.exists(witness),
+                         "no grants must mean no model call at all")
+        self.assertEqual(len(sw.list_waiting(self.root, "operator")), 1)
+
+    def test_hf7_orphan_in_delivered_is_greppable(self):
+        # the redcheck-2 residual: a hook SIGKILLed between its mv and its
+        # claim line leaves delivered/<fn> with no ledger line. The collector
+        # is a grep of delivered/ filenames against claim lines — prove the
+        # orphan surfaces and a proper claim does not.
+        env = self._fixture(
+            "printf 'ANSWER\\nGRANT: widget schedule questions -> answer "
+            "'\\''weekly, Mondays'\\''\\nAll clear.\\n'")
+        self._send(env)                       # a properly claimed file
+        d = sw.delivered_dir(self.root, "operator")
+        with open(os.path.join(d, "999-ghost.json"), "w") as f:
+            json.dump({"to": "operator", "from": "ghost", "ts": 999,
+                       "body": "claimed then killed"}, f)   # the orphan
+        with open(sw.journal_path(self.root, "operator")) as f:
+            ledger = f.read()
+        orphans = [fn for fn in sorted(os.listdir(d))
+                   if f"CLAIM {fn}" not in ledger]
+        self.assertEqual(orphans, ["999-ghost.json"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
