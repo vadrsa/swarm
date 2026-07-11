@@ -579,5 +579,50 @@ class TestQueuePut(Base):
         self.assertEqual(len(sw.list_waiting(self.root, "a")), 1000)
 
 
+class TestRegisteredMiddleware(Base):
+    """.swarm/config's [middleware] section is registration; any defect in it
+    means no middleware (None), which is the fail-open branch. The tool
+    carries no policy about what the configured middleware does."""
+
+    def _config(self, text):
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(text)
+
+    def test_absent_config_is_none(self):
+        self.assertIsNone(sw.registered_middleware(self.root))
+
+    def test_full_section_parsed(self):
+        self._config('[middleware]\ncommand = "python3 /path/to/mw.py --flag"\n'
+                     'identity = "screener"\ntimeout = 5\n')
+        self.assertEqual(sw.registered_middleware(self.root),
+                         ("screener", "python3 /path/to/mw.py --flag", 5))
+
+    def test_identity_and_timeout_defaults(self):
+        self._config('[middleware]\ncommand = "/path/mw"\n')
+        ident, command, timeout = sw.registered_middleware(self.root)
+        self.assertEqual(ident, "middleware")
+        self.assertEqual(command, "/path/mw")
+        self.assertEqual(timeout, sw.MIDDLEWARE_TIMEOUT)
+
+    def test_defective_configs_are_none(self):
+        for bad in ("", "[middleware]\n", "[middleware]\ncommand = \"\"\n",
+                    "[other]\ncommand = \"/path\"\n", "not toml at [all"):
+            self._config(bad)
+            self.assertIsNone(sw.registered_middleware(self.root),
+                              f"{bad!r} must read as no middleware")
+
+    def test_fallback_parser_handles_the_flat_shape(self):
+        # the tiny non-tomllib path: sections, quoted strings, bare ints,
+        # comments — enough for .swarm/config, nothing more
+        self._config('# a comment\n[middleware]\n'
+                     'command = "python3 mw.py"  # inline note\n'
+                     'timeout = 7\n[other]\nx = 1\n')
+        conf = sw.read_flat_toml(os.path.join(self.root, "config"))
+        self.assertEqual(conf["middleware"],
+                         {"command": "python3 mw.py", "timeout": 7})
+        self.assertEqual(conf["other"], {"x": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

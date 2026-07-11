@@ -372,5 +372,173 @@ class TestEdgesFoundReading(Base):
         self.assertEqual(rec["body"], "hand-dropped")
 
 
+class TestSendMiddleware(Base):
+    """The universal send middleware (HOOK-WIRING §13): when configured in
+    .swarm/config, EVERY send runs it in the sender's process BEFORE the
+    queue write, full envelope on stdin. The verdict is its EXIT CODE alone
+    (stdout never parsed): 0 = PASS (queued); 100 = HANDLED (deliberate
+    don't-pass, nothing queued); any other exit / timeout / killed / not
+    configured fail OPEN (queued unchanged) — 100 sits above the shell's
+    reserved and ordinary error codes, so a failure can never be misread as
+    a deliberate HANDLED."""
+
+    def _arm(self, script_body, extra=""):
+        mw = os.path.join(self.bindir, "mwcmd")
+        with open(mw, "w") as f:
+            f.write("#!/usr/bin/env bash\n" + script_body + "\n")
+        os.chmod(mw, 0o755)
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(f'[middleware]\ncommand = "{mw}"\n{extra}')
+        return mw
+
+    def _kid(self):
+        os.makedirs(os.path.join(self.root, "agents"), exist_ok=True)
+        with open(sw.agent_rec_path(self.root, "kid"), "w") as f:
+            json.dump({"name": "kid", "parent": "operator", "pane": "nope"}, f)
+
+    def test_certainty_message_absent_during_middleware_present_after_pass(self):
+        # THE admission-control property: while the middleware runs, the
+        # message exists in no queue; after a PASS verdict it is queued.
+        # Also pins the identity injection (config identity, default).
+        witness = os.path.join(self.root, "witness")
+        self._arm(f'c=$(ls "$SWARM_DIR/queue/operator" 2>/dev/null | wc -l); '
+                  f'echo "count=$(echo $c) id=$SWARM_AGENT_ID" > {witness}; '
+                  f'exit 0')
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="for the human")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(witness) as f:
+            self.assertEqual(f.read().strip(), "count=0 id=middleware",
+                             "queue must be empty while the middleware runs, "
+                             "and the default identity injected")
+        w = sw.list_waiting(self.root, "operator")
+        self.assertEqual([r["body"] for _, _, r in w], ["for the human"])
+        self.assertEqual(w[0][2]["from"], "kid")
+
+    def test_every_recipient_is_intercepted_not_just_operator(self):
+        witness = os.path.join(self.root, "witness")
+        self._arm(f"touch {witness}; exit 0")
+        self._kid()
+        p = run_swarm(["send", "kid", "--stdin"], {"SWARM_DIR": self.root},
+                      stdin_text="agent-to-agent mail")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(witness),
+                        "the middleware must run on non-operator sends too")
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "kid")],
+                         ["agent-to-agent mail"])
+
+    def test_exit_100_means_handled_nothing_queued(self):
+        self._arm("echo 'handled it myself, logging noise'; exit 100")
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="middleware takes this one")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(sw.list_waiting(self.root, "operator"), [],
+                         "exit 100 = HANDLED = deliberate don't-pass")
+
+    def test_stdout_is_never_parsed(self):
+        # exit code is the whole contract: noisy stdout with exit 0 still
+        # passes the message through
+        self._arm("echo HANDLED; echo garbage; exit 0")
+        run_swarm(["send", "operator", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                  stdin_text="noisy pass")
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "operator")],
+                         ["noisy pass"])
+
+    def test_envelope_on_stdin_carries_from_to_ts_body(self):
+        got = os.path.join(self.root, "got")
+        self._arm(f"cat > {got}; exit 0")
+        run_swarm(["send", "operator", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                  stdin_text="payload bytes")
+        with open(got) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["from"], "kid")
+        self.assertEqual(rec["to"], "operator")
+        self.assertEqual(rec["body"], "payload bytes")
+        self.assertIsInstance(rec["ts"], int)
+
+    def test_fail_open_not_configured(self):
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="plain mail")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "operator")],
+                         ["plain mail"])
+
+    def test_fail_open_timeout_bounds_the_send_and_queues(self):
+        # the config's own timeout key bounds the invocation
+        self._arm("sleep 30", extra="timeout = 1\n")
+        t0 = time.time()
+        p = run_swarm(["send", "operator", "--stdin"],
+                      {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                      stdin_text="middleware will time out")
+        elapsed = time.time() - t0
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(elapsed, 20, "send must return at ~T")
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "operator")],
+                         ["middleware will time out"])
+
+    def test_fail_open_nonzero_and_killed(self):
+        self._arm("exit 3")              # ordinary error code: fail open
+        run_swarm(["send", "operator", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                  stdin_text="middleware exits nonzero")
+        self._arm("kill -9 $$")          # middleware killed mid-flight
+        run_swarm(["send", "operator", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
+                  stdin_text="middleware is killed")
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "operator")],
+                         ["middleware exits nonzero", "middleware is killed"])
+
+    def test_recursion_guard_middlewares_own_sends_bypass(self):
+        witness = os.path.join(self.root, "witness")
+        self._arm(f"touch {witness}; exit 0")
+        self._kid()
+        run_swarm(["send", "kid", "--stdin"],
+                  {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "middleware"},
+                  stdin_text="the middleware forwarding")
+        self.assertFalse(os.path.exists(witness),
+                         "the middleware's own sends must not be re-invoked")
+        self.assertEqual([r["body"] for _, _, r in
+                          sw.list_waiting(self.root, "kid")],
+                         ["the middleware forwarding"])
+
+    def test_sender_death_mid_middleware_nothing_queued_failure_observable(self):
+        # Producer-side-interceptor semantics: kill the send while the
+        # middleware runs — the message was never accepted (nothing queued),
+        # and the sender observes a failed command (nonzero exit), not silence.
+        started = os.path.join(self.root, "started")
+        self._arm(f"touch {started}; sleep 5")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SWARM_AGENT_ID", "SWARM_DIR", "HERDR_ENV")}
+        env.update({"PATH": "/usr/bin:/bin", "SWARM_DIR": self.root,
+                    "SWARM_AGENT_ID": "kid"})
+        p = subprocess.Popen([sys.executable, SWARM, "send", "operator",
+                              "--stdin"], stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, env=env)
+        p.stdin.write(b"doomed send")
+        p.stdin.close()
+        for _ in range(100):
+            if os.path.exists(started):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(started), "middleware never started")
+        p.kill()
+        rc = p.wait(timeout=30)
+        self.assertNotEqual(rc, 0, "the sender must observe the failure")
+        self.assertEqual(sw.list_waiting(self.root, "operator"), [],
+                         "an unaccepted send must leave nothing queued")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
