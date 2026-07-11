@@ -14,6 +14,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$REPO/bin/swarm"
 SKILL_SRC="$REPO/skill"
 SKILL_DST="$HOME/.claude/skills/swarm"
+SKILL2_SRC="$REPO/skill-middleware"
+SKILL2_DST="$HOME/.claude/skills/swarm-middleware"
 # Prefer ~/.local/bin (usually on PATH); fall back to advising a PATH export.
 BIN_DST="$HOME/.local/bin/swarm"
 
@@ -24,8 +26,9 @@ err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 
 uninstall() {
   echo "Uninstalling swarm…"
-  [ -L "$SKILL_DST" ] && { rm -f "$SKILL_DST"; ok "removed skill symlink $SKILL_DST"; } || say "no skill symlink"
-  [ -L "$BIN_DST" ]   && { rm -f "$BIN_DST";   ok "removed bin symlink $BIN_DST"; }   || say "no bin symlink"
+  [ -L "$SKILL_DST" ]  && { rm -f "$SKILL_DST";  ok "removed skill symlink $SKILL_DST"; }   || say "no skill symlink"
+  [ -L "$SKILL2_DST" ] && { rm -f "$SKILL2_DST"; ok "removed skill symlink $SKILL2_DST"; }  || say "no swarm-middleware skill symlink"
+  [ -L "$BIN_DST" ]    && { rm -f "$BIN_DST";    ok "removed bin symlink $BIN_DST"; }       || say "no bin symlink"
   echo "Done. (Your .swarm/ state dirs and PATH edits were left untouched.)"
   exit 0
 }
@@ -36,7 +39,7 @@ case "${1:-}" in
   *)           err "unknown flag: $1"; echo "usage: ./install.sh [--uninstall]" >&2; exit 1;;
 esac
 
-if [ -L "$BIN_DST" ] || [ -L "$SKILL_DST" ]; then
+if [ -L "$BIN_DST" ] || [ -L "$SKILL_DST" ] || [ -L "$SKILL2_DST" ]; then
   echo "Re-installing swarm from: $REPO (existing install detected)"
 else
   echo "Installing swarm from: $REPO"
@@ -80,6 +83,12 @@ if [ -e "$SKILL_DST" ] && [ ! -L "$SKILL_DST" ]; then
 else
   ln -sfn "$SKILL_SRC" "$SKILL_DST"
   ok "symlinked $SKILL_DST -> $SKILL_SRC"
+fi
+if [ -e "$SKILL2_DST" ] && [ ! -L "$SKILL2_DST" ]; then
+  warn "$SKILL2_DST exists and is not a symlink — leaving it. Remove it and re-run to link."
+else
+  ln -sfn "$SKILL2_SRC" "$SKILL2_DST"
+  ok "symlinked $SKILL2_DST -> $SKILL2_SRC"
 fi
 echo
 
