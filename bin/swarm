@@ -903,8 +903,17 @@ def cmd_spawn(argv):
     write_launcher(launcher, statusfile, settings, taskfile, model)
 
     # One tab per agent: the pane is what makes the society observable.
-    d = herdr_json(["tab", "create", "--cwd", cwd, "--no-focus", "--label", name,
-                    "--env", f"SWARM_DIR={root}", "--env", f"SWARM_AGENT_ID={name}"])
+    # Pin the child to the SPAWNER's workspace (HERDR_WORKSPACE_ID, set by
+    # herdr in every pane): without --workspace, herdr places the tab in the
+    # currently FOCUSED workspace, so a child could land in whatever space
+    # the human happens to be viewing. Unset (shouldn't happen inside herdr,
+    # but be safe) falls back to today's behavior rather than crashing.
+    args = ["tab", "create", "--cwd", cwd, "--no-focus", "--label", name,
+            "--env", f"SWARM_DIR={root}", "--env", f"SWARM_AGENT_ID={name}"]
+    ws = os.environ.get("HERDR_WORKSPACE_ID")
+    if ws:
+        args[2:2] = ["--workspace", ws]
+    d = herdr_json(args)
     pane = tab = ""
     try:
         pane = d["result"]["root_pane"]["pane_id"]
