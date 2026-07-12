@@ -66,7 +66,8 @@ def run_swarm(args, env_extra, stdin_text="", cwd=None):
     # Clean room: this suite may itself run INSIDE a live swarm, so our own
     # SWARM_AGENT_ID and the real herdr must not leak into the fixture.
     env = {k: v for k, v in os.environ.items()
-           if k not in ("SWARM_AGENT_ID", "SWARM_DIR", "HERDR_ENV")}
+           if k not in ("SWARM_AGENT_ID", "SWARM_DIR", "HERDR_ENV",
+                        "HERDR_WORKSPACE_ID")}
     env["PATH"] = "/usr/bin:/bin"          # no real herdr, no real claude
     env.update(env_extra)
     return subprocess.run([sys.executable, SWARM] + args, input=stdin_text,
@@ -260,6 +261,26 @@ class TestSpawnEndToEnd(Base):
         self.assertIn("not inside herdr", p.stderr)
         self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
                          "refusal before claiming must not burn the name")
+
+    def test_spawn_pins_child_to_spawners_workspace(self):
+        # without --workspace, herdr places the tab in the FOCUSED workspace,
+        # not the spawner's — a child could land in whatever space the human
+        # is viewing. The spawner's HERDR_WORKSPACE_ID pins it.
+        env, log, _ = self.fake_tools(claude=True)
+        env["HERDR_WORKSPACE_ID"] = "w4"
+        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(log) as f:
+            create = [l for l in f if l.startswith("tab create")][0]
+        self.assertIn("--workspace w4", create)
+
+    def test_spawn_without_workspace_env_falls_back_gracefully(self):
+        env, log, _ = self.fake_tools(claude=True)  # no HERDR_WORKSPACE_ID
+        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(log) as f:
+            create = [l for l in f if l.startswith("tab create")][0]
+        self.assertNotIn("--workspace", create)
 
     def test_spawn_bad_names_refused(self):
         env, _, _ = self.fake_tools(claude=True)
