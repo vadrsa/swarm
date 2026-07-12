@@ -393,16 +393,18 @@ class TestPs(unittest.TestCase):
                                   "lost": None})
         self.assertIn("lost [parent vanished unknown]", out)
 
-    def test_pinned_model_shows_inherited_shows_nothing(self):
-        # A model is only a fact when it was PINNED at spawn (--model). The
-        # record of an agent that inherited the spawner's model holds "" — it
-        # does not know what it inherited, so it renders NOTHING: no marker,
-        # no "(default)". One tree, all four cases.
+    def test_pinned_model_shows_unpinned_shows_nothing(self):
+        # A non-empty model means the agent was PINNED with --model at spawn.
+        # An empty one means it was NOT pinned — the record says nothing about
+        # which model is actually running (no --model execs bare `claude`, and
+        # nothing propagates from the spawner), so ps says nothing: no marker,
+        # no "(default)". (model) sits beside (you), not with the [system]
+        # facts. One tree, all four cases.
         agents = {
             "boss":   {"name": "boss", "parent": "operator", "pane": "p1",
                        "model": "opus"},          # pinned, live
             "kid":    {"name": "kid", "parent": "boss", "pane": "p2",
-                       "model": ""},              # inherited, live
+                       "model": ""},              # not pinned, live
             "gone":   {"name": "gone", "parent": "operator", "pane": "p9",
                        "model": "haiku"},         # pinned, DEAD (ruling R5)
             "lost":   {"name": "lost", "parent": "vanished", "pane": "p5",
@@ -412,21 +414,61 @@ class TestPs(unittest.TestCase):
                           queues={"boss": 0, "kid": 2, "gone": 0, "lost": 1},
                           events={"boss": None, "kid": None, "gone": None,
                                   "lost": None})
-        # pinned live agent carries its model, right after liveness
-        self.assertIn("boss [live] [opus] q=0", out)
-        # inherited live agent is byte-identical to a swarm with no models
+        # a pinned agent carries its model in the name's slot, where (you) lives
+        self.assertIn("boss (opus) [live] q=0", out)
+        # an unpinned line is byte-identical to a swarm with no models at all
         self.assertIn("kid (you) [live] q=2", out)
         # R5 guard: a dead pinned agent is a NAME on the shared dead line only
         self.assertIn("dead: gone", out)
         self.assertNotIn("haiku", out)
         # the orphan line carries the model too
-        self.assertIn("lost [parent vanished unknown] [live] [sonnet] q=1", out)
+        self.assertIn("lost (sonnet) [parent vanished unknown] [live] q=1", out)
 
-    def test_missing_model_key_renders_like_inherited(self):
-        # field records predate the key; absent must behave as inherited
+    def test_you_and_pinned_order(self):
+        # both facts on one agent: (you) first — it is the more urgent one
+        agents = {"kid": {"name": "kid", "parent": "operator", "pane": "p2",
+                          "model": "opus"}}
+        out = self.render(agents=agents, live={"p2"}, queues={"kid": 0},
+                          events={"kid": None})
+        self.assertIn("kid (you) (opus) [live] q=0", out)
+
+    def test_missing_model_key_renders_unpinned(self):
+        # field records predate the key; absent must behave as not-pinned
         out = self.render()   # AGENTS fixture has no "model" key at all
         self.assertIn("boss [live] q=0", out)
-        self.assertNotIn("[]", out)
+        self.assertNotIn("()", out)
+
+    def test_hostile_model_string_cannot_forge_a_row(self):
+        # --model is UNVALIDATED at spawn and stored verbatim, so the view
+        # clamps on render: a newline must not forge a tree row, an ANSI escape
+        # must not paint the terminal, and a long id must not blow the line.
+        agents = {
+            "evil": {"name": "evil", "parent": "operator", "pane": "p1",
+                     "model": "opus\nFAKE-LINE: injected\n└─ ghost [live] q=0"},
+            "ansi": {"name": "ansi", "parent": "operator", "pane": "p2",
+                     "model": "\x1b[31mred\x07"},
+            "long": {"name": "long", "parent": "operator", "pane": "p3",
+                     "model": "x" * 400},
+        }
+        out = self.render(agents=agents, live={"p1", "p2", "p3"},
+                          queues={"evil": 0, "ansi": 0, "long": 0},
+                          events={"evil": None, "ansi": None, "long": None},
+                          me_name="operator", op_mail=[])
+        body = out.splitlines()[1:]                  # drop the operator-mail line
+        # THE property: three agents, three rows. The newline in evil's pin does
+        # not become a fourth row, and the row it tried to forge does not exist.
+        self.assertEqual(len(body), 3)
+        self.assertNotIn("ghost", out)
+        self.assertNotIn("\x1b", out)                # no escape survives
+        self.assertNotIn("\x07", out)
+        for ln in body:
+            self.assertLessEqual(len(ln), 80)        # the long id is capped
+        # The hostile text is not erased — it is DEFANGED: it stays inside the
+        # parens, on evil's own row, where it is inert. Capping is not scrubbing.
+        self.assertIn("evil (opus FAKE-LINE: injected) [live] q=0", out)
+        # ESC and BEL are dropped; the residue is text that colours nothing
+        self.assertIn("ansi ([31mred) [live]", out)
+        self.assertIn("long (" + "x" * sw.MODEL_CAP + ") [live]", out)
 
 
 class TestWorldResolution(Base):

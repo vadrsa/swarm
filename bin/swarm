@@ -32,6 +32,7 @@ import time
 TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
+MODEL_CAP = 24           # ps view: rendered prefix of a pinned model id ('claude-opus-4-8' fits)
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 # Sender-side bound on one middleware invocation (a slow middleware must fail
 # open, never stall the sender). Default; .swarm/config's [middleware] timeout
@@ -501,9 +502,12 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     A live agent under a dead parent reattaches to its nearest living ancestor
     so hiding the dead never orphans the living.
 
-    A model shows only where it is a fact: an agent PINNED with --model at spawn
-    carries [model] after its liveness, on the live and orphan lines. An agent
-    that inherited the spawner's model shows nothing at all.
+    A non-empty 'model' means the agent was PINNED with --model at spawn, and ps
+    renders it as (model) beside (you) — both are operator facts about this one
+    agent, as against the [bracketed] system facts. An empty one means the agent
+    was NOT pinned: the record says nothing about which model is actually running
+    (a launcher with no --model execs bare `claude`, and nothing propagates from
+    the spawner), so ps says nothing. It is a fact about the spawn, not the model.
     """
     junk = junk or {}
     lines = []
@@ -540,11 +544,18 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         return f"q={queues.get(n, 0)}" + (f"+{junk[n]}?" if junk.get(n) else "")
 
     def model_of(n):
-        # Only a PINNED model (spawned with --model) is a fact the record holds.
-        # An inherited model is the empty string — the record does not know what
-        # it inherited, so it renders nothing rather than a fabricated claim.
-        m = (agents[n].get("model") or "").strip()
-        return f" [{m}]" if m else ""
+        # A non-empty model means PINNED with --model at spawn; empty means NOT
+        # pinned, which says nothing about the model actually running — so ps
+        # says nothing. `(model)` sits with `(you)`: parens are the operator's
+        # facts about one agent, brackets the system's facts about all of them.
+        #
+        # --model is unvalidated at spawn and stored verbatim, so the VIEW
+        # protects itself (the record keeps the truth): collapse whitespace so a
+        # newline cannot forge a tree row, drop control characters (ANSI), cap
+        # the length. Same layer, same reason, as LAST_WORDS_CAP.
+        m = " ".join(str(agents[n].get("model") or "").split())
+        m = "".join(c for c in m if c.isprintable())[:MODEL_CAP].strip()
+        return f" ({m})" if m else ""
 
     def walk(name, prefix, is_last):
         a = agents[name]
@@ -553,8 +564,8 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         ev = events.get(name)
         idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
         alive = "live" if live is not None else "?"
-        lines.append(f"{prefix}{branch}{name}{you} [{alive}]{model_of(name)} "
-                     f"{q_of(name)} {idle}")
+        lines.append(f"{prefix}{branch}{name}{you}{model_of(name)} "
+                     f"[{alive}] {q_of(name)} {idle}")
         if ev and ev.get("last_words"):
             cont = "   " if is_last else "│  "
             lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
@@ -580,8 +591,8 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     for n in sorted(shown_set - in_tree):
         a = agents[n]
         alive = "live" if live is not None else "?"
-        lines.append(f"?─ {n} [parent {a.get('parent', '?')} unknown] "
-                     f"[{alive}]{model_of(n)} {q_of(n)}")
+        lines.append(f"?─ {n}{model_of(n)} [parent {a.get('parent', '?')} unknown] "
+                     f"[{alive}] {q_of(n)}")
     if dead:
         lines.append(f"dead: {', '.join(dead)}")
     return "\n".join(lines)
