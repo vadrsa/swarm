@@ -393,6 +393,41 @@ class TestPs(unittest.TestCase):
                                   "lost": None})
         self.assertIn("lost [parent vanished unknown]", out)
 
+    def test_pinned_model_shows_inherited_shows_nothing(self):
+        # A model is only a fact when it was PINNED at spawn (--model). The
+        # record of an agent that inherited the spawner's model holds "" — it
+        # does not know what it inherited, so it renders NOTHING: no marker,
+        # no "(default)". One tree, all four cases.
+        agents = {
+            "boss":   {"name": "boss", "parent": "operator", "pane": "p1",
+                       "model": "opus"},          # pinned, live
+            "kid":    {"name": "kid", "parent": "boss", "pane": "p2",
+                       "model": ""},              # inherited, live
+            "gone":   {"name": "gone", "parent": "operator", "pane": "p9",
+                       "model": "haiku"},         # pinned, DEAD (ruling R5)
+            "lost":   {"name": "lost", "parent": "vanished", "pane": "p5",
+                       "model": "sonnet"},        # pinned, orphan
+        }
+        out = self.render(agents=agents, live={"p1", "p2", "p5"},
+                          queues={"boss": 0, "kid": 2, "gone": 0, "lost": 1},
+                          events={"boss": None, "kid": None, "gone": None,
+                                  "lost": None})
+        # pinned live agent carries its model, right after liveness
+        self.assertIn("boss [live] [opus] q=0", out)
+        # inherited live agent is byte-identical to a swarm with no models
+        self.assertIn("kid (you) [live] q=2", out)
+        # R5 guard: a dead pinned agent is a NAME on the shared dead line only
+        self.assertIn("dead: gone", out)
+        self.assertNotIn("haiku", out)
+        # the orphan line carries the model too
+        self.assertIn("lost [parent vanished unknown] [live] [sonnet] q=1", out)
+
+    def test_missing_model_key_renders_like_inherited(self):
+        # field records predate the key; absent must behave as inherited
+        out = self.render()   # AGENTS fixture has no "model" key at all
+        self.assertIn("boss [live] q=0", out)
+        self.assertNotIn("[]", out)
+
 
 class TestWorldResolution(Base):
     def test_world_via_symlink_from_foreign_cwd(self):

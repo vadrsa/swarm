@@ -500,6 +500,10 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     the living tree stays one screen however long the swarm's history grows.
     A live agent under a dead parent reattaches to its nearest living ancestor
     so hiding the dead never orphans the living.
+
+    A model shows only where it is a fact: an agent PINNED with --model at spawn
+    carries [model] after its liveness, on the live and orphan lines. An agent
+    that inherited the spawner's model shows nothing at all.
     """
     junk = junk or {}
     lines = []
@@ -535,6 +539,13 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     def q_of(n):
         return f"q={queues.get(n, 0)}" + (f"+{junk[n]}?" if junk.get(n) else "")
 
+    def model_of(n):
+        # Only a PINNED model (spawned with --model) is a fact the record holds.
+        # An inherited model is the empty string — the record does not know what
+        # it inherited, so it renders nothing rather than a fabricated claim.
+        m = (agents[n].get("model") or "").strip()
+        return f" [{m}]" if m else ""
+
     def walk(name, prefix, is_last):
         a = agents[name]
         branch = "└─ " if is_last else "├─ "
@@ -542,7 +553,8 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         ev = events.get(name)
         idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
         alive = "live" if live is not None else "?"
-        lines.append(f"{prefix}{branch}{name}{you} [{alive}] {q_of(name)} {idle}")
+        lines.append(f"{prefix}{branch}{name}{you} [{alive}]{model_of(name)} "
+                     f"{q_of(name)} {idle}")
         if ev and ev.get("last_words"):
             cont = "   " if is_last else "│  "
             lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
@@ -569,7 +581,7 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         a = agents[n]
         alive = "live" if live is not None else "?"
         lines.append(f"?─ {n} [parent {a.get('parent', '?')} unknown] "
-                     f"[{alive}] {q_of(n)}")
+                     f"[{alive}]{model_of(n)} {q_of(n)}")
     if dead:
         lines.append(f"dead: {', '.join(dead)}")
     return "\n".join(lines)
