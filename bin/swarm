@@ -32,7 +32,10 @@ import time
 TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
-MODEL_CAP = 24           # ps view: rendered prefix of a pinned model id ('claude-opus-4-8' fits)
+MODEL_CAP = 32           # ps view: a pinned model id. Measured, not guessed: the longest id in
+                         # the field is 25 ('claude-haiku-4-5-20251001'); 'claude-3-5-sonnet-
+                         # 20241022' is 26. 32 leaves headroom. Over the cap renders with an
+                         # ellipsis — a cut id must never pass for a whole one.
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 # Sender-side bound on one middleware invocation (a slow middleware must fail
 # open, never stall the sender). Default; .swarm/config's [middleware] timeout
@@ -553,8 +556,15 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         # protects itself (the record keeps the truth): collapse whitespace so a
         # newline cannot forge a tree row, drop control characters (ANSI), cap
         # the length. Same layer, same reason, as LAST_WORDS_CAP.
+        #
+        # A cut id ends in '…', because 'claude-haiku-4-5-2025100' is a LIE that
+        # looks like an id while 'claude-haiku-4-5-2025…' is visibly a fragment.
+        # The renderer must never state a claim the record does not support, and
+        # a plausible-but-wrong id is worse than no id at all.
         m = " ".join(str(agents[n].get("model") or "").split())
-        m = "".join(c for c in m if c.isprintable())[:MODEL_CAP].strip()
+        m = "".join(c for c in m if c.isprintable()).strip()
+        if len(m) > MODEL_CAP:
+            m = m[:MODEL_CAP - 1] + "…"
         return f" ({m})" if m else ""
 
     def walk(name, prefix, is_last):

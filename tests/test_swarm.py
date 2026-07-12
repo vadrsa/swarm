@@ -456,19 +456,50 @@ class TestPs(unittest.TestCase):
                           me_name="operator", op_mail=[])
         body = out.splitlines()[1:]                  # drop the operator-mail line
         # THE property: three agents, three rows. The newline in evil's pin does
-        # not become a fourth row, and the row it tried to forge does not exist.
+        # not forge a fourth row. Note the forged text is not ERASED — the tail
+        # of it survives as inert characters inside evil's own parens — but it
+        # never becomes a ROW, which is the only thing that could deceive.
         self.assertEqual(len(body), 3)
-        self.assertNotIn("ghost", out)
+        self.assertEqual(sum(ln.lstrip().startswith(("├─", "└─", "?─"))
+                             for ln in body), 3)     # exactly 3 tree rows
         self.assertNotIn("\x1b", out)                # no escape survives
         self.assertNotIn("\x07", out)
         for ln in body:
-            self.assertLessEqual(len(ln), 80)        # the long id is capped
-        # The hostile text is not erased — it is DEFANGED: it stays inside the
-        # parens, on evil's own row, where it is inert. Capping is not scrubbing.
-        self.assertIn("evil (opus FAKE-LINE: injected) [live] q=0", out)
+            self.assertLessEqual(len(ln), 80)        # every id is capped
+        # each hostile pin is DEFANGED on one line, and visibly cut when capped
+        self.assertIn("evil (opus FAKE-LINE: injected └─ gho…) [live] q=0", out)
         # ESC and BEL are dropped; the residue is text that colours nothing
         self.assertIn("ansi ([31mred) [live]", out)
-        self.assertIn("long (" + "x" * sw.MODEL_CAP + ") [live]", out)
+        # over-cap is cut AND visibly marked, never silently
+        self.assertIn("long (" + "x" * (sw.MODEL_CAP - 1) + "…) [live]", out)
+
+    def test_real_long_model_id_survives_whole(self):
+        # THE regression this cap exists to not cause. The longest id actually in
+        # the field is 25 chars; a cap that eats its last character would print
+        # 'claude-haiku-4-5-2025100' — a malformed id that still LOOKS real. A
+        # visibly-cut string is honest; a plausible-but-wrong one is a fabrication.
+        real = "claude-haiku-4-5-20251001"          # literal, from .swarm/agents/
+        self.assertEqual(len(real), 25)
+        agents = {"wmd-haiku": {"name": "wmd-haiku", "parent": "operator",
+                                "pane": "p1", "model": real}}
+        out = self.render(agents=agents, live={"p1"}, queues={"wmd-haiku": 0},
+                          events={"wmd-haiku": None}, me_name="operator",
+                          op_mail=[])
+        self.assertIn(f"wmd-haiku ({real}) [live] q=0", out)
+        self.assertNotIn("…", out)                  # nothing was truncated
+
+    def test_over_cap_model_is_visibly_truncated(self):
+        # when the cap DOES fire it must be legible as a cut, on one line
+        agents = {"big": {"name": "big", "parent": "operator", "pane": "p1",
+                          "model": "claude-" + "z" * 60}}
+        out = self.render(agents=agents, live={"p1"}, queues={"big": 0},
+                          events={"big": None}, me_name="operator", op_mail=[])
+        body = out.splitlines()[1:]
+        self.assertEqual(len(body), 1)
+        self.assertIn("…) [live]", out)             # the cut announces itself
+        field = out[out.index("(") + 1:out.index(")")]
+        self.assertEqual(len(field), sw.MODEL_CAP)  # cut INSIDE the cap, not past it
+        self.assertTrue(field.startswith("claude-zzz"))
 
 
 class TestWorldResolution(Base):
