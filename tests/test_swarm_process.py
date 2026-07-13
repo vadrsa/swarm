@@ -377,11 +377,17 @@ class TestSpawnEndToEnd(Base):
 
 class TestPermissionMode(Base):
     """Every spawned child must get an explicit --permission-mode on the real
-    `claude` argv — without one it silently inherits Claude Code's own manual
-    (ask-every-time) default and wedges on the first permission dialog, which
-    renders as plain 'idle' in `ps`. acceptEdits is the default this file
-    exists to install: file edits proceed unattended, everything else still
-    gates."""
+    `claude` argv — without one it silently inherits the MACHINE's ambient
+    default, which is how the WSL field bug happened: no mode set, his machine
+    defaulted to manual, every child wedged on the first dialog and rendered as
+    plain 'idle' in `ps`. Invisible.
+
+    acceptEdits is the default this file installs. Its real boundary, measured
+    (see docs/audit/spawn-hardening-2026-07-14.md) — NOT "everything else
+    gates", which an earlier draft claimed and which is false: in-cwd edits AND
+    in-cwd Bash (including `rm`) run unattended; writes outside the cwd and
+    network egress are blocked. It is still narrower than what it replaces
+    (this machine's ambient default was `auto`, which permits network)."""
 
     def _argv(self, argsf):
         for _ in range(50):                              # launcher runs async

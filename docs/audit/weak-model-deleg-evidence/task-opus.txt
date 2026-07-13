@@ -1,0 +1,10 @@
+Audit the swarm project's design docs for CONTRADICTIONS between what WORLD.md promises and what the other docs claim, and produce a structured report.
+
+Specifically:
+(1) Read WORLD.md — it is the contract. Extract every PROMISE it makes (the "What is promised, plainly" section and the nine concepts).
+(2) Read docs/design/STRUCTURE.md, docs/design/OPERATOR-STRUCTURE.md, and docs/design/DECISIONS.md.
+(3) For EACH promise in WORLD.md, decide whether those three docs are CONSISTENT with it, EXTEND it (add a rule WORLD doesn't state), or CONTRADICT it. You must quote the specific line from each side for every judgment you make.
+(4) Rank the contradictions/extensions by how much damage they would do if a new agent believed the wrong one.
+(5) Write the report to /private/tmp/claude-501/-Users-vadrsa-git-swarm/065b8514-5f8f-4ddf-888a-ef86990ef456/scratchpad/wmd/report-opus.md. It must contain: a table (promise | doc | verdict | quoted evidence), your ranked damage list with reasoning, and a final section "WHAT I AM LEAST SURE OF" naming the judgment in your own report you would most expect to be wrong, and why.
+
+This is a judgment task: the verdicts and the ranking are the deliverable, not a summary of the docs. Report to your parent weak-model-deleg when /private/tmp/claude-501/-Users-vadrsa-git-swarm/065b8514-5f8f-4ddf-888a-ef86990ef456/scratchpad/wmd/report-opus.md exists.

@@ -73,13 +73,33 @@ BANNED_MODELS = ()
 PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual",
                      "dontAsk", "plan")
 # The default every spawned child gets unless overridden (--permission-mode or
-# .swarm/config's [spawn] permission_mode). acceptEdits is the NARROWEST mode
-# that unwedges the bug this file exists to fix: it auto-approves file edits
-# (the dialog that silently wedged every child, invisible in `ps` as plain
-# "idle") without also auto-approving arbitrary Bash/network/other tool use —
-# that broader bypass is bypassPermissions (or --dangerously-skip-permissions),
-# deliberately NOT the default. An agent that can edit files unattended is the
-# design; an agent that can do anything unattended is a liability.
+# .swarm/config's [spawn] permission_mode). Without it a child inherits the
+# MACHINE's ambient default — which is how the WSL field bug happened: swarm set
+# no mode, his machine defaulted to manual, and every child wedged on the first
+# dialog, rendering as plain "idle" in `ps`. Invisible.
+#
+# acceptEdits is the NARROWEST mode that actually unwedges a child. Measured
+# (real claude, empty settings file so no ambient default could leak in) — state
+# the unflattering half too, because an earlier draft of this comment claimed it
+# gates "arbitrary Bash" and that was FALSE:
+#   in-cwd Edit/Write ....... allowed unattended   <- the design
+#   in-cwd Bash, incl. `rm` . ALLOWED UNATTENDED   <- real blast radius, say it
+#   writes OUTSIDE the cwd .. blocked (sandbox)
+#   network egress .......... blocked
+# So: a child can do real damage inside its own working directory. What it
+# cannot do is reach the network or the wider filesystem.
+#
+# It is nonetheless NARROWER THAN THE STATUS QUO IT REPLACES: this machine's own
+# ~/.claude/settings.json says defaultMode "auto", and auto PERMITS network
+# egress (measured: identical benign curl task — auto downloads, acceptEdits
+# blocks). Every child ever spawned here already ran with more privilege than
+# this line grants. bypassPermissions (== --dangerously-skip-permissions) stays
+# distinct, opt-in, and deliberately NOT the default.
+#
+# Known gap, real and pre-existing (docs/audit/spawn-red-2026-07-14.md):
+# .swarm/config lives INSIDE the cwd sandbox, so a child can write it — and it
+# drives both this default and the [middleware] command that runs on every send.
+# Follow-up hardening, not created by this change.
 DEFAULT_PERMISSION_MODE = "acceptEdits"
 # ps-blocked detection: a CLOSED set of (kind, substring) pairs matched against a
 # pane's own recent text. The kind — never the matched text itself — is what ps

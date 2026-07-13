@@ -56,18 +56,67 @@ or as a standing default (`.swarm/config`, `[spawn] permission_mode`). Precedenc
 config → `acceptEdits`. An invalid mode is refused *before* the child's name is claimed, so a
 rejected spawn never burns a name.
 
-### That it is genuinely narrow is measured, not asserted
+### What `acceptEdits` actually permits — measured, including the parts that are not flattering
 
-Run against a **real** `claude` with an **empty settings file** (`{}`) — deliberately, so this
-machine's ambient `"defaultMode": "auto"` could not leak in and manufacture a pass:
+An earlier draft of this document claimed `acceptEdits` "lets a child do its job and nothing
+more." **That was false, and the adversarial review caught it** (`docs/audit/spawn-red-2026-07-14.md`).
+The claim rested on a single probe — one `curl … > file` command — which is *doubly* confounded:
+gated by network policy *and* refused by the model's own exfiltration-suspicion heuristic. It
+generalized from an unrepresentative sample, which is the very error this document diagnoses
+elsewhere. The measured boundary, against a real `claude` with an **empty settings file** (`{}`,
+so this machine's ambient `"defaultMode": "auto"` cannot leak in and manufacture a pass):
 
-| model + flags | Edit a file | `curl … > file` |
-|---|---|---|
-| sonnet + `acceptEdits` | **edits, unattended** | **blocked** |
-| haiku + `acceptEdits` | **edits, unattended** | **blocked** |
-| haiku, **no flag** (what we shipped) | **refused** | — |
+| action under `acceptEdits` | result |
+|---|---|
+| Edit / Write a file **in the cwd** | **allowed, unattended** — the design |
+| `echo marker > f.txt` (local Bash, in cwd) | **allowed, unattended** |
+| **`rm -f victim.txt`** (destructive Bash, in cwd) | **allowed, unattended** |
+| `echo x > /tmp/outside.txt` (**outside** the cwd) | **blocked** — sandbox |
+| `curl …` (**network egress**) | **blocked** |
 
-`acceptEdits` lets a child do its job and nothing more. We did not ship a disguised bypass.
+**The true contract: `acceptEdits` gates network egress and writes outside the cwd, but permits
+arbitrary local action inside the cwd — including deletion.** A child can do real damage within
+its own working directory. Say that plainly rather than hide it.
+
+### Why `acceptEdits` is still the right default
+
+The honest choice set is not "safe vs. unsafe," it is four modes:
+
+- `manual` — **the bug.** Children wedge on the first dialog and render as `idle`: invisible.
+- **`acceptEdits`** — local action in-cwd; network and out-of-cwd writes gated. **Chosen.**
+- `auto` — broader: **permits network egress.**
+- `bypassPermissions` — everything. Never the default; reachable only on purpose.
+
+`acceptEdits` is the **narrowest mode that actually unwedges a child** — and, critically, it is
+**narrower than the status quo it replaces.** Before this PR swarm passed *no* permission flag,
+so a child inherited the machine's ambient default; on this machine that is `auto`. Measured on
+an identical benign task:
+
+| mode | `curl -s https://example.com -o f.html` |
+|---|---|
+| `auto` (**what every child here already ran with**) | **downloaded — 559 bytes. Network permitted.** |
+| `acceptEdits` (this PR) | **blocked, requires approval** |
+
+So on the machine where swarm was built and every prior agent ran, **this change reduces child
+privilege.** It raises it only where the ambient default was `manual` — i.e. the WSL user, whose
+children were wedged and doing nothing at all. That trade is the entire point of his bug report.
+
+We did not ship a disguised bypass: `bypassPermissions` and `--dangerously-skip-permissions`
+remain distinct, opt-in, and deliberately not the default.
+
+### Known hardening gap (real, pre-existing, not a blocker on this PR)
+
+The review traced a genuine escalation path: `.swarm/config` sits **inside** the cwd sandbox, so
+a child can write it — and that file drives both the spawn permission default *and* the
+pre-existing `[middleware] command`, which `subprocess.run`s on **every** `swarm send`. A child
+could therefore raise its own future children to `bypassPermissions`, or register itself as
+tree-wide middleware.
+
+Stated honestly in both directions: the mechanism is **real** and worth fixing. It is **not
+created by this PR** — the middleware-exec feature predates it (`499cb2e`), `.swarm/config` does
+not exist in this repo today, and children here already ran with `auto`, which is *broader* than
+what this PR gives them. Filed as follow-up hardening (ACL or provenance check on `.swarm/config`),
+not silently absorbed and not overstated.
 
 ---
 
@@ -75,19 +124,25 @@ machine's ambient `"defaultMode": "auto"` could not leak in and manufacture a pa
 
 The ban rested on the claim *"it doesn't have auto mode."* `bin/swarm`'s own refusal text
 admitted the settling probe **was never run**. It has now been run — twice, independently, by
-two agents using different methods (a non-interactive probe with the control above; and a live
+two agents using different methods (a non-interactive probe with the control below; and a live
 pane spawn that reached a real `Stop` event with `swarm ps` showing `[live] idle`, never
 wedged). Both agree.
 
-The third row of that table is the whole case. **haiku with no flag** returns:
+| model + flags | Edit a file | network egress |
+|---|---|---|
+| sonnet + `acceptEdits` | edits, unattended | gated |
+| **haiku + `acceptEdits`** | **edits, unattended** | gated |
+| **haiku, no flag** (what we shipped) | **refused** | — |
+
+The third row is the whole case. **haiku with no flag** returns:
 
 > *"The tool requires permission to edit the file. This is a non-interactive session, so I
 > cannot proceed with the edit without your explicit permission."*
 
 That is the **exact stall we attributed to Haiku** — reproduced by *removing a flag* from a
 model we never banned, and cured by *adding it back*. Permission mode is a property of the
-**harness**, not the model. Haiku clears the wall exactly as Sonnet does, and is Bash-gated
-exactly as Sonnet is.
+**harness**, not the model. Haiku clears the wall exactly as Sonnet does, and is gated exactly
+as Sonnet is — identically, because the gate does not know which model is behind it.
 
 **The ban is lifted.** We banned a model for an infrastructure bug, and the record now says so.
 
@@ -145,7 +200,7 @@ real finding.
 | 1 | `herdr_run_path()` → `herdr pane run` | **BROKEN** — bare, unquoted. The WSL bug. |
 | 2 | `write_launcher()`: `echo "failed: settings unreadable: {settings}"` | **BROKEN** — `{settings}` unquoted *inside* a double-quoted shell string; a `$`, backtick, or `"` breaks or injects. Note the *rest* of `write_launcher` already quotes correctly — this error-message line is the one that was missed. |
 | 3 | hook `"command": f"{self_path} {cmd}"` (settings JSON) | **SAFE** — `self_path` is `shlex.quote`d; `cmd` is an internal literal (`deliver`, `event stop`), never operator input. A genuine shell string, and worth checking, but sound. |
-| 4 | `herdr tab create --cwd <cwd>` / `--env SWARM_DIR={root}` | **SAFE** — list-form `subprocess`, argv not shell. `pane run` is the only herdr verb that types into a shell. |
+| 4 | `herdr tab create --cwd <cwd>` / `--env SWARM_DIR={root}` | **SAFE** — and the reason is precise: not merely "we passed a list," but that **`tab create` does not re-type its arguments into a shell.** `pane run` is the only herdr verb that does. A future herdr verb that shells out would be unsafe *even in list form*, so the property to check is the verb, not the call style. |
 | 5 | `install.sh` / `bootstrap.sh` | **SAFE** — every expansion already double-quoted (`"$SWARM_HOME"`, `"$REPO"`, `"$BIN_DST"`). |
 
 ---

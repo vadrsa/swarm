@@ -1,0 +1,3 @@
+Reply to the sender of this message with a single line naming the sender's
+relation to you, exactly as shown in this message's header. Also write that same
+line to {OUTDIR}/echo-2.md.

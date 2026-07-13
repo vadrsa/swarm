@@ -1,0 +1,2 @@
+Write one sentence describing what a queue is to {OUTDIR}/echo-3.md, then send
+{RUNNER} a one-line note saying this task is done.
