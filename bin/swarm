@@ -148,29 +148,6 @@ def spawn_mandate_error():
     )
 
 
-def spawn_model_error(model):
-    # VERBATIM from docs/design/HARNESS.md §2.4 (:209-212), which specified this refusal —
-    # flags and all — before this change existed. Not re-derived, on purpose: HARNESS.md's
-    # version carries a hedge mine had dropped, and the hedge is the point.
-    #
-    # "The refusal text carries its own epistemic status on purpose: a gate that reads as
-    #  'the Haiku problem is solved' while the all-models permission gate stays unbuilt
-    #  would be the harm the source warns about." (HARNESS.md:217-219)
-    #
-    # The ban is standing operator POLICY resting on a CAPABILITY CLAIM that was never
-    # independently measured. What WAS measured says something sharper and less flattering
-    # to the ban: the wedge's cause is "a permission gate swarm hands EVERY child regardless
-    # of model. Opus would block too" (HARNESS.md:188-190, citing
-    # docs/audit/weak-model-delegation-2026-07-13.md:87). So the honest refusal names the
-    # policy AND names the unrun probe (§9.4) that would settle it. A reader must be able to
-    # see from this text alone that the question is open — not that it is closed.
-    return (
-        f"{model} is marked not agent-capable (operator ban 2026-07-13: no auto\n"
-        f"permission mode; settling probe not yet run — see HARNESS.md §9.4). Use\n"
-        f"sonnet, or a one-shot leaf token if the task is a single completion."
-    )
-
-
 def root_dir():
     return os.environ.get("SWARM_DIR") or os.path.join(os.getcwd(), ".swarm")
 
@@ -1313,7 +1290,8 @@ def cmd_spawn(argv):
     if not model or not reason.strip():
         die(spawn_mandate_error())
     if model.lower() in BANNED_MODELS:
-        die(spawn_model_error(model))
+        die(f"{model} is banned by standing operator policy — see bin/swarm's "
+            f"BANNED_MODELS comment for why.")
     if model not in SPAWN_MODELS:
         die(f"unknown model '{model}' — tokens: {' '.join(SPAWN_MODELS)}. "
             f"(`default` is a real answer: it means you looked and the configured "
