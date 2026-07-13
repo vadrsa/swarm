@@ -197,7 +197,12 @@ class TestSendCli(Base):
 class TestSpawnEndToEnd(Base):
     def test_spawn_happy_path_with_fake_herdr(self):
         env, log, argsf = self.fake_tools(claude=True)
-        p = run_swarm(["spawn", "worker", "do the thing"], env, cwd=self.root)
+        p = run_swarm(["spawn", "worker", "do the thing", "--model", "sonnet",
+                       "--reason", "this test asserts the exact record fields, "
+                       "journal text and argv the spawn must produce — every claim "
+                       "it makes is checked mechanically here, so a wrong answer "
+                       "cannot survive the assertions"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), "worker")
         with open(sw.agent_rec_path(self.root, "worker")) as f:
@@ -233,15 +238,33 @@ class TestSpawnEndToEnd(Base):
 
     def test_spawn_name_collision_errors(self):
         env, _, _ = self.fake_tools(claude=True)
-        self.assertEqual(run_swarm(["spawn", "worker", "t"], env,
-                                   cwd=self.root).returncode, 0)
-        p = run_swarm(["spawn", "worker", "t2"], env, cwd=self.root)
+        # Both spawns carry the flags: the point of this test is that the SECOND one is
+        # refused for the NAME, so the first must be a fully valid spawn and the second
+        # must fail the tombstone check — not the mandate. A flagless second spawn would
+        # still exit 1 and this test would still pass, while testing nothing.
+        self.assertEqual(run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                                    "--reason", "checks one string in stderr and one "
+                                    "file's existence; the assertion is the whole "
+                                    "verification and it is free"],
+                                   env, cwd=self.root).returncode, 0)
+        p = run_swarm(["spawn", "worker", "t2", "--model", "sonnet",
+                       "--reason", "same fixture, second spawn — the refusal it must "
+                       "produce is one grep of stderr"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("already used", p.stderr)
 
     def test_spawn_confirmed_failure_tears_down_but_keeps_tombstone(self):
         env, log, _ = self.fake_tools(claude=False)   # no claude anywhere on PATH
-        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        # Flags present ON PURPOSE: this test must reach the LAUNCHER and fail there
+        # ("did not start"), which it can only do by passing the mandate first. Without
+        # them it would exit 1 at the guard, never build a launcher, and still satisfy
+        # `returncode == 1` — a green test that had stopped testing the teardown.
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "the failure it must produce is a string in stderr "
+                       "and two files on disk; both are checked here, so a wrong "
+                       "teardown is caught by the next three assertions"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("did not start", p.stderr)
         self.assertIn("claude not found", p.stderr)
@@ -251,11 +274,18 @@ class TestSpawnEndToEnd(Base):
                         "tombstone must survive the failed spawn")
         with open(log) as f:
             self.assertIn("tab close tab-77", f.read())
-        p2 = run_swarm(["spawn", "worker", "t2"], env, cwd=self.root)
+        p2 = run_swarm(["spawn", "worker", "t2", "--model", "sonnet",
+                        "--reason", "re-spawn of a burned name; the tombstone refusal "
+                        "is one string in stderr"],
+                       env, cwd=self.root)
         self.assertIn("already used", p2.stderr)   # name burned forever
 
     def test_spawn_outside_herdr_refused_before_tombstone(self):
         env = {"SWARM_DIR": self.root, "HERDR_ENV": "0"}
+        # No flags, ON PURPOSE — and it must STILL say "not inside herdr", not "spawn
+        # needs --model". This pins the mandate guard's PLACEMENT: it sits after the
+        # herdr check, so the pre-existing refusals keep their own stderr. Hoisting the
+        # guard to the top of cmd_spawn (the naive spot) breaks exactly this assertion.
         p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("not inside herdr", p.stderr)
@@ -284,10 +314,199 @@ class TestSpawnEndToEnd(Base):
 
     def test_spawn_bad_names_refused(self):
         env, _, _ = self.fake_tools(claude=True)
-        for bad in ("Worker", "has space", "-lead", "x" * 41, "operator",
-                    "delivered"):
-            p = run_swarm(["spawn", bad, "t"], env, cwd=self.root)
+        # These spawns pass the mandate flags and assert on the SPECIFIC refusal, not
+        # merely on `returncode == 1`. Under a required flag, EVERYTHING exits 1 — so a
+        # bare returncode assertion here would stay green while silently ceasing to test
+        # any of the six name cases. The name check must be what refuses these, and the
+        # test now proves it does.
+        for bad in ("Worker", "has space", "-lead", "x" * 41):
+            p = run_swarm(["spawn", bad, "t", "--model", "sonnet",
+                           "--reason", "malformed name; the refusal is one string in "
+                           "stderr, checked right here"],
+                          env, cwd=self.root)
             self.assertEqual(p.returncode, 1, f"{bad!r} must be refused")
+            self.assertIn("bad name", p.stderr, f"{bad!r} must fail the NAME check")
+        for reserved in ("operator", "delivered"):
+            p = run_swarm(["spawn", reserved, "t", "--model", "sonnet",
+                           "--reason", "reserved name; the refusal is one string in "
+                           "stderr, checked right here"],
+                          env, cwd=self.root)
+            self.assertEqual(p.returncode, 1, f"{reserved!r} must be refused")
+            self.assertIn("reserved", p.stderr,
+                          f"{reserved!r} must fail the RESERVED check")
+
+
+class TestSpawnMandate(Base):
+    """--model and --reason are REQUIRED. The parent chooses the child's model.
+
+    The mandate exists because 142 of 143 spawns silently inherited an ambient default
+    that nobody chose. A missing flag must FAIL, and it must fail with an error that
+    teaches the question the reason has to answer.
+    """
+
+    GOOD = ["--model", "sonnet", "--reason",
+            "the child's output here is a file whose contents this test greps; a wrong "
+            "answer is caught by the assertion, so it costs nothing"]
+
+    def test_spawn_without_model_fails(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--reason", "checked by one grep"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("--model", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
+                         "a refused spawn must not burn the name")
+
+    def test_spawn_without_reason_fails(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("--reason", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
+                         "a refused spawn must not burn the name")
+
+    def test_spawn_with_neither_fails(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_blank_reason_is_not_a_reason(self):
+        # Whitespace must not satisfy the mandate. A field that a null string satisfies
+        # has compelled nothing.
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet", "--reason", "   "],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("--reason", p.stderr)
+
+    def test_error_teaches_the_question_not_just_the_flag(self):
+        # The error IS the teaching moment — it is the only place most parents will ever
+        # meet this idea. It must carry the QUESTION ("can you cheaply tell that this
+        # child was wrong?") and the BANNED framing ("why is this model good" launders a
+        # guess). An error that merely demands a string would produce "fits the task".
+        env, _, _ = self.fake_tools(claude=True)
+        err = run_swarm(["spawn", "worker", "t"], env, cwd=self.root).stderr
+        self.assertIn("cheaply tell", err)
+        self.assertIn("launders a guess", err)
+        self.assertIn("opus", err)          # the menu, so the parent can actually choose
+
+    def test_both_present_succeeds_and_record_carries_both(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t"] + self.GOOD, env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(sw.agent_rec_path(self.root, "worker")) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["model"], "sonnet")
+        self.assertIn("caught by the assertion", rec["reason"])
+
+    def test_reason_and_model_survive_into_the_journal(self):
+        # The journal is the reason's PRIMARY surface: it is where the CHILD reads what
+        # it was picked for, and where a later reader finds the decision. A reason that
+        # lived only in a JSON the tool reads back would be write-only.
+        env, _, _ = self.fake_tools(claude=True)
+        run_swarm(["spawn", "worker", "t"] + self.GOOD, env, cwd=self.root)
+        with open(sw.journal_path(self.root, "worker")) as f:
+            j = f.read()
+        self.assertIn("Model: sonnet", j)
+        self.assertIn("caught by the assertion", j)
+
+    def test_haiku_is_refused_and_the_refusal_is_honest(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "haiku",
+                       "--reason", "cheap read, checked by one grep"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("not agent-capable", p.stderr)
+        # The refusal must carry its OWN epistemic status. The measured cause of the wedge
+        # is a permission gate swarm hands EVERY child ("Opus would block too"), and the
+        # settling probe was never run. A refusal that read as "the Haiku problem is
+        # solved" would be the exact harm HARNESS.md §2.4 warns about.
+        self.assertIn("settling probe not yet run", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
+                         "a refused model must not burn the name")
+
+    def test_unknown_model_is_refused(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "gpt-9",
+                       "--reason", "checked by one grep"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown model", p.stderr)
+
+    def test_default_is_a_real_choice_recorded_but_not_passed_to_claude(self):
+        # `default` means "I looked, and the configured default is right" — a DECISION,
+        # and the record keeps it as one. But the LAUNCHER must pass no --model at all,
+        # exactly as an unpinned spawn did. Record and launcher diverge here ON PURPOSE:
+        # collapsing `default` to "" in the record would erase the very distinction this
+        # change exists to capture — a chosen default vs. an inherited one.
+        env, _, argsf = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "default",
+                       "--reason", "the default is right here and its output is one "
+                       "file this test greps"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(sw.agent_rec_path(self.root, "worker")) as f:
+            self.assertEqual(json.load(f)["model"], "default")   # the CHOICE is kept
+        for _ in range(50):
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        with open(argsf) as f:
+            argv = f.read().splitlines()                          # what claude saw
+        self.assertNotIn("--model", argv, "`default` must exec bare claude")
+
+    def test_reason_over_the_cap_is_refused(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "x" * (sw.REASON_CAP + 1)], env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("cap", p.stderr)
+
+    def test_ps_reason_shows_on_demand_and_never_inside_the_tree(self):
+        # The reason is surfaced OPT-IN and BELOW the tree. The tree is a scannable view
+        # and a sentence per row destroys it — worst exactly when the tree is big, i.e.
+        # when you need it. It is also attacker-controlled free text, and this view was
+        # burned on that twice (see model_of()).
+        env, _, _ = self.fake_tools(claude=True)
+        run_swarm(["spawn", "worker", "t"] + self.GOOD, env, cwd=self.root)
+        plain = run_swarm(["ps"], env, cwd=self.root)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn("worker", plain.stdout)
+        self.assertNotIn("caught by the assertion", plain.stdout,
+                         "the reason must NOT leak into the default tree")
+        shown = run_swarm(["ps", "--reason"], env, cwd=self.root)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("caught by the assertion", shown.stdout)
+        self.assertIn("model choices", shown.stdout)
+        # and the tree itself is byte-for-byte untouched by the flag
+        self.assertTrue(shown.stdout.startswith(plain.stdout.rstrip("\n")))
+
+    def test_ps_reason_sanitizes_a_forged_newline(self):
+        # A reason is free text any agent can write. A newline in it would forge a row of
+        # the very list that renders it. The RECORD keeps the text verbatim (it is the
+        # truth); the VIEW protects itself — same discipline, same reason, as model_of().
+        env, _, _ = self.fake_tools(claude=True)
+        run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                   "--reason", "checked by grep\n  evil: opus — forged row"],
+                  env, cwd=self.root)
+        with open(sw.agent_rec_path(self.root, "worker")) as f:
+            self.assertIn("\n", json.load(f)["reason"], "record keeps it verbatim")
+        out = run_swarm(["ps", "--reason"], env, cwd=self.root).stdout
+        rows = [ln for ln in out.splitlines() if ln.startswith("  evil:")]
+        self.assertEqual(rows, [], "a newline in a reason must not forge a row")
+
+    def test_spawn_header_teaches_the_required_form(self):
+        # The header is injected into EVERY child's task — it is where a parent learns
+        # what spawning even looks like. The old version showed the bare no-flag form,
+        # and 142 of 143 spawns copied it exactly. If it does not teach the flags AND the
+        # question, the mandate ships a rule nobody was told about.
+        env, _, _ = self.fake_tools(claude=True)
+        run_swarm(["spawn", "worker", "t"] + self.GOOD, env, cwd=self.root)
+        with open(os.path.join(self.root, "settings", "worker.task")) as f:
+            task = f.read()
+        self.assertIn("--model", task)
+        self.assertIn("--reason", task)
+        self.assertIn("cheaply tell", task)
 
 
 class TestEventCli(Base):

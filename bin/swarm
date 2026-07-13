@@ -45,7 +45,18 @@ MODEL_CAP = 40           # ps view: a pinned model id. Measured, not guessed: th
 # the Bedrock 'v1:0' becomes 'v10', which is precisely the plausible-but-wrong id this view exists
 # not to print. Exclude what breaks the view; never guess at what an id may contain.
 MODEL_STRUCTURAL = set("()") | set("─│├└┌┐┘┬┴┼")
+REASON_CAP = 500         # the record keeps the reason verbatim; this caps only what a
+                         # caller may pass, so one spawn cannot write an unbounded blob
+                         # into a file every `ps` and `restore` reads. A clause, not an essay.
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
+
+# Models a parent may pin. This is a POLICY list, not a capability list — the two differ,
+# and the difference is the honest part. `default` is the escape hatch: it means "I looked
+# at this child and the configured default is the right answer", which is a DECISION. It is
+# not the same as today's silence, where 142 of 143 spawns inherited a default nobody chose.
+SPAWN_MODELS = ("opus", "sonnet", "fable", "default")
+# haiku is REFUSED as an agent by standing operator policy (2026-07-13). See spawn_model_error.
+BANNED_MODELS = ("haiku",)
 # ps-blocked detection: a CLOSED set of (kind, substring) pairs matched against a
 # pane's own recent text. The kind — never the matched text itself — is what ps
 # renders. This is deliberate: pane text is attacker-controlled (any agent can
@@ -81,6 +92,58 @@ def now_ms():
 def die(msg):
     print(f"swarm: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def spawn_mandate_error():
+    # The error IS the teaching moment — it is the only place most parents will ever
+    # meet this idea, so it must TEACH, not scold. It teaches ONE thing: the question
+    # the reason must answer.
+    #
+    # That question is "can I cheaply tell that this child was wrong?" — a fact about
+    # the PARENT'S OWN VERIFICATION CAPACITY, which a parent can ALWAYS honestly answer
+    # from the brief they are already writing, with zero knowledge of any model.
+    # It is deliberately NOT "why is this model good": that framing launders a guess
+    # into a decision — it demands knowledge nobody has, so it gets a confident
+    # fabrication, recorded as if it were a finding. (docs/design/MODEL-FIT.md §5)
+    return (
+        'spawn needs --model <M> and --reason "<one clause>" — the parent '
+        "chooses the child's model.\n"
+        "  Ask: can you cheaply tell that this child was wrong?\n"
+        "  Cheap to check (you re-read the diff, re-run the grep, the test either "
+        "passes or it does not) — a small model's error costs you nothing.\n"
+        "  Expensive to check (you would have to redo the reasoning to find the "
+        "flaw) — pay for the strong one.\n"
+        "  Say THAT, in a clause. NOT \"why is this model good\" — that question "
+        "launders a guess into a decision: it demands knowledge you do not have, so "
+        "you will answer it fluently and wrongly, and the wrong answer gets recorded "
+        "as if it were a finding.\n"
+        "  The tell: delete \"I\" from your reason. If it still makes sense, it failed "
+        "— a real reason is about what YOU will do, never a property of the model.\n"
+        "  tokens: opus sonnet fable (agents) · haiku (see below) · default (if configured)"
+    )
+
+
+def spawn_model_error(model):
+    # VERBATIM from docs/design/HARNESS.md §2.4 (:209-212), which specified this refusal —
+    # flags and all — before this change existed. Not re-derived, on purpose: HARNESS.md's
+    # version carries a hedge mine had dropped, and the hedge is the point.
+    #
+    # "The refusal text carries its own epistemic status on purpose: a gate that reads as
+    #  'the Haiku problem is solved' while the all-models permission gate stays unbuilt
+    #  would be the harm the source warns about." (HARNESS.md:217-219)
+    #
+    # The ban is standing operator POLICY resting on a CAPABILITY CLAIM that was never
+    # independently measured. What WAS measured says something sharper and less flattering
+    # to the ban: the wedge's cause is "a permission gate swarm hands EVERY child regardless
+    # of model. Opus would block too" (HARNESS.md:188-190, citing
+    # docs/audit/weak-model-delegation-2026-07-13.md:87). So the honest refusal names the
+    # policy AND names the unrun probe (§9.4) that would settle it. A reader must be able to
+    # see from this text alone that the question is open — not that it is closed.
+    return (
+        f"{model} is marked not agent-capable (operator ban 2026-07-13: no auto\n"
+        f"permission mode; settling probe not yet run — see HARNESS.md §9.4). Use\n"
+        f"sonnet, or a one-shot leaf token if the task is a single completion."
+    )
 
 
 def root_dir():
@@ -953,10 +1016,24 @@ def spawn_header(name, parent):
     return (
         f"You are agent {name} in a swarm — a tree of Claude agents. Your parent, "
         f"who judges and approves your work: {parent_desc}.\n"
-        f"You have the `swarm` CLI: `swarm spawn <name> \"<task>\"` to delegate, "
+        f"You have the `swarm` CLI: "
+        f"`swarm spawn <name> \"<task>\" --model <M> --reason \"<why>\"` to delegate, "
         f"`swarm send <name>` to message (a message is a claim on one turn), "
         f"`swarm ps` to see the whole tree, `swarm world` for the full contract — "
-        f"read it before coordinating others.\n\n"
+        f"read it before coordinating others.\n"
+        # This sentence is the mandate's real delivery vehicle. The USAGE string is read
+        # by whoever types `swarm`; THIS is injected into every child that will ever
+        # spawn — it is where a parent learns what spawning even looks like. The old
+        # version showed the bare no-flag form, and 142 of 143 spawns copied it exactly.
+        # Teach the QUESTION here, not just the flag: a flag gets filled in, a question
+        # gets answered.
+        f"**--model and --reason are REQUIRED** — you choose your child's model, and "
+        f"the reason answers ONE question: *can you cheaply tell that this child was "
+        f"wrong?* If you will re-read its diff or re-run its grep anyway, a cheap "
+        f"model's error costs you nothing — pin `sonnet`. If catching a flaw would "
+        f"mean redoing the reasoning yourself, pay for `opus`. Say THAT — not why the "
+        f"model is good (you do not know, and a guess dressed as a reason is worse "
+        f"than none). Tokens: opus sonnet fable · default.\n\n"
         f"Your duties (briefed, not enforced): keep your journal at "
         f".swarm/journal/{name}.md — append timestamped entries in your own words "
         f"as you work, and always before going idle; a reconciliation entry names "
@@ -1097,13 +1174,15 @@ def pre_trust_dir(abspath):
 
 def cmd_spawn(argv):
     if len(argv) < 2:
-        die('spawn needs: swarm spawn <name> "<task>" [--model M] [--cwd DIR] '
-            '[--trust]')
+        die('spawn needs: swarm spawn <name> "<task>" --model M --reason "<why>" '
+            '[--cwd DIR] [--trust]\n  ' + spawn_mandate_error())
     name, task = argv[0], argv[1]
-    rest, model, cwd, trust = argv[2:], "", os.getcwd(), False
+    rest, model, reason, cwd, trust = argv[2:], "", "", os.getcwd(), False
     while rest:
         if rest[0] == "--model" and len(rest) > 1:
             model, rest = rest[1], rest[2:]
+        elif rest[0] == "--reason" and len(rest) > 1:
+            reason, rest = rest[1], rest[2:]
         elif rest[0] == "--cwd" and len(rest) > 1:
             cwd, rest = rest[1], rest[2:]
         elif rest[0] == "--trust":
@@ -1131,6 +1210,38 @@ def cmd_spawn(argv):
     if os.environ.get("HERDR_ENV") != "1":
         die("not inside herdr (HERDR_ENV != 1); spawn needs herdr as the container")
 
+    # THE MANDATE. Placement is load-bearing and was chosen, not defaulted: this guard sits
+    # AFTER the bad-name / reserved-name / empty-task / not-in-herdr refusals and BEFORE the
+    # tombstone is claimed. Both halves matter.
+    #   - After, because those refusals must keep their OWN stderr. A guard hoisted to the top
+    #     of the function (the naive spot, right after flag-parse) HIJACKS them: `spawn "bad
+    #     name"` would answer "you forgot --reason" instead of "bad name", and the six
+    #     name-refusal cases would all start failing for a reason that has nothing to do with
+    #     names. Worse, a test asserting only `returncode == 1` STAYS GREEN while silently
+    #     ceasing to test anything — the most dangerous outcome in this whole change.
+    #   - Before, because a refused spawn must not burn the name. The tombstone is forever;
+    #     a parent who forgot a flag has not spent their name on it.
+    if not model or not reason.strip():
+        die(spawn_mandate_error())
+    if model.lower() in BANNED_MODELS:
+        die(spawn_model_error(model))
+    if model not in SPAWN_MODELS:
+        die(f"unknown model '{model}' — tokens: {' '.join(SPAWN_MODELS)}. "
+            f"(`default` is a real answer: it means you looked and the configured "
+            f"default is right. It is not the same as saying nothing.)")
+    if len(reason) > REASON_CAP:
+        die(f"--reason is {len(reason)} chars; the cap is {REASON_CAP}. It is a clause, "
+            f"not an essay — if it does not fit, the thinking is not done.")
+
+    # `default` means "I chose the configured default" — a DECISION, recorded as one. But the
+    # LAUNCHER must then pass no --model at all (bare `claude`), exactly as an unpinned spawn
+    # did before. So the record and the launcher diverge here ON PURPOSE: the record keeps the
+    # decision ("default"), the launcher enacts it (silence). Collapsing `default` to "" in the
+    # record would erase the very thing this change exists to capture — the difference between
+    # a chosen default and an inherited one, which is invisible in exactly the direction that
+    # produced 142 of 143 blind spawns.
+    launch_model = "" if model == "default" else model
+
     root = root_dir()
     parent = my_name()
 
@@ -1141,7 +1252,15 @@ def cmd_spawn(argv):
         die(f"name '{name}' was already used (journal/{name}.md exists); "
             f"a name is one agent, forever — pick another")
     with os.fdopen(fd, "w") as f:
+        # The model AND the reason go in the child's FIRST journal entry, where they are
+        # read by the two audiences that matter and by nobody who has to go looking:
+        # the CHILD (which learns, in its own words, what it was picked for and what its
+        # parent expects to be able to check) and any LATER READER of the journal — the
+        # one artifact this whole society already agrees is the record. A reason filed
+        # only into a JSON the tool reads back would be write-only; this is the surface
+        # where a compelled sentence has ever actually changed behaviour here.
         f.write(f"# journal of {name}\n\n## {fmt_ts(now_ms())} — spawned\n"
+                f"Model: {model} — {reason}\n"
                 f"Task from {parent}: {task}\n")
 
     # Spawn plumbing: settings (hooks -> this file), task file, launcher.
@@ -1166,7 +1285,7 @@ def cmd_spawn(argv):
     except OSError:
         pass
     launcher = os.path.join(sdir, f"{name}.launch.sh")
-    write_launcher(launcher, statusfile, settings, taskfile, model)
+    write_launcher(launcher, statusfile, settings, taskfile, launch_model)
 
     if trust:
         pre_trust_dir(os.path.realpath(cwd))
@@ -1198,7 +1317,8 @@ def cmd_spawn(argv):
     # signal are the truth; a slow start must never lose the agent.
     write_atomic(agent_rec_path(root, name), json.dumps(
         {"name": name, "parent": parent, "pane": pane, "tab": tab,
-         "model": model, "cwd": cwd, "task": task, "ts": now_ms()}))
+         "model": model, "reason": reason, "cwd": cwd, "task": task,
+         "ts": now_ms()}))
 
     # Readiness = the launcher's own fired signal. Ambiguity is life: only a
     # CONFIRMED "failed" tears down; a silent timeout keeps the agent.
@@ -1326,8 +1446,26 @@ def cmd_send(argv):
 
 
 def cmd_ps(argv):
-    if argv:
-        die("ps takes no arguments")
+    # `--reason` is OPT-IN, and it prints BELOW the tree — never inside it. Three reasons,
+    # and the third is the one that actually decides it:
+    #   1. The tree is a SCANNABLE view. Its whole job is that you can find one agent's row
+    #      at a glance. A sentence per row destroys exactly that, and it destroys it worst
+    #      when the tree is big — i.e. precisely when you need it.
+    #   2. The reason is written for the CHILD and for the LATER READER, and both already
+    #      have it: it is in the child's own first journal entry (see cmd_spawn). `ps` is
+    #      not where that audience reads.
+    #   3. It is ATTACKER-CONTROLLED FREE TEXT, and this view has been burned on that twice
+    #      already — see model_of() in render_ps, which had to move the pin into a slot of
+    #      its own because `--model you` forged the `(you)` marker. A model id is one short
+    #      token and STILL needed a sanitizer and a cap. A --reason is unbounded prose that
+    #      any agent can write. Putting it in the default tree would hand every agent a
+    #      several-hundred-character, newline-capable pen aimed at the one view the operator
+    #      trusts to tell them what is true. So: not in the tree, and sanitized even here.
+    show_reason = False
+    if argv == ["--reason"]:
+        show_reason = True
+    elif argv:
+        die("ps takes no arguments, or --reason (the model choice for each agent)")
     root = root_dir()
     agents = load_agents(root)
     live = live_pane_set()
@@ -1345,6 +1483,28 @@ def cmd_ps(argv):
                     junk, blocked)
     if live is None and agents:
         out += "\n(herdr unreachable — liveness unknown)"
+    if show_reason:
+        out += "\n\nmodel choices — why each parent picked what it picked:"
+        rows = []
+        for n in sorted(agents):
+            m = str(agents[n].get("model") or "")
+            r = str(agents[n].get("reason") or "")
+            # Same sanitizer discipline as model_of(), same reason: the RECORD keeps the
+            # text verbatim (it is the truth), and the VIEW protects itself. Newlines are
+            # the sharp edge — one would forge a row of this very list. Collapse whitespace
+            # to single spaces, drop control characters (ANSI), cap with an ellipsis so a
+            # cut clause is VISIBLY a fragment and never passes for a whole one.
+            r = " ".join("".join(c for c in r if c.isprintable()).split())
+            if len(r) > REASON_CAP:
+                r = r[:REASON_CAP - 1] + "…"
+            if not m and not r:
+                # A pre-mandate agent: spawned before --model/--reason existed. Say so
+                # plainly. The absence IS the finding this change was built to end — do
+                # not paper over it with a blank.
+                rows.append(f"  {n}: (spawned before the mandate — no choice recorded)")
+            else:
+                rows.append(f"  {n}: {m or '?'} — {r or '(no reason recorded)'}")
+        out += "\n" + ("\n".join(rows) if rows else "  (no agents)")
     print(out)
 
 
@@ -1386,12 +1546,22 @@ def cmd_world():
 USAGE = """swarm (simplest) — four verbs. An agent is a session in a pane with a
 name, a parent, and a journal. A message is a claim on one turn.
 
-  swarm spawn <name> "<task>" [--model M] [--cwd DIR] [--trust]   create a
-                                child; the name is chosen, not derived; a name
-                                ever used errors. --trust pre-approves --cwd's
-                                workspace-trust prompt (opt-in, default off —
-                                for throwaway/experiment dirs only, never for
-                                real repos)
+  swarm spawn <name> "<task>" --model M --reason "<why>" [--cwd DIR] [--trust]
+                                create a child; the name is chosen, not derived;
+                                a name ever used errors.
+                                --model and --reason are BOTH REQUIRED: the
+                                parent chooses the child's model. The reason
+                                answers ONE question — can you cheaply tell that
+                                this child was wrong? Cheap to check (you re-read
+                                the diff anyway) → a small model's error is free;
+                                expensive to check (you'd redo the reasoning) →
+                                pay for the strong one. Say THAT, not why the
+                                model is good. Tokens: opus sonnet fable ·
+                                default (a real answer: you looked, and the
+                                configured default is right).
+                                --trust pre-approves --cwd's workspace-trust
+                                prompt (opt-in, default off — for throwaway dirs
+                                only, never for real repos)
   swarm send <name> --stdin     message an agent or `operator` (body from stdin —
   swarm send <name> "<msg>"     recommended; a positional body is a shell word).
                                 Delivered whole, ONE per turn, oldest first. Must
@@ -1399,6 +1569,10 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 refuses: put it in a file, send the path.
   swarm ps                      the one view: tree, liveness, queue depth,
                                 idle-since, last words; operator mail on top
+  swarm ps --reason             the same tree, plus each agent's model and the
+                                reason its parent gave — printed BELOW the tree,
+                                never inside it (a sentence per row would wreck
+                                the one view you scan)
   swarm close <name>            end an agent and its subtree; files stay
   swarm world                   print the contract (two screens)
 
