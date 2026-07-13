@@ -970,7 +970,14 @@ def cmd_spawn(argv):
         pass
     if not pane:
         die("herdr tab create failed")
-    subprocess.run(["herdr", "pane", "run", pane, launcher], capture_output=True)
+    # HERDR-BUG SHIM (herdr 0.7.1): `pane run` strips exactly ONE leading '/'
+    # from the command it types into the pane, so an absolute launcher path
+    # arrives relative and the shell can't find it — every spawn dies at a
+    # prompt. Doubling the leading slash survives the strip and is POSIX-
+    # equivalent (//x == /x). Verified: `//bin/echo` runs, `/bin/echo` -> "no
+    # such file". Remove when herdr fixes pane-run arg handling.
+    run_path = "/" + launcher if launcher.startswith("/") else launcher
+    subprocess.run(["herdr", "pane", "run", pane, run_path], capture_output=True)
 
     # Record the binding BEFORE the readiness wait: the record + the launcher
     # signal are the truth; a slow start must never lose the agent.
