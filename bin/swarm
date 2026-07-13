@@ -991,7 +991,10 @@ def spawn_header(name, parent):
 
 
 def herdr_run_path(launcher):
-    """Pure. HERDR-BUG SHIM (herdr <=0.7.1, unfixed as of this writing):
+    """Pure. HERDR-BUG SHIM (confirmed present in herdr 0.7.3, the version
+    installed on the machine this was verified on; earliest known-affected
+    version not established — do not read "0.7.1" elsewhere as an upper
+    bound, it named the version first observed, not the version fixed):
     `herdr pane run` strips exactly ONE leading '/' from the command it types
     into the pane, so an absolute launcher path arrives relative and the
     shell can't find it — every spawn died at a prompt. Doubling the leading
