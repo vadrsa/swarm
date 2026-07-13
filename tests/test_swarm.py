@@ -557,6 +557,155 @@ class TestPs(unittest.TestCase):
         self.assertTrue(field.startswith("claude-zzz"))
         self.assertTrue(field.endswith("…"))
 
+    def test_blocked_kind_replaces_idle_not_appends(self):
+        # a wedged pane's idle age is not reassuring information once the
+        # reason is known — [blocked: kind] REPLACES "idle Nm", never joins it
+        out = self.render(blocked={"boss": "trust"})
+        self.assertIn("boss [live] q=0 [blocked: trust]", out)
+        self.assertNotIn("idle 1m", out)  # boss's idle clause is gone, not doubled
+
+    def test_each_blocked_kind_renders(self):
+        for kind in ("trust", "permission", "rate-limit"):
+            with self.subTest(kind=kind):
+                out = self.render(blocked={"boss": kind})
+                self.assertIn(f"[blocked: {kind}]", out)
+
+    def test_unblocked_agent_unaffected_by_sibling_blocked(self):
+        out = self.render(blocked={"boss": "trust"})
+        self.assertIn("kid (you) [live] q=2 idle ?", out)
+
+    def test_unknown_blocked_kind_is_ignored_not_printed(self):
+        # render_ps must never print a kind it cannot vouch for — same
+        # exclude-on-the-view-side reasoning as model_of's structural filter.
+        # A future/corrupt value in the dict falls back to the ordinary idle
+        # clause rather than leaking through verbatim.
+        out = self.render(blocked={"boss": "some-new-kind-this-build-does-not-know"})
+        self.assertNotIn("some-new-kind", out)
+        self.assertIn("boss [live] q=0 idle 1m", out)
+
+    def test_blocked_value_is_never_echoed_verbatim(self):
+        # the hazard ps-model was burned on twice: pane text is
+        # attacker-controlled (an agent can print anything to its own pane).
+        # render_ps must be incapable of printing anything from the blocked
+        # dict except one of the three fixed kinds — proven here by feeding a
+        # value shaped like a forgery attempt and confirming nothing but the
+        # literal '[blocked: ...]' template surfaces.
+        payload = "x) (you"
+        out = self.render(blocked={"boss": payload})
+        self.assertNotIn(payload, out)
+        self.assertNotIn("(you)", out.split("\n")[1])  # boss's own line
+
+    def test_blocked_dead_agent_stays_on_the_shared_dead_line(self):
+        # ruling R5 is not overridden by blocked: a dead pane cannot be
+        # "blocked" (nothing is reading it), and even a stale/wrong dict
+        # entry for a dead name must not resurrect it as a tree row.
+        out = self.render(live={"p2"}, blocked={"boss": "trust"})
+        self.assertIn("dead: boss, dead", out)
+        self.assertNotIn("[blocked:", out)
+
+    def test_no_blocked_arg_is_byte_identical_to_before(self):
+        # backward compatibility: omitting the new kwarg entirely must render
+        # exactly as it did before this feature existed.
+        with_none = sw.render_ps(agents=self.AGENTS, live={"p1", "p2"},
+                                 queues={"boss": 0, "kid": 2, "dead": 0},
+                                 events={"boss": {"event": "stop", "ts": 940_000,
+                                                  "last_words": "shipped the report"},
+                                         "kid": None, "dead": None},
+                                 me_name="kid", op_mail=[("boss", 400_000)],
+                                 now=1_000_000)
+        with_empty = self.render(blocked={})
+        self.assertEqual(with_none, with_empty)
+
+
+class TestClassifyBlocked(unittest.TestCase):
+    """Pure function, untrusted input: pane text an agent fully controls must
+    map to one of a CLOSED set of kinds, or None — never a substring of the
+    input itself. See BLOCKED_SIGNATURES and render_ps's blocked docstring."""
+
+    def test_permission_prompt_matches(self):
+        text = "Bash(rm -rf /tmp/x)\nDo you want to proceed?\n1. Yes"
+        self.assertEqual(sw.classify_blocked(text), "permission")
+
+    def test_trust_prompt_matches(self):
+        text = "Do you trust the files in this folder?\n(y/n)"
+        self.assertEqual(sw.classify_blocked(text), "trust")
+
+    def test_rate_limit_requires_both_resets_and_limit(self):
+        text = "5-hour limit reached - resets at 3:00pm"
+        self.assertEqual(sw.classify_blocked(text), "rate-limit")
+
+    def test_resets_alone_is_not_rate_limit(self):
+        # 'resets' is common enough prose (e.g. an agent discussing a counter,
+        # a cache, a game state) that it must not fire alone
+        text = "the counter resets every midnight, nothing unusual here"
+        self.assertIsNone(sw.classify_blocked(text))
+
+    def test_ordinary_output_matches_nothing(self):
+        self.assertIsNone(sw.classify_blocked("running tests...\n42 passed"))
+
+    def test_empty_text_matches_nothing(self):
+        self.assertIsNone(sw.classify_blocked(""))
+        self.assertIsNone(sw.classify_blocked(None))
+
+    def test_result_is_always_a_member_of_the_closed_set_or_none(self):
+        samples = ["Do you want to proceed?", "trust the files in this folder",
+                  "limit reached, resets soon", "", "garbage", None,
+                  "trust the files in this folder AND Do you want to proceed?"]
+        for s in samples:
+            with self.subTest(s=s):
+                r = sw.classify_blocked(s)
+                self.assertTrue(r is None or r in sw.BLOCKED_KINDS)
+
+
+class TestBlockedCandidates(unittest.TestCase):
+    """Cost control: blocked_candidates decides which agents are worth a live
+    pane read, so ps never pays for N reads when most panes are plainly fine."""
+
+    AGENTS = {
+        "fresh": {"name": "fresh", "parent": "operator", "pane": "p1"},
+        "stale": {"name": "stale", "parent": "operator", "pane": "p2"},
+        "never": {"name": "never", "parent": "operator", "pane": "p3"},
+        "dead":  {"name": "dead", "parent": "operator", "pane": "p9"},
+    }
+
+    def test_recently_active_agent_is_not_a_candidate(self):
+        events = {"fresh": {"ts": 999_000}, "stale": None, "never": None, "dead": None}
+        out = sw.blocked_candidates(self.AGENTS, {"p1", "p2", "p3", "p9"},
+                                    events, now=1_000_000, threshold_ms=120_000)
+        self.assertNotIn("fresh", out)
+
+    def test_stale_idle_agent_is_a_candidate(self):
+        events = {"fresh": None, "stale": {"ts": 100_000}, "never": None, "dead": None}
+        out = sw.blocked_candidates(self.AGENTS, {"p1", "p2", "p3", "p9"},
+                                    events, now=1_000_000, threshold_ms=120_000)
+        self.assertIn("stale", out)
+
+    def test_agent_with_no_event_fact_yet_is_a_candidate(self):
+        # a session wedged on its VERY FIRST prompt (e.g. the trust dialog on
+        # spawn) has never fired Stop, so it has no event fact at all — must
+        # still be a candidate, not skipped for "no data"
+        events = {"fresh": None, "stale": None, "never": None, "dead": None}
+        out = sw.blocked_candidates(self.AGENTS, {"p1", "p2", "p3", "p9"},
+                                    events, now=1_000_000)
+        self.assertIn("never", out)
+
+    def test_dead_pane_is_never_a_candidate(self):
+        events = {n: None for n in self.AGENTS}
+        out = sw.blocked_candidates(self.AGENTS, {"p1", "p2", "p3"},  # p9 missing
+                                    events, now=1_000_000)
+        self.assertNotIn("dead", out)
+
+    def test_herdr_unreachable_still_computable_but_cmd_ps_skips_the_call(self):
+        # blocked_candidates itself follows render_ps's convention: live=None
+        # means liveness is UNKNOWN, not that nothing is live, so it does not
+        # filter on liveness here (same as render_ps's is_dead). The actual
+        # guard against reading panes we can't confirm exist lives one layer
+        # up, in cmd_ps, which skips calling read_blocked at all when
+        # live_pane_set() returns None (herdr unreachable) — see cmd_ps.
+        events = {n: None for n in self.AGENTS}
+        out = sw.blocked_candidates(self.AGENTS, None, events, now=1_000_000)
+        self.assertEqual(sorted(out), ["dead", "fresh", "never", "stale"])
+
 
 class TestWorldResolution(Base):
     def test_world_via_symlink_from_foreign_cwd(self):
@@ -583,6 +732,31 @@ class TestSubtree(unittest.TestCase):
         }
         self.assertEqual(sorted(sw.subtree(agents, "a")), ["a", "b", "c"])
         self.assertEqual(sw.subtree(agents, "z"), ["z"])
+
+
+class TestHerdrRunPath(unittest.TestCase):
+    """HERDR-BUG SHIM: `herdr pane run` strips exactly one leading '/', so an
+    absolute launcher path must be doubled before being handed to it."""
+
+    def test_absolute_path_gets_doubled_leading_slash(self):
+        self.assertEqual(sw.herdr_run_path("/Users/x/y/name.launch.sh"),
+                         "//Users/x/y/name.launch.sh")
+
+    def test_relative_path_is_untouched(self):
+        self.assertEqual(sw.herdr_run_path("relative/launch.sh"),
+                         "relative/launch.sh")
+
+    def test_bare_filename_is_untouched(self):
+        self.assertEqual(sw.herdr_run_path("launch.sh"), "launch.sh")
+
+    def test_empty_string_is_untouched(self):
+        self.assertEqual(sw.herdr_run_path(""), "")
+
+    def test_doubled_path_survives_a_single_leading_slash_strip(self):
+        # mirrors what herdr 0.7.1 actually does to the string it types
+        doubled = sw.herdr_run_path("/Users/x/name.launch.sh")
+        stripped = doubled[1:]  # simulate herdr's one-slash strip
+        self.assertEqual(stripped, "/Users/x/name.launch.sh")
 
 
 class TestReRingDecision(Base):
@@ -681,6 +855,64 @@ class TestReRingDecision(Base):
         self.assertNotIn("pane read", calls)       # and never polls the pane
 
 
+class TestPreTrustEntry(unittest.TestCase):
+    """Pure patch logic over ~/.claude.json's shape. This file is Claude
+    Code's own live, global settings file (real machines carry 100+ project
+    entries with real usage history) — pre_trust_entry's whole contract is
+    touching ONLY the one key this feature owns, nothing else, ever."""
+
+    def test_new_project_gets_a_minimal_entry(self):
+        out = sw.pre_trust_entry({}, "/tmp/experiment-1")
+        self.assertEqual(out["projects"]["/tmp/experiment-1"],
+                         {"hasTrustDialogAccepted": True})
+
+    def test_existing_projects_untouched(self):
+        config = {"projects": {"/Users/me/real-repo": {"hasTrustDialogAccepted": True,
+                                                        "lastCost": 4.2,
+                                                        "mcpServers": {"x": 1}}}}
+        out = sw.pre_trust_entry(config, "/tmp/experiment-1")
+        # the real repo's entry is byte-for-byte unchanged
+        self.assertEqual(out["projects"]["/Users/me/real-repo"],
+                         config["projects"]["/Users/me/real-repo"])
+        self.assertIn("/tmp/experiment-1", out["projects"])
+
+    def test_existing_entry_for_same_path_keeps_its_other_keys(self):
+        # a dir a human already uses normally must not lose its other state
+        # just because a harness later spawns --trust into it
+        config = {"projects": {"/tmp/experiment-1": {"hasTrustDialogAccepted": False,
+                                                      "lastCost": 1.1,
+                                                      "allowedTools": ["Bash"]}}}
+        out = sw.pre_trust_entry(config, "/tmp/experiment-1")
+        entry = out["projects"]["/tmp/experiment-1"]
+        self.assertEqual(entry["hasTrustDialogAccepted"], True)  # flipped
+        self.assertEqual(entry["lastCost"], 1.1)                 # preserved
+        self.assertEqual(entry["allowedTools"], ["Bash"])        # preserved
+
+    def test_other_top_level_keys_untouched(self):
+        config = {"numStartups": 500, "anonymousId": "abc123", "projects": {}}
+        out = sw.pre_trust_entry(config, "/tmp/x")
+        self.assertEqual(out["numStartups"], 500)
+        self.assertEqual(out["anonymousId"], "abc123")
+
+    def test_missing_projects_key_is_created(self):
+        out = sw.pre_trust_entry({"numStartups": 1}, "/tmp/x")
+        self.assertIn("projects", out)
+        self.assertTrue(out["projects"]["/tmp/x"]["hasTrustDialogAccepted"])
+
+    def test_input_config_is_not_mutated(self):
+        # the function must return a NEW structure — a caller holding the
+        # original must never see it change out from under them
+        config = {"projects": {"/tmp/x": {"hasTrustDialogAccepted": False}}}
+        sw.pre_trust_entry(config, "/tmp/x")
+        self.assertFalse(config["projects"]["/tmp/x"]["hasTrustDialogAccepted"])
+
+    def test_two_different_paths_both_get_entries(self):
+        out = sw.pre_trust_entry({}, "/tmp/a")
+        out = sw.pre_trust_entry(out, "/tmp/b")
+        self.assertTrue(out["projects"]["/tmp/a"]["hasTrustDialogAccepted"])
+        self.assertTrue(out["projects"]["/tmp/b"]["hasTrustDialogAccepted"])
+
+
 class TestNameEdges(Base):
     """Regression: NAME_RE anchored with $ let 'abc\\n' pass (Python's $
     matches before a trailing newline), claiming journal/'abc\\n'.md — a
@@ -703,6 +935,26 @@ class TestNameEdges(Base):
         self.assertIn("bad name", p.stderr)
         self.assertFalse(os.path.isdir(os.path.join(self.root, "journal")),
                          "refused name must not claim a tombstone")
+
+    def test_trust_flag_is_recognized_not_an_unknown_flag_error(self):
+        # --trust must reach argument-parsing successfully (proven by the
+        # failure moving PAST "unknown flag" to the name-validation error,
+        # same technique as the trailing-newline test above) without this
+        # process ever reaching herdr or touching the real ~/.claude.json —
+        # the bad name makes cmd_spawn die before either happens.
+        env = dict(os.environ, SWARM_DIR=self.root, HERDR_ENV="1")
+        p = subprocess.run([SWARM, "spawn", "abc\n", "task", "--trust"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("bad name", p.stderr)
+        self.assertNotIn("unknown flag", p.stderr)
+
+    def test_unknown_flag_still_refused(self):
+        env = dict(os.environ, SWARM_DIR=self.root, HERDR_ENV="1")
+        p = subprocess.run([SWARM, "spawn", "ok-name", "task", "--bogus"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown flag", p.stderr)
 
 
 class TestQueuePut(Base):
