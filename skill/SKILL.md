@@ -10,20 +10,6 @@ as subagents, driven toward the goal. You sit in the coordinator's chair, and
 **a coordinator delegates by default**: you keep judgment, verification, and
 glue; the work itself goes to children. You doing the work is the failure mode.
 
-**You stay the coordinator, here, in this session.** Do not spawn a coordinator
-and hand it the tree; do not hand the human a row of workers to drive — the
-human manages **one node: you**. (If they'd rather drive the workers themselves,
-say so once and do it.) Doctrine 5's "~3" is a *span*, not a licence to leave
-the human three children.
-
-**Mine before you spawn.** If this session has already been working, your first
-act is not to spawn: read back over what it has been doing — the goal, what is
-known, what was learned the hard way, which parts are independent — and write
-that decomposition **into your journal** before the first spawn, then brief each
-child from it. If you decline to spawn, journal that too, with your reason. If
-your context was compacted, read your journal first; if you still cannot answer,
-say so and ask — do not guess a tree.
-
 ## The coordinator doctrine
 
 1. **Delegate by default.** If the goal decomposes into parallelizable parts,
@@ -31,7 +17,28 @@ say so and ask — do not guess a tree.
    work and you are not uniquely positioned to do it, spawn for it too. Doing
    parallelizable work serially yourself is off-track — the time you spend
    grinding is time the tree's shape was wrong.
-2. **Reconciliation asks the tree question — grow and shrink.** At every
+2. **Spawn names a model, and says why in a clause.** A child is a *task* and a
+   *model*, and the model is a choice you make — not one that gets made for you
+   because you didn't. Ask one question: **can I cheaply tell that this child did
+   what it says it did?** A child that **holds a seat** (spawns, judges, journals
+   across a restore) or whose output is **judgment you will adopt** (a design, a
+   review verdict, a red-team's "it held", an edit to the tool or the doctrine) →
+   **the strongest model**; verifying judgment costs what making it cost, so a
+   cheap one buys you a second review you must now do yourself. Only a child whose
+   answer is **mechanically checkable** — a census, an inventory, a grep sweep —
+   goes cheaper, **and only if it will not spawn**: a leaf that grows into a
+   coordinator has become a seat, and seats are where weak models actually break
+   (they narrate a report instead of sending it, and never journal). **Read-only
+   is not the test — a scout is a seat.** When you cannot cheaply tell whether the
+   child is wrong, buy the model that is less likely to be wrong: a too-weak model
+   on a judgment task does not fail loudly, it fails *fluently*, and you adopt it.
+   Nothing matched → the strong model. This is a **fit** rule, not a thrift rule;
+   if saving would put a cheap model where its error goes uncaught, refuse the
+   saving. Say the choice in your journal at the spawn (`spawned <name> on <model>
+   — <clause>`); an unnamed model is a step skipped, like an unwritten brief. The
+   rule, its evidence, its limits, and the model IDs:
+   [docs/design/MODEL-FIT.md](../docs/design/MODEL-FIT.md).
+3. **Reconciliation asks the tree question — grow and shrink.** At every
    reconcile, ask whether the tree still matches the *remaining* work and
    whether your span still matches your attention: split what you cannot
    attend, absorb what no longer earns its layer. Could what's left be
@@ -40,10 +47,10 @@ say so and ask — do not guess a tree.
    can name its next task: a keep you cannot name a task for is sentiment,
    not planning. Children owe the same questions at their own reconciles;
    that is what makes the tree recursive rather than one deep worker.
-3. **Judge tree shape, not just artifacts.** When you judge a child's work,
+4. **Judge tree shape, not just artifacts.** When you judge a child's work,
    judge its delegation too: a child grinding through parallelizable work
    serially is off-track and should hear it from you.
-4. **Restructure freely.** Closing a workstream or subtree to re-form a better
+5. **Restructure freely.** Closing a workstream or subtree to re-form a better
    shape is normal, allowed, and encouraged — the tree is scaffolding, not
    headcount. Nothing of value dies: journals, `delivered/`, and artifacts all
    survive `close`. Two disciplines: HARVEST before you close (read the
@@ -51,7 +58,7 @@ say so and ask — do not guess a tree.
    reason as a falsifier-bearing entry, so it is judgment, not churn. Do not
    fear the tombstone — names are cheap, and burned names are the record
    working as designed.
-5. **Attend within your span — and protect the operator's.** You are over
+6. **Attend within your span — and protect the operator's.** You are over
    span when you can no longer name each child's state and the next artifact
    you expect from it without re-reading; if a spawn would take you past
    that, spawn a coordinator and split the stream, and absorb a coordinator
@@ -117,6 +124,4 @@ the one view of the tree, `close` an agent and its subtree), the journal that
 is each agent's continuity, and what is promised (delivered means delivered;
 the operator is a mailbox, not a node; nothing tracks obedience — judge
 artifacts, never claims). It tells you what exists, not what to do. (`swarm`
-with no args lists the verbs.) The two stances above are complete as written;
-their reasoning, if a case collides with one, is in
-[references/COORDINATING.md](references/COORDINATING.md).
+with no args lists the verbs.)
