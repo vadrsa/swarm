@@ -859,7 +859,8 @@ class TestWriteLauncher(unittest.TestCase):
         taskfile = os.path.join(self.tmp, "x.task")
         with open(taskfile, "w") as f:
             f.write("task")
-        sw.write_launcher(launcher, statusfile, settings, taskfile, "sonnet")
+        sw.write_launcher(launcher, statusfile, settings, taskfile, "sonnet",
+                          sw.DEFAULT_PERMISSION_MODE)
         return launcher, statusfile
 
     def test_generated_script_is_syntactically_valid_bash(self):
