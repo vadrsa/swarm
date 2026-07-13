@@ -11,9 +11,18 @@ stores no claim about attention, compliance, or intent.
 2. **The tree** — your parent judges and approves your work; you judge your
    children's. The human **operator** roots the tree. Who may message whom is
    judgment, not a rule engine.
-3. **`swarm spawn <name> "<task>"`** — create a child. The name is chosen, not
-   derived; a name ever used is an error to reuse (its journal file is the
-   tombstone).
+3. **`swarm spawn <name> "<task>" --model <M> --reason "<why>"`** — create a
+   child. The name is chosen, not derived; a name ever used is an error to reuse
+   (its journal file is the tombstone). **`--model` and `--reason` are both
+   required: the parent chooses the child's model.** The reason answers one
+   question — *can you cheaply tell that this child was wrong?* Cheap to check
+   (you re-read the diff, re-run the grep) and a small model's error costs you
+   nothing; expensive to check (you would redo the reasoning to find the flaw)
+   and you pay for the strong one. It is **not** "why is this model good" —
+   that question demands knowledge nobody has, so it gets answered fluently and
+   wrongly, laundering a guess into a decision. The tell: delete "I" from your
+   reason; if it still makes sense, it failed. Tokens: `opus` `sonnet` `fable` ·
+   `default` (a real answer — you looked, and the configured default is right).
 4. **`swarm send <name>`** — **a message is a claim on one turn.** It is queued
    as a file and delivered **whole, one per turn, oldest first**, headed by its
    sender and their relation to you (parent / child / sibling / OPERATOR).
