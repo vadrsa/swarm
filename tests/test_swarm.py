@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -735,28 +736,165 @@ class TestSubtree(unittest.TestCase):
 
 
 class TestHerdrRunPath(unittest.TestCase):
-    """HERDR-BUG SHIM: `herdr pane run` strips exactly one leading '/', so an
-    absolute launcher path must be doubled before being handed to it."""
+    """`herdr pane run` TYPES its command argument into the pane's shell, and
+    (HERDR-BUG SHIM, confirmed on herdr 0.7.3) strips exactly one leading '/'
+    from it first. A launcher path must survive BOTH: herdr's strip, THEN the
+    shell parsing whatever survives as a word. herdr_run_path's contract is
+    the round-trip below — strip-then-shell-parse recovers the original path
+    byte for byte, for any content the path may hold (spaces, $, quotes,
+    backticks, parens, semicolons, unicode)."""
 
-    def test_absolute_path_gets_doubled_leading_slash(self):
-        self.assertEqual(sw.herdr_run_path("/Users/x/y/name.launch.sh"),
-                         "//Users/x/y/name.launch.sh")
+    @staticmethod
+    def _herdr_strip(s):
+        # herdr pane run strips exactly ONE leading '/' from what it types.
+        return s[1:] if s.startswith("/") else s
 
-    def test_relative_path_is_untouched(self):
-        self.assertEqual(sw.herdr_run_path("relative/launch.sh"),
-                         "relative/launch.sh")
+    def _assert_round_trips(self, launcher):
+        sent = sw.herdr_run_path(launcher)
+        stripped = self._herdr_strip(sent)
+        parsed = shlex.split(stripped)
+        self.assertEqual(parsed, [launcher],
+                         f"round-trip failed for {launcher!r}: sent={sent!r} "
+                         f"stripped={stripped!r} parsed={parsed!r}")
 
-    def test_bare_filename_is_untouched(self):
-        self.assertEqual(sw.herdr_run_path("launch.sh"), "launch.sh")
+    def test_bare_filename_round_trips(self):
+        self._assert_round_trips("launch.sh")
 
-    def test_empty_string_is_untouched(self):
-        self.assertEqual(sw.herdr_run_path(""), "")
+    def test_relative_path_round_trips(self):
+        self._assert_round_trips("relative/launch.sh")
 
-    def test_doubled_path_survives_a_single_leading_slash_strip(self):
-        # mirrors what herdr 0.7.1 actually does to the string it types
-        doubled = sw.herdr_run_path("/Users/x/name.launch.sh")
-        stripped = doubled[1:]  # simulate herdr's one-slash strip
-        self.assertEqual(stripped, "/Users/x/name.launch.sh")
+    def test_empty_string_round_trips(self):
+        self._assert_round_trips("")
+
+    def test_simple_absolute_path_round_trips(self):
+        self._assert_round_trips("/Users/x/y/name.launch.sh")
+
+    def test_space_round_trips(self):
+        self._assert_round_trips("/a b/c")
+
+    def test_wsl_realistic_path_with_space_round_trips(self):
+        self._assert_round_trips(
+            "/mnt/c/Users/John Smith/proj/.swarm/settings/x.launch.sh")
+
+    def test_dollar_round_trips(self):
+        self._assert_round_trips("/tmp/$HOME/x.sh")
+
+    def test_single_quote_round_trips(self):
+        self._assert_round_trips("/mnt/c/Users/O'Brien/proj/x.sh")
+
+    def test_double_quote_round_trips(self):
+        self._assert_round_trips('/tmp/"quoted"/x.sh')
+
+    def test_backtick_round_trips(self):
+        self._assert_round_trips("/tmp/`backtick`/x.sh")
+
+    def test_parens_round_trips(self):
+        self._assert_round_trips("/tmp/(paren)/x.sh")
+
+    def test_semicolon_round_trips(self):
+        self._assert_round_trips("/tmp/semi;colon/x.sh")
+
+    def test_unicode_round_trips(self):
+        self._assert_round_trips("/tmp/ünïcödé/x.sh")
+
+    def test_several_adversarial_chars_at_once_round_trips(self):
+        self._assert_round_trips("/tmp/a b$c'd\"e`f(g)h;i/x.sh")
+
+    def test_simple_absolute_path_gets_a_raw_slash_prepended_outside_the_quoting(self):
+        # pins the actual construction: '/' + shlex.quote(launcher), not the
+        # other order. shlex.quote alone (no prepended slash) would leave the
+        # sent string starting with a quote char, which herdr's strip would
+        # eat instead of the slash -- this assertion catches that regression
+        # even though it would still (accidentally) pass some round-trips.
+        launcher = "/Users/x/name.launch.sh"
+        sent = sw.herdr_run_path(launcher)
+        self.assertTrue(sent.startswith("/"))
+        self.assertEqual(sent, "/" + shlex.quote(launcher))
+
+    def test_relative_path_is_quoted_but_not_slash_prefixed(self):
+        launcher = "rel ative/x.sh"
+        sent = sw.herdr_run_path(launcher)
+        self.assertEqual(sent, shlex.quote(launcher))
+        self.assertFalse(sent.startswith("/"))
+
+
+ADVERSARIAL_PATHS = [
+    "/a b/c",
+    "/mnt/c/Users/John Smith/proj/.swarm/settings/x.launch.sh",
+    "/tmp/$HOME/x.sh",
+    "/mnt/c/Users/O'Brien/proj/x.sh",
+    '/tmp/"quoted"/x.sh',
+    "/tmp/`backtick`/x.sh",
+    "/tmp/(paren)/x.sh",
+    "/tmp/semi;colon/x.sh",
+    "/tmp/ünïcödé/x.sh",
+    "/tmp/a b$c'd\"e`f(g)h;i/x.sh",
+]
+
+
+class TestWriteLauncher(unittest.TestCase):
+    """write_launcher's settings-unreadable branch interpolates the settings
+    path into an `echo "..."` DOUBLE-quoted shell string. Unlike every other
+    line in write_launcher (which passes the whole path through
+    shlex.quote), this one used to splice {settings} directly into double
+    quotes -- a $, backtick, or embedded " in the path would expand/inject
+    rather than print literally. Fixed by quoting the path as its own shell
+    word (shlex.quote) inside an otherwise-unquoted echo, rather than
+    splicing it into a double-quoted string."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="swarm-launcher-")
+        self.bindir = tempfile.mkdtemp(prefix="swarm-launcher-bin-")
+        with open(os.path.join(self.bindir, "claude"), "w") as f:
+            f.write("#!/usr/bin/env bash\nexit 0\n")
+        os.chmod(os.path.join(self.bindir, "claude"), 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.bindir, ignore_errors=True)
+
+    def _build(self, settings):
+        launcher = os.path.join(self.tmp, "x.launch.sh")
+        statusfile = os.path.join(self.tmp, "x.status")
+        taskfile = os.path.join(self.tmp, "x.task")
+        with open(taskfile, "w") as f:
+            f.write("task")
+        sw.write_launcher(launcher, statusfile, settings, taskfile, "sonnet")
+        return launcher, statusfile
+
+    def test_generated_script_is_syntactically_valid_bash(self):
+        for settings in ADVERSARIAL_PATHS:
+            launcher, _ = self._build(settings)
+            p = subprocess.run(["bash", "-n", launcher], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0,
+                             f"settings={settings!r} produced invalid bash:\n{p.stderr}")
+
+    def test_missing_settings_error_message_is_literal_no_injection(self):
+        for settings in ADVERSARIAL_PATHS:
+            launcher, statusfile = self._build(settings)  # settings path never created -> unreadable
+            env = dict(os.environ)
+            env["PATH"] = self.bindir + ":/usr/bin:/bin"  # fake claude so we reach the settings check
+            p = subprocess.run(["bash", launcher], capture_output=True, text=True,
+                               timeout=10, input="", env=env)
+            with open(statusfile) as f:
+                status = f.read()
+            # Must be the literal, unexpanded settings string -- not a shell
+            # expansion of $HOME/backticks, not a truncated/broken message,
+            # and no evidence of injected commands running.
+            self.assertIn(f"failed: settings unreadable: {settings}", status,
+                         f"settings={settings!r} did not appear literally: {status!r}")
+
+    def test_missing_settings_no_command_execution_from_the_path(self):
+        # A path holding `$(...)`-shaped or backtick-shaped text must never
+        # actually run as a command -- confirm no side effect file appears.
+        marker = os.path.join(self.tmp, "PWNED")
+        settings = f"/tmp/$(touch {shlex.quote(marker)})/x.json"
+        launcher, statusfile = self._build(settings)
+        env = dict(os.environ)
+        env["PATH"] = self.bindir + ":/usr/bin:/bin"
+        subprocess.run(["bash", launcher], capture_output=True, text=True,
+                       timeout=10, input="", env=env)
+        self.assertFalse(os.path.exists(marker), "settings path executed as a command")
 
 
 class TestReRingDecision(Base):

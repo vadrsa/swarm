@@ -48,7 +48,16 @@ echo "$@" >> "$FAKE_HERDR_LOG"
 case "$1 $2" in
   "tab create") echo '{"result":{"root_pane":{"pane_id":"pane-77"},"tab":{"tab_id":"tab-77"}}}' ;;
   "pane list")  echo '{"result":{"panes":[{"pane_id":"pane-77"}]}}' ;;
-  "pane run")   shift 3; bash "$@" >/dev/null 2>&1 & ;;   # drop pane-id, run launcher
+  "pane run")
+    # Real herdr strips exactly one leading '/' from the command STRING, then
+    # TYPES what's left into the pane's own shell (word-split/quote-parsed
+    # there, not passed as a single argv element). Simulate both steps: $4
+    # is the one string swarm sent; drop its leading '/', then let bash
+    # parse the remainder as shell text, same as a real pane would.
+    cmd=$4
+    cmd=${cmd#/}
+    eval "$cmd" >/dev/null 2>&1 &
+    ;;
   "pane read")  echo "" ;;                                 # empty prompt line
   *) : ;;
 esac
@@ -235,6 +244,32 @@ class TestSpawnEndToEnd(Base):
             settings = json.load(f)
         self.assertEqual(sorted(settings["hooks"]),
                          ["Notification", "SessionStart", "Stop", "UserPromptSubmit"])
+
+    def test_spawn_survives_a_space_in_the_swarm_root_path(self):
+        # WSL-realistic: a Windows path under /mnt/c/Users/<Full Name>/... has
+        # a space in it, so SWARM_DIR/settings/<name>.launch.sh does too. The
+        # fake herdr's "pane run" case simulates herdr's real behavior --
+        # strip one leading '/', then shell-parse the rest as if typed into
+        # the pane -- so this only passes if herdr_run_path's quoting
+        # actually survives both the strip and a real word-split.
+        spaced_root = os.path.join(self.root, "John Smith", "proj", ".swarm")
+        os.makedirs(spaced_root, exist_ok=True)
+        env, log, argsf = self.fake_tools(claude=True)
+        env["SWARM_DIR"] = spaced_root
+        p = run_swarm(["spawn", "worker", "do the thing", "--model", "sonnet",
+                       "--reason", "the launcher either ran (argsf appears) or it "
+                       "didn't -- a space-split path fails silently at a shell "
+                       "prompt, which is exactly what this test would catch"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for _ in range(50):
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(argsf),
+                        "launcher never ran -- the space in the path broke the typed command")
+        with open(os.path.join(spaced_root, "settings", "worker.status")) as f:
+            self.assertTrue(f.read().startswith("launching"))
 
     def test_spawn_name_collision_errors(self):
         env, _, _ = self.fake_tools(claude=True)

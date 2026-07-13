@@ -1069,24 +1069,44 @@ def spawn_header(name, parent):
 
 
 def herdr_run_path(launcher):
-    """Pure. HERDR-BUG SHIM (confirmed present in herdr 0.7.3, the version
-    installed on the machine this was verified on; earliest known-affected
-    version not established — do not read "0.7.1" elsewhere as an upper
-    bound, it named the version first observed, not the version fixed):
-    `herdr pane run` strips exactly ONE leading '/' from the command it types
-    into the pane, so an absolute launcher path arrives relative and the
-    shell can't find it — every spawn died at a prompt. Doubling the leading
-    slash survives the strip and is POSIX-equivalent (//x == /x): the kernel
-    collapses a doubled leading slash to one, same as any run of slashes
-    after the first two are collapsed elsewhere in a path. Verified by hand:
-    `//bin/echo` runs, `/bin/echo` (after the strip) -> "no such file".
-    A relative launcher path is passed through untouched — doubling only
-    matters for the one case herdr actually mangles. Delete this function
-    and its call site once herdr fixes pane-run's arg handling; the fixed
-    behavior means a single '/' survives and doubling would then be wrong
-    (////bin/echo is still fine, but there is no reason to keep it once the
-    root cause is gone)."""
-    return "/" + launcher if launcher.startswith("/") else launcher
+    """Pure. `herdr pane run` TYPES its command argument into the pane's
+    shell — so the path must survive TWO transforms in this order: herdr's
+    own one-leading-slash strip (HERDR-BUG SHIM, confirmed present in herdr
+    0.7.3, the version installed on the machine this was verified on;
+    earliest known-affected version not established — do not read "0.7.1"
+    elsewhere as an upper bound, it named the version first observed, not
+    the version fixed: `herdr pane run` strips exactly ONE leading '/' from
+    the command it types into the pane, so an absolute launcher path arrives
+    relative and the shell can't find it), and then the target shell parsing
+    whatever survives the strip as a word (so a space, $, quote, backtick,
+    paren, or semicolon in the path must not split or inject).
+
+    A naive fix picks one transform and breaks the other. Doubling the slash
+    (the old shim) survives the strip but is unquoted — a space in the path
+    still splits it into two shell words. Quoting first breaks the strip
+    instead: shlex.quote('/a b/c') -> "'/a b/c'" — its first character is a
+    QUOTE, not '/', so herdr's strip eats the quote and leaves an unbalanced
+    string.
+
+    The construction that survives both, in order: quote the launcher with
+    shlex.quote (safe as a single shell word for any content), THEN prepend
+    a bare '/' OUTSIDE the quoting, only when the launcher is absolute.
+    Concretely, for launcher = '/a b/c':
+        shlex.quote(launcher)  -> "'/a b/c'"        (a valid, complete shell word)
+        '/' + that             -> "/'/a b/c'"        (what herdr_run_path returns)
+        herdr's strip (eats the leading '/', which is now OUTSIDE the quotes)
+                                -> "'/a b/c'"         (the untouched quoted word)
+        shell parses this      -> /a b/c              (original path, exact)
+    Verified empirically against a real herdr 0.7.3 pane with a path
+    containing a space, and against `shlex.split` round-trips for $, ', ",
+    `, (), ;, and unicode, individually and combined.
+    A relative launcher path never hits the strip (it doesn't start with
+    '/'), so it is quoted but not slash-prefixed.
+    Delete the slash-prepending half of this function once herdr fixes
+    pane-run's arg handling; shlex.quote alone is correct once the strip is
+    gone."""
+    quoted = shlex.quote(launcher)
+    return "/" + quoted if launcher.startswith("/") else quoted
 
 
 CLAUDE_JSON_TRUST_KEY = "hasTrustDialogAccepted"
@@ -1131,7 +1151,7 @@ def write_launcher(launcher, statusfile, settings, taskfile, model):
         "  exec bash",
         "fi",
         f"if [ ! -r {shlex.quote(settings)} ]; then",
-        f'  echo "failed: settings unreadable: {settings}" > "$STATUS"',
+        f"  echo failed: settings unreadable: {shlex.quote(settings)} > \"$STATUS\"",
         "  exec bash",
         "fi",
         f'PROMPT="$(cat {shlex.quote(taskfile)})"',
