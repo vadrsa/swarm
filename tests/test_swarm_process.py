@@ -298,7 +298,9 @@ class TestSpawnEndToEnd(Base):
         # is viewing. The spawner's HERDR_WORKSPACE_ID pins it.
         env, log, _ = self.fake_tools(claude=True)
         env["HERDR_WORKSPACE_ID"] = "w4"
-        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "fixture; the tab-create log line is the whole assertion"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 0, p.stderr)
         with open(log) as f:
             create = [l for l in f if l.startswith("tab create")][0]
@@ -306,7 +308,9 @@ class TestSpawnEndToEnd(Base):
 
     def test_spawn_without_workspace_env_falls_back_gracefully(self):
         env, log, _ = self.fake_tools(claude=True)  # no HERDR_WORKSPACE_ID
-        p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "fixture; the tab-create log line is the whole assertion"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 0, p.stderr)
         with open(log) as f:
             create = [l for l in f if l.startswith("tab create")][0]
