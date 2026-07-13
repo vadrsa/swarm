@@ -22,6 +22,7 @@
 #   event     Stop/Notification — overwrite the event fact; on Stop, re-ring
 #   restore   SessionStart — re-inject the original task + the journal tail
 
+import concurrent.futures
 import json
 import os
 import shlex
@@ -45,6 +46,20 @@ MODEL_CAP = 40           # ps view: a pinned model id. Measured, not guessed: th
 # not to print. Exclude what breaks the view; never guess at what an id may contain.
 MODEL_STRUCTURAL = set("()") | set("─│├└┌┐┘┬┴┼")
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
+# ps-blocked detection: a CLOSED set of (kind, substring) pairs matched against a
+# pane's own recent text. The kind — never the matched text itself — is what ps
+# renders. This is deliberate: pane text is attacker-controlled (any agent can
+# print anything to its own pane), so echoing a matched excerpt into the one view
+# would reopen the exact forgery class ps-model was burned on twice (render_ps,
+# same file) — corruption AND impersonation are different attacks; a closed enum
+# a pane's content can select FROM but never WRITE TO is immune to both. First
+# match wins; order matters only in the pathological case all three appear.
+BLOCKED_SIGNATURES = (
+    ("trust", "trust the files in this folder"),
+    ("permission", "Do you want to proceed?"),
+    ("rate-limit", "resets"),  # paired check below: 'resets' alone is common prose
+)
+BLOCKED_KINDS = frozenset(k for k, _ in BLOCKED_SIGNATURES)
 # Sender-side bound on one middleware invocation (a slow middleware must fail
 # open, never stall the sender). Default; .swarm/config's [middleware] timeout
 # overrides it. Env-overridable like SWARM_READY_TIMEOUT.
@@ -500,13 +515,16 @@ def record_event(root, name, kind, last_words, ts):
 
 # ------------------------------------------------------------------ ps view
 
-def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
+def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None,
+              blocked=None):
     """The one view. Pure: every input is a plain value, so it tests offline.
 
     agents:  {name: record}         live:  set of live pane ids, or None (herdr unknown)
     queues:  {name: waiting-count}  events:{name: event fact or None}
     op_mail: [(from, ts)] waiting operator messages, oldest first
     junk:    {name: unparseable-queue-file count} (ruling R4; may be None)
+    blocked: {name: 'trust'|'permission'|'rate-limit'} (may be None; absence
+             for a name means not blocked, same convention as junk)
 
     Dead agents render compactly — names only, one shared line (ruling R5):
     the living tree stays one screen however long the swarm's history grows.
@@ -523,8 +541,20 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     and a pin rendered as `(you)` would be byte-identical to the marker naming
     the reader. `(you)` is load-bearing for IDENTITY, so nothing attacker-shaped
     may share its syntax — `model=you` is self-evidently a claim about a model.
+
+    'blocked' carries the SAME hazard, sharper: its source is live pane text,
+    which an agent fully controls (it is that agent's own terminal). The value
+    in the dict must already be one of the three closed kinds — classify_blocked
+    guarantees that upstream — and render_ps trusts the dict as-is; it never
+    looks at pane text itself and never prints anything from the dict except
+    the kind. A blocked pane replaces its idle clause with `[blocked: kind]`
+    rather than adding to it: a wedged session's idle time is not additional
+    information once the reason is known, and keeping both would let a stale
+    idle age read as reassuring ("only 2m") beside the fact that it will never
+    move again on its own.
     """
     junk = junk or {}
+    blocked = blocked or {}
     lines = []
     if op_mail:
         lines.append(f"operator — {len(op_mail)} message(s) waiting for the human "
@@ -591,15 +621,27 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
             m = m[:MODEL_CAP - 1] + "…"
         return f" model={m}" if m else ""
 
+    def idle_of(name):
+        # A blocked kind, IF it is one of the three this build knows how to
+        # render, replaces the idle clause outright — see render_ps's
+        # docstring for why replace, not append. Anything else in the dict
+        # (a future kind this build doesn't recognize, or a corrupt value)
+        # is treated as absent: the view must never print a kind it cannot
+        # vouch for, same reasoning as model_of's exclude-list.
+        kind = blocked.get(name)
+        if kind in BLOCKED_KINDS:
+            return f"[blocked: {kind}]"
+        ev = events.get(name)
+        return f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
+
     def walk(name, prefix, is_last):
         a = agents[name]
         branch = "└─ " if is_last else "├─ "
         you = " (you)" if name == me_name else ""
         ev = events.get(name)
-        idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
         alive = "live" if live is not None else "?"
         lines.append(f"{prefix}{branch}{name}{you}{model_of(name)} "
-                     f"[{alive}] {q_of(name)} {idle}")
+                     f"[{alive}] {q_of(name)} {idle_of(name)}")
         if ev and ev.get("last_words"):
             cont = "   " if is_last else "│  "
             lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
@@ -649,6 +691,30 @@ def subtree(agents, root_name):
     return out
 
 
+def classify_blocked(pane_text):
+    """Pure. pane_text -> one of 'trust' | 'permission' | 'rate-limit' | None.
+
+    pane_text is UNTRUSTED: it is whatever is currently visible in an agent's
+    own pane, and any agent can print anything to its own pane. This function
+    is the ONLY thing allowed to look at it, and it returns a value from a
+    CLOSED set — never a substring of the input. That is what makes the result
+    safe to hand to render_ps: a fixed enum cannot forge a tree row, a fake
+    `dead:` line, or the `(you)` marker, no matter what the pane contains. See
+    BLOCKED_SIGNATURES; the 'rate-limit' kind additionally requires 'limit' to
+    co-occur with 'resets', since 'resets' alone is common enough prose to
+    false-positive on an agent's own unrelated output.
+    """
+    if not pane_text:
+        return None
+    for kind, needle in BLOCKED_SIGNATURES:
+        if needle not in pane_text:
+            continue
+        if kind == "rate-limit" and "limit" not in pane_text:
+            continue
+        return kind
+    return None
+
+
 # ---------------------------------------------------------------- herdr edge
 # Everything below talks to a live pane. Exempt from unit tests by the brief;
 # kept thin so the logic above stays pure.
@@ -679,6 +745,62 @@ def pane_prompt_line(pane):
         return rows[-1].split("❯", 1)[1].strip() if rows else ""
     except Exception:
         return ""
+
+
+def pane_text(pane):
+    """Raw visible text of a pane, best-effort. A blocking dialog (trust,
+    permission, rate-limit) is prose, not a `❯`-anchored input line, so this
+    reads the whole visible window rather than reusing pane_prompt_line's
+    narrower anchor."""
+    try:
+        p = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible",
+                            "--lines", "40"], capture_output=True, text=True,
+                           timeout=10)
+        return p.stdout
+    except Exception:
+        return ""
+
+
+def blocked_candidates(agents, live, events, now, threshold_ms=120_000):
+    """Which agents are worth the cost of a live pane read: live, and either no
+    event fact yet or idle past threshold_ms. A pane that Stopped recently is
+    almost certainly not wedged on a prompt (Stop only fires on a real turn
+    boundary) — skip it and save the read. Pure; the read itself is not."""
+    out = []
+    for n, a in agents.items():
+        if live is not None and a.get("pane") not in live:
+            continue  # dead panes have nothing to read
+        ev = events.get(n)
+        if ev and ev.get("ts") and now - ev["ts"] < threshold_ms:
+            continue  # recently active; a wedge takes at least this long to matter
+        out.append(n)
+    return out
+
+
+def read_blocked(root, agents, live, events, now):
+    """cmd_ps's live edge for blocked-detection: pane-reads ONLY the agents
+    blocked_candidates names (never the whole fleet unconditionally — most
+    ps calls see zero candidates once a swarm is past its spawn burst), in a
+    bounded thread pool so N candidates cost one round-trip's wall time, not
+    N. Returns {name: 'trust'|'permission'|'rate-limit'} for panes that
+    matched; agents with no match are simply absent (not None) — render_ps
+    treats missing == not blocked."""
+    cands = blocked_candidates(agents, live, events, now)
+    if not cands:
+        return {}
+    result = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(cands))) as ex:
+        futs = {ex.submit(pane_text, agents[n]["pane"]): n for n in cands
+                if agents[n].get("pane")}
+        for f in concurrent.futures.as_completed(futs):
+            n = futs[f]
+            try:
+                kind = classify_blocked(f.result())
+            except Exception:
+                kind = None
+            if kind:
+                result[n] = kind
+    return result
 
 
 def ring_doorbell(pane, text="check queue"):
@@ -868,6 +990,54 @@ def spawn_header(name, parent):
         f"--- YOUR TASK ---\n")
 
 
+def herdr_run_path(launcher):
+    """Pure. HERDR-BUG SHIM (confirmed present in herdr 0.7.3, the version
+    installed on the machine this was verified on; earliest known-affected
+    version not established — do not read "0.7.1" elsewhere as an upper
+    bound, it named the version first observed, not the version fixed):
+    `herdr pane run` strips exactly ONE leading '/' from the command it types
+    into the pane, so an absolute launcher path arrives relative and the
+    shell can't find it — every spawn died at a prompt. Doubling the leading
+    slash survives the strip and is POSIX-equivalent (//x == /x): the kernel
+    collapses a doubled leading slash to one, same as any run of slashes
+    after the first two are collapsed elsewhere in a path. Verified by hand:
+    `//bin/echo` runs, `/bin/echo` (after the strip) -> "no such file".
+    A relative launcher path is passed through untouched — doubling only
+    matters for the one case herdr actually mangles. Delete this function
+    and its call site once herdr fixes pane-run's arg handling; the fixed
+    behavior means a single '/' survives and doubling would then be wrong
+    (////bin/echo is still fine, but there is no reason to keep it once the
+    root cause is gone)."""
+    return "/" + launcher if launcher.startswith("/") else launcher
+
+
+CLAUDE_JSON_TRUST_KEY = "hasTrustDialogAccepted"
+
+
+def pre_trust_entry(config, abspath):
+    """Pure. config: the parsed contents of ~/.claude.json (or {} if missing/
+    corrupt). abspath: the absolute cwd a throwaway agent is about to launch
+    into. Returns a NEW config dict with config['projects'][abspath][KEY] set
+    True, touching NOTHING else — not other keys on an existing entry, not
+    other projects. ~/.claude.json is Claude Code's own live, global,
+    per-machine settings file (111 real project entries observed on one dev
+    machine, holding real usage/session history); this function's whole job
+    is to be safe to call against that file, so it never does a blanket
+    dict-merge or rewrite — only ever adds or flips the one key this feature
+    owns. An existing entry (a dir a human already uses normally) has its
+    other keys preserved byte-for-byte; only the trust key is touched, and
+    only set to True, never to False (this function only grants, never
+    revokes — a caller wanting to un-trust a dir must do that some other way,
+    deliberately)."""
+    out = dict(config)
+    projects = dict(out.get("projects") or {})
+    entry = dict(projects.get(abspath) or {})
+    entry[CLAUDE_JSON_TRUST_KEY] = True
+    projects[abspath] = entry
+    out["projects"] = projects
+    return out
+
+
 def write_launcher(launcher, statusfile, settings, taskfile, model):
     # Inherited mechanism (G14): the task lives in a FILE; herdr only ever sees
     # the launcher's path — zero escaping, zero multibyte on argv. The launcher
@@ -899,16 +1069,55 @@ def write_launcher(launcher, statusfile, settings, taskfile, model):
     os.chmod(launcher, 0o755)
 
 
+def pre_trust_dir(abspath):
+    """Best-effort. Flips ~/.claude.json's trust bit for abspath so a claude
+    session launched there skips the workspace-trust prompt. Read-modify-write
+    of a live, global, per-machine file OTHER Claude Code sessions may also be
+    writing — never crash spawn over this (same posture as herdr_json): a
+    missed pre-trust just means the old behavior (a prompt), not a broken
+    spawn. See pre_trust_entry for the actual patch logic; this function is
+    only the disk I/O around it. Returns True if the write is believed to have
+    landed, False otherwise (best-effort; not a strong guarantee under a
+    concurrent writer, since there is no lock on this file and none is ours to
+    add — CLI-external tools are expected to lose the occasional race to the
+    editor that owns the file)."""
+    path = os.path.expanduser("~/.claude.json")
+    try:
+        with open(path) as f:
+            config = json.load(f)
+    except Exception:
+        config = {}
+    try:
+        updated = pre_trust_entry(config, abspath)
+        write_atomic(path, json.dumps(updated))
+        return True
+    except Exception:
+        return False
+
+
 def cmd_spawn(argv):
     if len(argv) < 2:
-        die('spawn needs: swarm spawn <name> "<task>" [--model M] [--cwd DIR]')
+        die('spawn needs: swarm spawn <name> "<task>" [--model M] [--cwd DIR] '
+            '[--trust]')
     name, task = argv[0], argv[1]
-    rest, model, cwd = argv[2:], "", os.getcwd()
+    rest, model, cwd, trust = argv[2:], "", os.getcwd(), False
     while rest:
         if rest[0] == "--model" and len(rest) > 1:
             model, rest = rest[1], rest[2:]
         elif rest[0] == "--cwd" and len(rest) > 1:
             cwd, rest = rest[1], rest[2:]
+        elif rest[0] == "--trust":
+            # OPT-IN, default off. Pre-approves cwd's workspace-trust prompt
+            # so a throwaway/experiment dir never wedges a session on it (the
+            # bug this whole task started from). Scoped to the exact --cwd
+            # given, one dir at a time — never a blanket "trust everything"
+            # switch. NOT for normal agents in real repos: a real repo is
+            # either already trusted (the human uses it directly) or SHOULD
+            # keep the prompt (an unfamiliar dir is exactly what the gate
+            # exists to catch). This flag exists for harnesses that spawn
+            # into a fresh tempdir per run, where "trust" has no meaningful
+            # content to withhold.
+            trust, rest = True, rest[1:]
         else:
             die(f"spawn: unknown flag {rest[0]}")
     import re as _re
@@ -959,6 +1168,9 @@ def cmd_spawn(argv):
     launcher = os.path.join(sdir, f"{name}.launch.sh")
     write_launcher(launcher, statusfile, settings, taskfile, model)
 
+    if trust:
+        pre_trust_dir(os.path.realpath(cwd))
+
     # One tab per agent: the pane is what makes the society observable.
     # Pin the child to the SPAWNER's workspace (HERDR_WORKSPACE_ID, set by
     # herdr in every pane): without --workspace, herdr places the tab in the
@@ -979,7 +1191,8 @@ def cmd_spawn(argv):
         pass
     if not pane:
         die("herdr tab create failed")
-    subprocess.run(["herdr", "pane", "run", pane, launcher], capture_output=True)
+    subprocess.run(["herdr", "pane", "run", pane, herdr_run_path(launcher)],
+                   capture_output=True)
 
     # Record the binding BEFORE the readiness wait: the record + the launcher
     # signal are the truth; a slow start must never lose the agent.
@@ -1123,8 +1336,13 @@ def cmd_ps(argv):
     events = {n: read_json(event_path(root, n)) for n in agents}
     op_mail = [(r.get("from", "?"), int(r.get("ts") or 0))
                for _, _, r in list_waiting(root, "operator")]
-    out = render_ps(agents, live, queues, events, my_name(), op_mail, now_ms(),
-                    junk)
+    now = now_ms()
+    # Live reads: bounded to candidates only (blocked_candidates), never the
+    # whole fleet — see read_blocked. herdr unreachable (live is None) means
+    # nothing to read; an empty dict is correct, not a degraded one.
+    blocked = read_blocked(root, agents, live, events, now) if live is not None else {}
+    out = render_ps(agents, live, queues, events, my_name(), op_mail, now,
+                    junk, blocked)
     if live is None and agents:
         out += "\n(herdr unreachable — liveness unknown)"
     print(out)
@@ -1168,8 +1386,12 @@ def cmd_world():
 USAGE = """swarm (simplest) — four verbs. An agent is a session in a pane with a
 name, a parent, and a journal. A message is a claim on one turn.
 
-  swarm spawn <name> "<task>" [--model M] [--cwd DIR]   create a child; the name
-                                is chosen, not derived; a name ever used errors
+  swarm spawn <name> "<task>" [--model M] [--cwd DIR] [--trust]   create a
+                                child; the name is chosen, not derived; a name
+                                ever used errors. --trust pre-approves --cwd's
+                                workspace-trust prompt (opt-in, default off —
+                                for throwaway/experiment dirs only, never for
+                                real repos)
   swarm send <name> --stdin     message an agent or `operator` (body from stdin —
   swarm send <name> "<msg>"     recommended; a positional body is a shell word).
                                 Delivered whole, ONE per turn, oldest first. Must
