@@ -54,9 +54,17 @@ NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newlin
 # and the difference is the honest part. `default` is the escape hatch: it means "I looked
 # at this child and the configured default is the right answer", which is a DECISION. It is
 # not the same as today's silence, where 142 of 143 spawns inherited a default nobody chose.
-SPAWN_MODELS = ("opus", "sonnet", "fable", "default")
-# haiku is REFUSED as an agent by standing operator policy (2026-07-13). See spawn_model_error.
-BANNED_MODELS = ("haiku",)
+#
+# haiku was banned 2026-07-13 on the claim "it doesn't have auto mode" — a capability claim
+# that was never independently measured (docs/audit/weak-model-delegation-2026-07-13.md's own
+# conclusion: the wedge is a permission gate swarm hands EVERY child regardless of model, Opus
+# would block too, and the settling probe was never run). With every child now getting an
+# explicit --permission-mode (this file, 2026-07-14), the probe WAS run: a haiku-pinned child,
+# spawned with acceptEdits, cleared the permission wall, edited a real file unattended, and
+# reached Stop with real last words (`swarm ps` showed it `[live] idle`, not wedged). The ban
+# rested on an unmeasured claim; the measurement says otherwise. Lifted.
+SPAWN_MODELS = ("opus", "sonnet", "fable", "haiku", "default")
+BANNED_MODELS = ()
 # Verbatim from `claude --help` (2026-07-14), the --permission-mode flag's own
 # accepted-values list — not guessed, not carried over from the settings-JSON
 # schema, which spells the "ask me" state differently ("default" there vs
@@ -135,8 +143,8 @@ def spawn_mandate_error():
         "as if it were a finding.\n"
         "  The tell: delete \"I\" from your reason. If it still makes sense, it failed "
         "— a real reason is about what YOU will do, never a property of the model.\n"
-        "  tokens: opus · sonnet · fable · default (you looked, and the configured "
-        "default is right — that is a decision, not a silence)"
+        "  tokens: opus · sonnet · fable · haiku · default (you looked, and the "
+        "configured default is right — that is a decision, not a silence)"
     )
 
 
@@ -1080,7 +1088,7 @@ def spawn_header(name, parent):
         f"model's error costs you nothing — pin `sonnet`. If catching a flaw would "
         f"mean redoing the reasoning yourself, pay for `opus`. Say THAT — not why the "
         f"model is good (you do not know, and a guess dressed as a reason is worse "
-        f"than none). Tokens: opus sonnet fable · default.\n\n"
+        f"than none). Tokens: opus sonnet fable haiku · default.\n\n"
         f"Your duties (briefed, not enforced): keep your journal at "
         f".swarm/journal/{name}.md — append timestamped entries in your own words "
         f"as you work, and always before going idle; a reconciliation entry names "
@@ -1643,7 +1651,7 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 the diff anyway) → a small model's error is free;
                                 expensive to check (you'd redo the reasoning) →
                                 pay for the strong one. Say THAT, not why the
-                                model is good. Tokens: opus sonnet fable ·
+                                model is good. Tokens: opus sonnet fable haiku ·
                                 default (a real answer: you looked, and the
                                 configured default is right).
                                 --trust pre-approves --cwd's workspace-trust

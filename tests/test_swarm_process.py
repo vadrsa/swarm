@@ -542,22 +542,33 @@ class TestSpawnMandate(Base):
         self.assertIn("Model: sonnet", j)
         self.assertIn("caught by the assertion", j)
 
-    def test_haiku_is_refused_and_the_refusal_is_honest(self):
-        env, _, _ = self.fake_tools(claude=True)
+    def test_haiku_is_accepted_the_ban_was_lifted_after_the_probe(self):
+        # haiku was banned 2026-07-13 on an unmeasured claim ("no auto permission
+        # mode"). 2026-07-14: every child now gets an explicit --permission-mode
+        # (this file), which made the claim testable. The probe (see
+        # .swarm/journal/perm-mode.md) spawned a real haiku-pinned child with
+        # acceptEdits; it cleared the permission wall, edited a file unattended,
+        # and reached Stop with real output — `swarm ps` showed it [live] idle,
+        # never wedged. The measurement contradicted the ban, so the ban is
+        # lifted, not just quietly removed: this test is the record of why.
+        env, log, argsf = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "haiku",
-                       "--reason", "a cheap read whose output would be one file this "
-                       "test greps — but the model gate refuses it first, and that "
-                       "refusal is a single string in stderr"],
+                       "--reason", "haiku is now an accepted spawn token; this "
+                       "test checks the exact argv the fake claude received"],
                       env, cwd=self.root)
-        self.assertEqual(p.returncode, 1)
-        self.assertIn("not agent-capable", p.stderr)
-        # The refusal must carry its OWN epistemic status. The measured cause of the wedge
-        # is a permission gate swarm hands EVERY child ("Opus would block too"), and the
-        # settling probe was never run. A refusal that read as "the Haiku problem is
-        # solved" would be the exact harm HARNESS.md §2.4 warns about.
-        self.assertIn("settling probe not yet run", p.stderr)
-        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
-                         "a refused model must not burn the name")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "worker")
+        with open(sw.journal_path(self.root, "worker")) as f:
+            j = f.read()
+        self.assertIn("Model: haiku", j)
+        for _ in range(50):
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "haiku")
 
     def test_unknown_model_is_refused(self):
         env, _, _ = self.fake_tools(claude=True)
