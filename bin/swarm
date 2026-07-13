@@ -57,6 +57,22 @@ NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newlin
 SPAWN_MODELS = ("opus", "sonnet", "fable", "default")
 # haiku is REFUSED as an agent by standing operator policy (2026-07-13). See spawn_model_error.
 BANNED_MODELS = ("haiku",)
+# Verbatim from `claude --help` (2026-07-14), the --permission-mode flag's own
+# accepted-values list — not guessed, not carried over from the settings-JSON
+# schema, which spells the "ask me" state differently ("default" there vs
+# "manual" here). This is the vocabulary that actually reaches the `claude`
+# argv, so it is the one spawn validates against.
+PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual",
+                     "dontAsk", "plan")
+# The default every spawned child gets unless overridden (--permission-mode or
+# .swarm/config's [spawn] permission_mode). acceptEdits is the NARROWEST mode
+# that unwedges the bug this file exists to fix: it auto-approves file edits
+# (the dialog that silently wedged every child, invisible in `ps` as plain
+# "idle") without also auto-approving arbitrary Bash/network/other tool use —
+# that broader bypass is bypassPermissions (or --dangerously-skip-permissions),
+# deliberately NOT the default. An agent that can edit files unattended is the
+# design; an agent that can do anything unattended is a liability.
+DEFAULT_PERMISSION_MODE = "acceptEdits"
 # ps-blocked detection: a CLOSED set of (kind, substring) pairs matched against a
 # pane's own recent text. The kind — never the matched text itself — is what ps
 # renders. This is deliberate: pane text is attacker-controlled (any agent can
@@ -439,6 +455,36 @@ def registered_middleware(root):
         identity = str(mw.get("identity") or "").strip() or "middleware"
         timeout = int(mw.get("timeout") or MIDDLEWARE_TIMEOUT)
         return identity, command, timeout
+    except Exception:
+        return None
+
+
+def configured_permission_mode(root):
+    """The operator's chosen default permission mode, if set, from the
+    [spawn] section of .swarm/config:
+
+        [spawn]
+        permission_mode = "plan"   # e.g. an operator who wants every child
+                                   # to start cautious, overriding the
+                                   # DEFAULT_PERMISSION_MODE built into swarm
+
+    None on ANY error — no file, no section, no key, unparseable — meaning
+    "use DEFAULT_PERMISSION_MODE", same fail-open posture as
+    registered_middleware. NOT validated against PERMISSION_MODES here — the
+    one caller (cmd_spawn) validates whatever value it ends up with,
+    regardless of source, so there is exactly one place a bad mode is
+    rejected."""
+    try:
+        path = os.path.join(root, "config")
+        try:
+            import tomllib
+            with open(path, "rb") as f:
+                conf = tomllib.load(f)
+        except ImportError:
+            conf = read_flat_toml(path)
+        sp = conf.get("spawn") or {}
+        mode = str(sp.get("permission_mode") or "").strip()
+        return mode or None
     except Exception:
         return None
 
@@ -1116,11 +1162,23 @@ def pre_trust_entry(config, abspath):
     return out
 
 
-def write_launcher(launcher, statusfile, settings, taskfile, model):
+def write_launcher(launcher, statusfile, settings, taskfile, model, permission_mode):
     # Inherited mechanism (G14): the task lives in a FILE; herdr only ever sees
     # the launcher's path — zero escaping, zero multibyte on argv. The launcher
     # pre-flights and records its outcome to the status file, so spawn can tell
     # a started harness from a dead one by a fired signal, not a screen scrape.
+    #
+    # permission_mode is ALWAYS passed (never omitted like `model` can be):
+    # without it every child inherits Claude Code's own default, which is the
+    # manual/ask-every-time mode — exactly the wedge this parameter exists to
+    # fix. There is no "no opinion" spawn; cmd_spawn always resolves one
+    # (--permission-mode, else .swarm/config, else DEFAULT_PERMISSION_MODE)
+    # before calling here.
+    claude_cmd = (f'claude --settings {shlex.quote(settings)} '
+                  f'--permission-mode {shlex.quote(permission_mode)}')
+    if model:
+        claude_cmd += f' --model {shlex.quote(model)}'
+    claude_cmd += ' "$PROMPT"'
     lines = [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
@@ -1136,8 +1194,7 @@ def write_launcher(launcher, statusfile, settings, taskfile, model):
         "fi",
         f'PROMPT="$(cat {shlex.quote(taskfile)})"',
         'echo "launching" > "$STATUS"',
-        (f'claude --settings {shlex.quote(settings)} --model {shlex.quote(model)} "$PROMPT"'
-         if model else f'claude --settings {shlex.quote(settings)} "$PROMPT"'),
+        claude_cmd,
         "rc=$?",
         'if [ "$rc" -ne 0 ]; then echo "failed: claude exited code $rc" > "$STATUS"; fi',
         "exec bash",  # keep the pane inspectable after claude ends
@@ -1176,9 +1233,10 @@ def pre_trust_dir(abspath):
 def cmd_spawn(argv):
     if len(argv) < 2:
         die('spawn needs: swarm spawn <name> "<task>" --model M --reason "<why>" '
-            '[--cwd DIR] [--trust]\n  ' + spawn_mandate_error())
+            '[--cwd DIR] [--trust] [--permission-mode MODE]\n  ' + spawn_mandate_error())
     name, task = argv[0], argv[1]
     rest, model, reason, cwd, trust = argv[2:], "", "", os.getcwd(), False
+    permission_mode = ""
     while rest:
         if rest[0] == "--model" and len(rest) > 1:
             model, rest = rest[1], rest[2:]
@@ -1186,6 +1244,8 @@ def cmd_spawn(argv):
             reason, rest = rest[1], rest[2:]
         elif rest[0] == "--cwd" and len(rest) > 1:
             cwd, rest = rest[1], rest[2:]
+        elif rest[0] == "--permission-mode" and len(rest) > 1:
+            permission_mode, rest = rest[1], rest[2:]
         elif rest[0] == "--trust":
             # OPT-IN, default off. Pre-approves cwd's workspace-trust prompt
             # so a throwaway/experiment dir never wedges a session on it (the
@@ -1246,6 +1306,18 @@ def cmd_spawn(argv):
     root = root_dir()
     parent = my_name()
 
+    # Resolve the permission mode BEFORE the name is claimed, same reasoning as
+    # the mandate guard above: an invalid --permission-mode must refuse without
+    # burning the child's name. Precedence: --permission-mode flag, else
+    # .swarm/config's [spawn] permission_mode, else DEFAULT_PERMISSION_MODE
+    # (acceptEdits) — never Claude Code's own built-in default (manual), which
+    # is the wedge this whole change exists to fix.
+    if not permission_mode:
+        permission_mode = configured_permission_mode(root) or DEFAULT_PERMISSION_MODE
+    if permission_mode not in PERMISSION_MODES:
+        die(f"unknown --permission-mode '{permission_mode}' — accepted values: "
+            f"{', '.join(PERMISSION_MODES)} (verbatim from `claude --help`).")
+
     # Claim the name FIRST: journal-as-tombstone. A name ever used errors here.
     try:
         fd = claim_name(root, name)
@@ -1286,7 +1358,7 @@ def cmd_spawn(argv):
     except OSError:
         pass
     launcher = os.path.join(sdir, f"{name}.launch.sh")
-    write_launcher(launcher, statusfile, settings, taskfile, launch_model)
+    write_launcher(launcher, statusfile, settings, taskfile, launch_model, permission_mode)
 
     if trust:
         pre_trust_dir(os.path.realpath(cwd))
@@ -1561,6 +1633,7 @@ USAGE = """swarm (simplest) — four verbs. An agent is a session in a pane with
 name, a parent, and a journal. A message is a claim on one turn.
 
   swarm spawn <name> "<task>" --model M --reason "<why>" [--cwd DIR] [--trust]
+                              [--permission-mode MODE]
                                 create a child; the name is chosen, not derived;
                                 a name ever used errors.
                                 --model and --reason are BOTH REQUIRED: the
@@ -1576,6 +1649,14 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 --trust pre-approves --cwd's workspace-trust
                                 prompt (opt-in, default off — for throwaway dirs
                                 only, never for real repos)
+                                --permission-mode MODE sets the child's Claude
+                                Code permission mode (default: acceptEdits — can
+                                edit files unattended, cannot bypass everything
+                                unattended). Accepted: acceptEdits auto
+                                bypassPermissions manual dontAsk plan (verbatim
+                                from `claude --help`). Overridable per-spawn
+                                here, or as a standing default via
+                                .swarm/config's [spawn] permission_mode.
   swarm send <name> --stdin     message an agent or `operator` (body from stdin —
   swarm send <name> "<msg>"     recommended; a positional body is a shell word).
                                 Delivered whole, ONE per turn, oldest first. Must
