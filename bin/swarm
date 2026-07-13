@@ -119,7 +119,8 @@ def spawn_mandate_error():
         "as if it were a finding.\n"
         "  The tell: delete \"I\" from your reason. If it still makes sense, it failed "
         "— a real reason is about what YOU will do, never a property of the model.\n"
-        "  tokens: opus sonnet fable (agents) · haiku (see below) · default (if configured)"
+        "  tokens: opus · sonnet · fable · default (you looked, and the configured "
+        "default is right — that is a decision, not a silence)"
     )
 
 
@@ -1489,12 +1490,25 @@ def cmd_ps(argv):
         for n in sorted(agents):
             m = str(agents[n].get("model") or "")
             r = str(agents[n].get("reason") or "")
-            # Same sanitizer discipline as model_of(), same reason: the RECORD keeps the
-            # text verbatim (it is the truth), and the VIEW protects itself. Newlines are
-            # the sharp edge — one would forge a row of this very list. Collapse whitespace
-            # to single spaces, drop control characters (ANSI), cap with an ellipsis so a
-            # cut clause is VISIBLY a fragment and never passes for a whole one.
-            r = " ".join("".join(c for c in r if c.isprintable()).split())
+            # Same sanitizer discipline as model_of(), same reason, and deliberately not one
+            # notch weaker: the RECORD keeps the text verbatim (it is the truth), and the
+            # VIEW protects itself. A reason is free text ANY agent can write — attacker-
+            # controlled, and longer and freer than the pin ever was — so it gets the pin's
+            # exclude-list treatment:
+            #   - collapse whitespace: a newline would forge a row of THIS VERY LIST. This
+            #     is the sharp edge, and it is why the list is flat and not a tree.
+            #   - drop non-printables: this strips the ESC out of an ANSI escape. What is
+            #     left ("[31m") is inert text, not a control sequence — the ESC is what
+            #     made it an escape, and the ESC is gone.
+            #   - drop MODEL_STRUCTURAL: the box glyphs that draw the tree and the parens
+            #     that delimit `(you)`. A reason cannot forge a tree row from down here,
+            #     but it must not be able to DRAW tree-looking structure either — the one
+            #     view the operator trusts must never render an agent's own prose as
+            #     structure. model_of() excludes exactly this set; so does this.
+            #   - cap with an ellipsis: a cut clause must be VISIBLY a fragment.
+            r = "".join(c for c in r
+                        if c.isprintable() and c not in MODEL_STRUCTURAL)
+            r = " ".join(r.split())
             if len(r) > REASON_CAP:
                 r = r[:REASON_CAP - 1] + "…"
             if not m and not r:

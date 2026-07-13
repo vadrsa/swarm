@@ -350,7 +350,12 @@ class TestSpawnMandate(Base):
 
     def test_spawn_without_model_fails(self):
         env, _, _ = self.fake_tools(claude=True)
-        p = run_swarm(["spawn", "worker", "t", "--reason", "checked by one grep"],
+        # A real reason even here, where the spawn is REFUSED and it is never stored: a
+        # clause that gets sloppy because "nobody reads this one" is exactly the theater
+        # this mandate exists to prevent, and a fixture is where it would start.
+        p = run_swarm(["spawn", "worker", "t", "--reason",
+                       "the refusal this must produce is one string in stderr, asserted "
+                       "on the next line — a wrong answer cannot get past it"],
                       env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("--model", p.stderr)
@@ -370,6 +375,11 @@ class TestSpawnMandate(Base):
         env, _, _ = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t"], env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
+        # Pinned to the SPECIFIC refusal, not just to exit 1 — same discipline this change
+        # forced on the older tests. Under a required flag everything exits 1, so a bare
+        # returncode assertion is a test that can stop testing without ever going red.
+        self.assertIn("--model", p.stderr)
+        self.assertIn("--reason", p.stderr)
         self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
 
     def test_blank_reason_is_not_a_reason(self):
@@ -415,7 +425,9 @@ class TestSpawnMandate(Base):
     def test_haiku_is_refused_and_the_refusal_is_honest(self):
         env, _, _ = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "haiku",
-                       "--reason", "cheap read, checked by one grep"],
+                       "--reason", "a cheap read whose output would be one file this "
+                       "test greps — but the model gate refuses it first, and that "
+                       "refusal is a single string in stderr"],
                       env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("not agent-capable", p.stderr)
@@ -430,7 +442,9 @@ class TestSpawnMandate(Base):
     def test_unknown_model_is_refused(self):
         env, _, _ = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "gpt-9",
-                       "--reason", "checked by one grep"], env, cwd=self.root)
+                       "--reason", "whatever this child produced would be read back by "
+                       "the assertion below; the unknown-model gate refuses it first"],
+                      env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("unknown model", p.stderr)
 
@@ -494,6 +508,22 @@ class TestSpawnMandate(Base):
         out = run_swarm(["ps", "--reason"], env, cwd=self.root).stdout
         rows = [ln for ln in out.splitlines() if ln.startswith("  evil:")]
         self.assertEqual(rows, [], "a newline in a reason must not forge a row")
+
+    def test_ps_reason_strips_structure_and_ansi_a_reason_cannot_draw_the_tree(self):
+        # A reason is attacker-controlled free text — longer and freer than the pin ever
+        # was. It gets the pin's exclude-list (MODEL_STRUCTURAL), not a weaker one: it must
+        # not be able to DRAW tree-looking structure, nor forge the `(you)` marker, nor
+        # emit a live ANSI escape into the one view the operator trusts.
+        env, _, _ = self.fake_tools(claude=True)
+        run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                   "--reason", "checked by grep \x1b[31m ├─ └─ │ fake (you)"],
+                  env, cwd=self.root)
+        body = run_swarm(["ps", "--reason"], env,
+                         cwd=self.root).stdout.split("model choices")[-1]
+        for glyph in ("├", "─", "│", "└", "(", ")"):
+            self.assertNotIn(glyph, body,
+                             f"{glyph!r} does structural work in this view")
+        self.assertNotIn("\x1b", body, "a reason must not emit a live ANSI escape")
 
     def test_spawn_header_teaches_the_required_form(self):
         # The header is injected into EVERY child's task — it is where a parent learns
