@@ -375,6 +375,122 @@ class TestSpawnEndToEnd(Base):
                           f"{reserved!r} must fail the RESERVED check")
 
 
+class TestPermissionMode(Base):
+    """Every spawned child must get an explicit --permission-mode on the real
+    `claude` argv — without one it silently inherits Claude Code's own manual
+    (ask-every-time) default and wedges on the first permission dialog, which
+    renders as plain 'idle' in `ps`. acceptEdits is the default this file
+    exists to install: file edits proceed unattended, everything else still
+    gates."""
+
+    def _argv(self, argsf):
+        for _ in range(50):                              # launcher runs async
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        with open(argsf) as f:
+            return f.read().splitlines()
+
+    def test_default_permission_mode_is_accept_edits_on_the_real_argv(self):
+        env, _, argsf = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "this test reads the exact argv the fake "
+                       "claude received; the assertion is mechanical"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        argv = self._argv(argsf)
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+
+    def test_permission_mode_override_reaches_the_real_argv(self):
+        env, _, argsf = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "override honored end to end; checked "
+                       "against the real argv the fake claude recorded",
+                       "--permission-mode", "plan"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        argv = self._argv(argsf)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+
+    def test_every_accepted_mode_is_honored(self):
+        for mode in sw.PERMISSION_MODES:
+            env, _, argsf = self.fake_tools(claude=True)
+            name = f"worker-{mode.lower()}"
+            p = run_swarm(["spawn", name, "t", "--model", "sonnet",
+                           "--reason", "sweep of every accepted mode; each "
+                           "must reach argv unchanged",
+                           "--permission-mode", mode],
+                          env, cwd=self.root)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            argv = self._argv(argsf)
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], mode)
+
+    def test_invalid_permission_mode_rejected_with_clear_error_before_tombstone(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "an invalid mode must refuse with the "
+                       "accepted list in stderr, and must not burn the name",
+                       "--permission-mode", "yolo"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown --permission-mode", p.stderr)
+        self.assertIn("acceptEdits", p.stderr)   # the accepted list, printed
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
+                          "a refused spawn must not claim the name")
+
+    def test_config_default_permission_mode_applies_without_a_flag(self):
+        env, _, argsf = self.fake_tools(claude=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write('[spawn]\npermission_mode = "plan"\n')
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "operator standing default from "
+                       ".swarm/config, no --permission-mode flag given"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        argv = self._argv(argsf)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+
+    def test_flag_overrides_configured_default(self):
+        env, _, argsf = self.fake_tools(claude=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write('[spawn]\npermission_mode = "plan"\n')
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "an explicit flag must win over the "
+                       "configured standing default",
+                       "--permission-mode", "dontAsk"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        argv = self._argv(argsf)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+
+    def test_write_launcher_shell_quotes_the_mode(self):
+        # Pure unit test of write_launcher itself: a mode value containing shell
+        # metacharacters must never be interpolated unquoted into the launcher
+        # script. This can't happen through cmd_spawn today (modes are a closed
+        # enum), but write_launcher is the mechanism a sibling quoting fix must
+        # not regress, so it is tested directly at the function boundary.
+        tmp = tempfile.mkdtemp(prefix="swarm-launcher-")
+        try:
+            launcher = os.path.join(tmp, "worker.launch.sh")
+            statusfile = os.path.join(tmp, "worker.status")
+            settings = os.path.join(tmp, "worker.json")
+            taskfile = os.path.join(tmp, "worker.task")
+            with open(settings, "w") as f:
+                f.write("{}")
+            with open(taskfile, "w") as f:
+                f.write("do the thing")
+            hostile = "plan; rm -rf /"
+            sw.write_launcher(launcher, statusfile, settings, taskfile,
+                              "sonnet", hostile)
+            with open(launcher) as f:
+                script = f.read()
+            self.assertIn(sw.shlex.quote(hostile), script)
+            self.assertNotIn(f"--permission-mode {hostile} ", script)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestSpawnMandate(Base):
     """--model and --reason are REQUIRED. The parent chooses the child's model.
 
@@ -461,22 +577,33 @@ class TestSpawnMandate(Base):
         self.assertIn("Model: sonnet", j)
         self.assertIn("caught by the assertion", j)
 
-    def test_haiku_is_refused_and_the_refusal_is_honest(self):
-        env, _, _ = self.fake_tools(claude=True)
+    def test_haiku_is_accepted_the_ban_was_lifted_after_the_probe(self):
+        # haiku was banned 2026-07-13 on an unmeasured claim ("no auto permission
+        # mode"). 2026-07-14: every child now gets an explicit --permission-mode
+        # (this file), which made the claim testable. The probe (see
+        # .swarm/journal/perm-mode.md) spawned a real haiku-pinned child with
+        # acceptEdits; it cleared the permission wall, edited a file unattended,
+        # and reached Stop with real output — `swarm ps` showed it [live] idle,
+        # never wedged. The measurement contradicted the ban, so the ban is
+        # lifted, not just quietly removed: this test is the record of why.
+        env, log, argsf = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "haiku",
-                       "--reason", "a cheap read whose output would be one file this "
-                       "test greps — but the model gate refuses it first, and that "
-                       "refusal is a single string in stderr"],
+                       "--reason", "haiku is now an accepted spawn token; this "
+                       "test checks the exact argv the fake claude received"],
                       env, cwd=self.root)
-        self.assertEqual(p.returncode, 1)
-        self.assertIn("not agent-capable", p.stderr)
-        # The refusal must carry its OWN epistemic status. The measured cause of the wedge
-        # is a permission gate swarm hands EVERY child ("Opus would block too"), and the
-        # settling probe was never run. A refusal that read as "the Haiku problem is
-        # solved" would be the exact harm HARNESS.md §2.4 warns about.
-        self.assertIn("settling probe not yet run", p.stderr)
-        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
-                         "a refused model must not burn the name")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "worker")
+        with open(sw.journal_path(self.root, "worker")) as f:
+            j = f.read()
+        self.assertIn("Model: haiku", j)
+        for _ in range(50):
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "haiku")
 
     def test_unknown_model_is_refused(self):
         env, _, _ = self.fake_tools(claude=True)
