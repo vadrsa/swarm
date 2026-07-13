@@ -32,6 +32,18 @@ import time
 TURN_CAP = 8000          # the ONE size number: a message fits one turn's injection
 JOURNAL_TAIL_CAP = 4000  # restore: at most this many chars of journal tail
 LAST_WORDS_CAP = 500     # event fact: stored prefix of the last assistant words
+MODEL_CAP = 40           # ps view: a pinned model id. Measured, not guessed: the longest id in
+                         # the field is 25 ('claude-haiku-4-5-20251001'), but a shipping Bedrock
+                         # id is 33 ('us.anthropic.claude-opus-4-8-v1:0'). 40 leaves headroom.
+                         # Over the cap renders with an ellipsis — a cut id must never pass for
+                         # a whole one.
+# Characters a pinned model may never contain, because they do STRUCTURAL work in the ps view:
+# the parens that delimit '(you)', and the box-drawing glyphs that draw the tree. Whitespace goes
+# too (a newline would forge a row). This is an EXCLUDE list on purpose. A whitelist of the
+# "obvious" id alphabet silently mangles real ids — 'claude-opus-4-8[1m]' loses its brackets and
+# the Bedrock 'v1:0' becomes 'v10', which is precisely the plausible-but-wrong id this view exists
+# not to print. Exclude what breaks the view; never guess at what an id may contain.
+MODEL_STRUCTURAL = set("()") | set("─│├└┌┐┘┬┴┼")
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 # Sender-side bound on one middleware invocation (a slow middleware must fail
 # open, never stall the sender). Default; .swarm/config's [middleware] timeout
@@ -500,6 +512,17 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     the living tree stays one screen however long the swarm's history grows.
     A live agent under a dead parent reattaches to its nearest living ancestor
     so hiding the dead never orphans the living.
+
+    A non-empty 'model' means the agent was PINNED with --model at spawn, and ps
+    renders it in a slot of its own: `model=opus`. An empty one means the agent
+    was NOT pinned: the record says nothing about which model is actually running
+    (a launcher with no --model execs bare `claude`, and nothing propagates from
+    the spawner), so ps says nothing. It is a fact about the spawn, not the model.
+
+    The pin gets its OWN slot because any agent can `swarm spawn --model you`,
+    and a pin rendered as `(you)` would be byte-identical to the marker naming
+    the reader. `(you)` is load-bearing for IDENTITY, so nothing attacker-shaped
+    may share its syntax — `model=you` is self-evidently a claim about a model.
     """
     junk = junk or {}
     lines = []
@@ -535,6 +558,39 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     def q_of(n):
         return f"q={queues.get(n, 0)}" + (f"+{junk[n]}?" if junk.get(n) else "")
 
+    def model_of(n):
+        # A non-empty model means PINNED with --model at spawn; empty means NOT
+        # pinned, which says nothing about the model actually running — so ps
+        # says nothing.
+        #
+        # It renders as `model=x`, in a slot of its own. NOT as `(x)` beside
+        # `(you)` — that was tried and it is unfixable. In a swarm ANY agent can
+        # run `swarm spawn --model <anything>`, so the pin is ATTACKER-controlled
+        # text, and `--model you` renders `bait (you)`: byte-identical to the
+        # marker that answers "which of these is ME?". No sanitizer saves this,
+        # because `you` is CLEAN input — it forges the marker only because
+        # `(you)` and `(opus)` ARE THE SAME SYNTAX. You cannot escape your way
+        # out of a namespace collision; you leave the namespace. `model=you` is
+        # self-evidently a claim about a MODEL, so the forge defeats itself.
+        #
+        # The value is still cleaned, because the record is written verbatim and
+        # the VIEW must protect itself (the record keeps the truth): collapse
+        # whitespace (a newline would forge a tree row), drop control characters
+        # (ANSI), drop the glyphs that do structural work here, cap the length.
+        # Same layer, same reason, as LAST_WORDS_CAP.
+        #
+        # A cut id ends in '…', because 'claude-haiku-4-5-2025100' is a LIE that
+        # looks like an id while 'claude-haiku-4-5-2025…' is visibly a fragment.
+        # The renderer must never state a claim the record does not support, and
+        # a plausible-but-wrong id is worse than no id at all.
+        m = str(agents[n].get("model") or "")
+        m = "".join(c for c in m
+                    if c.isprintable() and not c.isspace()
+                    and c not in MODEL_STRUCTURAL)
+        if len(m) > MODEL_CAP:
+            m = m[:MODEL_CAP - 1] + "…"
+        return f" model={m}" if m else ""
+
     def walk(name, prefix, is_last):
         a = agents[name]
         branch = "└─ " if is_last else "├─ "
@@ -542,7 +598,8 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
         ev = events.get(name)
         idle = f"idle {fmt_age(now - ev['ts'])}" if ev and ev.get("ts") else "idle ?"
         alive = "live" if live is not None else "?"
-        lines.append(f"{prefix}{branch}{name}{you} [{alive}] {q_of(name)} {idle}")
+        lines.append(f"{prefix}{branch}{name}{you}{model_of(name)} "
+                     f"[{alive}] {q_of(name)} {idle}")
         if ev and ev.get("last_words"):
             cont = "   " if is_last else "│  "
             lines.append(f'{prefix}{cont}   last: "{ev["last_words"][:80]}"')
@@ -568,7 +625,7 @@ def render_ps(agents, live, queues, events, me_name, op_mail, now, junk=None):
     for n in sorted(shown_set - in_tree):
         a = agents[n]
         alive = "live" if live is not None else "?"
-        lines.append(f"?─ {n} [parent {a.get('parent', '?')} unknown] "
+        lines.append(f"?─ {n}{model_of(n)} [parent {a.get('parent', '?')} unknown] "
                      f"[{alive}] {q_of(n)}")
     if dead:
         lines.append(f"dead: {', '.join(dead)}")
