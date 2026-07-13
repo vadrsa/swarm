@@ -51,6 +51,46 @@ unattended is available *without* reaching for the bypass — so there is no hon
 hand every child `--dangerously-skip-permissions` and call it "auto." An agent that can edit
 files unattended is the design. An agent that can do *anything* unattended is a liability.
 
+**The default is `acceptEdits`**, overridable per-spawn (`swarm spawn --permission-mode MODE`)
+or as a standing default (`.swarm/config`, `[spawn] permission_mode`). Precedence: flag →
+config → `acceptEdits`. An invalid mode is refused *before* the child's name is claimed, so a
+rejected spawn never burns a name.
+
+### That it is genuinely narrow is measured, not asserted
+
+Run against a **real** `claude` with an **empty settings file** (`{}`) — deliberately, so this
+machine's ambient `"defaultMode": "auto"` could not leak in and manufacture a pass:
+
+| model + flags | Edit a file | `curl … > file` |
+|---|---|---|
+| sonnet + `acceptEdits` | **edits, unattended** | **blocked** |
+| haiku + `acceptEdits` | **edits, unattended** | **blocked** |
+| haiku, **no flag** (what we shipped) | **refused** | — |
+
+`acceptEdits` lets a child do its job and nothing more. We did not ship a disguised bypass.
+
+---
+
+## The Haiku ban was wrong, and the control run proves it
+
+The ban rested on the claim *"it doesn't have auto mode."* `bin/swarm`'s own refusal text
+admitted the settling probe **was never run**. It has now been run — twice, independently, by
+two agents using different methods (a non-interactive probe with the control above; and a live
+pane spawn that reached a real `Stop` event with `swarm ps` showing `[live] idle`, never
+wedged). Both agree.
+
+The third row of that table is the whole case. **haiku with no flag** returns:
+
+> *"The tool requires permission to edit the file. This is a non-interactive session, so I
+> cannot proceed with the edit without your explicit permission."*
+
+That is the **exact stall we attributed to Haiku** — reproduced by *removing a flag* from a
+model we never banned, and cured by *adding it back*. Permission mode is a property of the
+**harness**, not the model. Haiku clears the wall exactly as Sonnet does, and is Bash-gated
+exactly as Sonnet is.
+
+**The ban is lifted.** We banned a model for an infrastructure bug, and the record now says so.
+
 ---
 
 ## Bug 2 — the space in the path
@@ -122,6 +162,25 @@ Stated in `README.md` under Requirements, honestly and no wider than the ground 
 
 Swarm needs herdr; wherever herdr runs, swarm runs. That is the real boundary and it does
 not overclaim.
+
+---
+
+## Two findings nobody asked for
+
+**The test fixture was lying.** `FAKE_HERDR`'s `pane run` case ran the launcher via list-form
+`bash "$@"` — real argv, no shell. But the real `herdr pane run` **types its argument into a
+shell**. So the fixture never simulated the one behavior that breaks, and **the 138-test suite
+was structurally incapable of catching this bug.** That is why a green suite coexisted with a
+spawn path that could not survive a space. The fixture now `eval`s the stripped string, and the
+new end-to-end test was confirmed to *fail* against the old shim — a real regression guard, not
+a coincidental pass. A test that cannot fail is worse than no test.
+
+**A clean textual merge hid a semantic conflict.** The two fixes were developed in parallel and
+merged without a single git conflict — then the suite failed with three `TypeError`s. One branch
+had made `permission_mode` a required argument of `write_launcher()`; the other had written new
+tests against the old signature. Neither was wrong; neither could see the other. *No textual
+conflict is not the same as no conflict*, and the only thing that caught it was running the
+suite on the merged result rather than trusting two green branches.
 
 ---
 
