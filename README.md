@@ -25,6 +25,12 @@ model's. Read [WORLD.md](WORLD.md) for the contract itself and
 `herdr` (the container that holds subagent panes), `claude` (Claude Code CLI),
 `python3` — all on PATH.
 
+**Platforms.** macOS and Linux are supported and exercised. On Windows, use
+**WSL** — that is the supported Windows path, and it is exercised. **Git Bash /
+MSYS2 is not supported**: herdr's own installer rejects it outright
+(`✗ unsupported OS: MINGW64_NT-10.0-26200`), so swarm has no pane container to
+run in there. Swarm needs herdr; wherever herdr runs, swarm runs.
+
 ## Install
 
 ```sh
