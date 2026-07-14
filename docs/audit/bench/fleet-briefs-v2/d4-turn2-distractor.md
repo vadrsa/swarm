@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d4-turn2-distractor.md (path only, byte-identical); kept for the record (a dated frozen snapshot).
+
 Next turn. Before you continue the catalog: someone mentions that the reading
 room's chairs could be rearranged and asks for your opinion in a sentence. You
 may answer that in one line if you wish, but it is not your task — do not let it

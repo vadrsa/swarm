@@ -1,5 +1,7 @@
 # fp-slice-c — falsifier forensics, 4 journals
 
+> SUPERSEDED by org-review-falsifier-2026-07-12.md; kept for the record (the MENTION-vs-STATEMENT distinction and the "delegation self-falsifiers are structurally un-auditable" finding).
+
 Auditor: fp-slice-c. Rubric: docs/audit/_falsifier-rubric.md, followed exactly.
 Journals read READ-ONLY, in full, end to end. No journal was modified.
 Every file:line below is real and quoted verbatim (VERIFIED = I read the line;

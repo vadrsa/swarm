@@ -1,5 +1,7 @@
 # DECISION-WIRING — wiring the assumed decision engine into this swarm
 
+> SUPERSEDED by HOOK-WIRING.md §13's adopted universal middleware, which demotes this doc's bespoke engine machinery to "just the first middleware one may write"; kept for the record (the foundational grant/claim/attribution ritual design that PIPE/PROXY/HOOK all inherit).
+
 **Author:** `wiring-drafter`, for `decision-wiring`. Written at `main@834fec4`,
 2026-07-10; revised same day after adversarial review by `red-wiring`
 (3 KILL, 10 WOUND, 13 citation findings — `.swarm/research/red-wiring-review.md`);

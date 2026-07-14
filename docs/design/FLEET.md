@@ -1,5 +1,7 @@
 # FLEET — non-Claude models as leaf agents
 
+> SUPERSEDED by FLEET-EVAL.md's operator correction; kept for the record (the launcher-override architecture, leaf-contract §4, leaf-liveness protocol §5, and concept-cost accounting §9 — none restated elsewhere).
+
 **Author:** `fleet-scout`, design researcher. Writes no product code, changes
 nothing; probes read-only and designs. Reports to the operator.
 **Written at** `main@aa6063d`, 2026-07-11.

@@ -1,5 +1,7 @@
 # Spawn hardening — two field bugs, one root cause (2026-07-14)
 
+> SUPERSEDED by spawn-red-2026-07-14.md, which corrects its "does its job and nothing more" overclaim; kept for the record (the two field-bug root-cause narratives — permission gate, path quoting — and Haiku-ban-was-wrong evidence not restated elsewhere).
+
 Two bugs reported by the **first person outside this machine to run swarm**, on WSL. Both
 are in the spawn path. They look unrelated — a permission dialog, a space in a path — and
 they are the same bug wearing two hats:

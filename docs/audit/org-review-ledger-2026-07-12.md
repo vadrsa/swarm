@@ -1,5 +1,7 @@
 # Operator Ledger — Forensic Mining
 
+> SUPERSEDED as a live reference by whatever org-review instrument shipped; kept for the record (original measurements — F-SPAN null result, independently re-measured PR merge-latency decay table — not duplicated elsewhere).
+
 **Agent:** ledger-forensics (child of org-review-scout)
 **Date:** 2026-07-12
 **Corpus:** `.swarm/journal/operator.md` (194 lines, read in full), `.swarm/queue/operator/delivered/` (60 messages), `.swarm/agents/*.json` (106 agents), `docs/design/DECISIONS.md`, GitHub PR API.

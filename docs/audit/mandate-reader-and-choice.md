@@ -1,5 +1,7 @@
 # mandate-reader-and-choice — is a recorded model-REASON load-bearing, and is there a choice to justify?
 
+> SUPERSEDED by the shipped mandate; kept for the record (the analysis that shaped record-vs-journal placement and the in-flight wmd-haiku/wmd-opus natural-experiment discovery).
+
 **Author:** `mr-reader`, reporting to `mandate-red`. **Status:** AUDIT — findings, cited.
 **Written at** `swarm-dev/model-fit`, 2026-07-13. **Method:** read `bin/swarm` at the
 source; grep the whole tree for record readers; read `MODEL-FIT.md` + `FLEET-EVAL*` +

@@ -1,5 +1,7 @@
 # RED — adversarial review of `field-evidence-doctrine-2026-07-12.md`
 
+> SUPERSEDED by field-evidence-doctrine-2026-07-12.md, verdicts only, not evidence; kept for the record (primary-artifact forensics behind R1–R9 — the 9-row timestamp table, the 8-token cold-recoverability table, bin/swarm:64 — and the review's own unrun pre-registered falsifiers).
+
 **Reviewer:** `dp-red`. I ran none of the probe — that is my qualification. Every
 objection below is checked against a **primary artifact** (clone `agents/*.json`,
 `bin/swarm` source, the two skill texts, the `launch.sh` prompts, the observers'

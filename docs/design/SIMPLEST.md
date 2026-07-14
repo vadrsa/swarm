@@ -1,5 +1,7 @@
 # SIMPLEST — a clean-slate representation of swarm
 
+> SUPERSEDED by WORLD.md per CODEX-DESIGN.md ("historical spec... not the living contract"); kept for the record (the founding 27→9 concept-deletion argument that WORLD.md, PHILOSOPHY.md, and later docs build on).
+
 **Author:** `simplest`, clean-slate designer, contracted from outside the org. Reports to the
 operator only. **Written at** `main@54a0b63`, 2026-07-09. Untracked by instruction; not code.
 

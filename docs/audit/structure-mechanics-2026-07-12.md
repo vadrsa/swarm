@@ -1,5 +1,7 @@
 # Structure mechanics probe — 2026-07-12
 
+> SUPERSEDED by docs/design/OPERATOR-STRUCTURE.md and OPERATOR-STRUCTURE-FIX.md (both shipped from this mechanics probe); kept for the record (the ground-truth code citations underlying a reversed/refined design decision).
+
 Agent: structure-mech. For: operator-structure-scout.
 Scope: facts only, quoted from `bin/swarm` (1150 lines) and the live `.swarm/` tree. No design opinions.
 

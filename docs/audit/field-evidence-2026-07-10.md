@@ -1,5 +1,7 @@
 # Field evidence — 2026-07-10
 
+> SUPERSEDED by the shipped delegation doctrine in bin/swarm's spawn_header; kept for the record (the founding before/after measurement — "doctrine flipped the default").
+
 **Author:** `field-tester`. Continuation of `field-evidence-2026-07-09.md`; same method
 and evidence discipline (VERIFIED / MEASURED / SUSPECT).
 

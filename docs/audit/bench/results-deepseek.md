@@ -1,5 +1,7 @@
 # Fleet bench cell — deepseek/deepseek-chat — 2026-07-11
 
+> SUPERSEDED by results-v3-deepseek.md (v2-run deepseek cell); kept for the record (the original inflated v2 read, "strongly swarm-fit", later shown to be a rig artifact where real duty-drops scored as excused passes).
+
 ## Pinned run header (rubric §5b — facts, from `header.txt` + verified)
 
 ```

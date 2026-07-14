@@ -1,5 +1,7 @@
 # OPERATOR-STRUCTURE-GRAVE — a graveyard and prior-art check on the top-layer doctrine
 
+> SUPERSEDED by OPERATOR-STRUCTURE.md (Part I) and the FIX/RED2/RED3 chain (Part II); kept for the record (the graveyard-check rulings — human-confirm handshake cut, "seeing is global" doctrine contradiction — and the sharp WORLD.md concept-vs-concept diagnosis in Part II).
+
 **Author:** `structure-grave`, dispatched by `operator-structure-scout`. Written at
 `main@aa6063d`, 2026-07-12. **Verdict document; no code, no design.**
 

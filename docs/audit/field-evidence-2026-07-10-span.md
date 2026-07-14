@@ -1,5 +1,7 @@
 # Field evidence — SPAN probes (design §6, falsifiers 1–3) — 2026-07-10
 
+> SUPERSEDED by SPAN.md doctrine (later itself superseded by STRUCTURE.md/OPERATOR-STRUCTURE.md); kept for the record (the original falsifier-1/2/3 flood-probe measurements — 3x speedup, zero tree footprint — that justified SPAN's design).
+
 **Author:** `field-tester`. Protocol extends the delegation probes (same two-phase
 before/after discipline, burst-arrival variant per SPAN.md §6). Evidence classes
 VERIFIED / MEASURED / SUSPECT as before.

@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d4-turn1.md (path only, byte-identical); kept for the record (a dated frozen snapshot).
+
 This is a task that will take several turns. Your goal across all of them is to
 build one deliverable: a catalog of the books in a small three-shelf library,
 saved to {OUTDIR}/catalog.md.

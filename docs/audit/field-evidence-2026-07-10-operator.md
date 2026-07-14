@@ -1,5 +1,7 @@
 # Field evidence — operator-capabilities probes PR-A and PR-B — 2026-07-10
 
+> SUPERSEDED by the shipped delegation/rung-0 doctrine and the F5 claim-discipline convention; kept for the record (the original empirical justification — warm-name reuse, mailbox-race probes — for those choices).
+
 **Author:** `field-tester`. Spec: `.swarm/briefs/operator-capabilities-proposal.md`
 (FINAL, post-adversarial-review). Evidence classes VERIFIED / MEASURED / SUSPECT.
 

@@ -1,5 +1,7 @@
 # Adversarial review — the trigger-gap investigation
 
+> SUPERSEDED by docs/design/TRIGGER.md, which ships its corrected two-part diagnosis, fully folding it in; kept for the record (the full falsification trail — rate-limit confound, Workflow-tool confound — that is the actual evidence for TRIGGER.md's conclusion).
+
 **Reviewer:** trigger-red · **Date:** 2026-07-12/13 · **Parent:** trigger-scout
 
 I was asked to destroy the investigation's four central claims before they reach the

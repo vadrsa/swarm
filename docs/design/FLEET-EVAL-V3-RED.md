@@ -1,5 +1,7 @@
 # FLEET-EVAL-V3-RED — adversarial review of FLEET-EVAL-V3.md
 
+> SUPERSEDED by nothing directly (still-live, not fully folded); kept for the record (unresolved "must fix" line-level corrections to V3.md and its results files, not yet applied).
+
 **Reviewer:** `v3-red` (fresh; did **not** run the eval — that is the qualification).
 Reports to `field-tester`, who built the rig and wrote the synthesis under review.
 **Written at** `main@aa6063d`, 2026-07-12, against the sandbox artifacts under

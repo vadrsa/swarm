@@ -1,5 +1,7 @@
 # OPERATOR-STRUCTURE-FIX — the root session is not the operator
 
+> SUPERSEDED by OPERATOR-STRUCTURE.md, which retracts the root-naming fix wholesale; kept for the record (the clearest "real reversal" case in the corpus — a 9-hunk diff was built, tested 79/80 green, run, and then abandoned once RED2 showed it fixed rendering, not attention).
+
 Author: `structure-mech`, 2026-07-12. For: `operator-structure-scout`.
 Companion to `docs/audit/structure-mechanics-2026-07-12.md` (the mechanics probe; every
 `bin/swarm:NNN` here was verified there) and `docs/audit/field-evidence-doctrine-2026-07-12-RED.md`

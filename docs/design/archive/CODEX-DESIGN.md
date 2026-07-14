@@ -1,5 +1,7 @@
 # CODEX-DESIGN — codex agents in swarm, the simplest thing that is true
 
+> SUPERSEDED by archival — its conclusion doesn't transfer to opencode per OPENCODE-PLUGIN.md §9; kept for the record (the spawn/hook-mapping mechanism and NOT-in-v1 scoping decisions OPENCODE-PLUGIN.md reuses as a template).
+
 Companion to CODEX-CAPABILITIES.md (all mechanics cited there are VERIFIED
 unless noted). Goal: `swarm spawn` can create an OpenAI Codex CLI session as
 an agent, and every sentence of WORLD.md stays true of it.

@@ -1,5 +1,7 @@
 # fleet-briefs-v1 — MANIFEST (frozen)
 
+> SUPERSEDED by fleet-briefs-v2/MANIFEST.md; kept for the record (baseline provenance record — frozen commit, tool versions — worth keeping as history).
+
 Frozen at repo main@aa6063d, installed bin/swarm md5 9b976cef8ab903366274a3a1ff2552da, opencode v1.17.13.
 Editing any brief means a new fleet-briefs-v2/ dir; cross-version rows compare only where the md5 is unchanged.
 Placeholders the runner substitutes: {NAME}=probe agent name, {RUNNER}=parent/runner name, {OUTDIR}=fresh per-probe artifact dir inside the sandbox, {REPO}=absolute path to the read-only repo checkout.

@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d2-heavy.md; kept for the record (predates both the v2 freeze and v3's cwd/reporting fix).
+
 Four independent audit jobs on the repository at {REPO}, all real work:
 
 (1) STABILITY CHECK: run `python3 {REPO}/tests/test_swarm.py` 25 times in a

@@ -1,5 +1,7 @@
 # WATCHLIST — what to keep an eye on in SIMPLEST, and the simple fix if it bites
 
+> SUPERSEDED alongside SIMPLEST.md as its companion, sharing its supersession; kept for the record (at least one entry — #4, "journals rot into mush" — confirmed FIRED by ORG-REVIEW.md §6c″ using this doc's exact trigger definition).
+
 **Author:** `simplest`. **Companion to** `docs/design/SIMPLEST.md` (its §6 falsifiers, made
 operational). Untracked, like the design. Each entry: the observable to WATCH, how to CHECK it
 cheaply, the TRIGGER that means it is real, and the SIMPLEST FIX consistent with the design —

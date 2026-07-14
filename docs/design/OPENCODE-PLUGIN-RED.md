@@ -1,5 +1,7 @@
 # OPENCODE-PLUGIN — RED
 
+> SUPERSEDED by OPENCODE-PLUGIN.md §3.1/§3.1.1–3/§8, which build in all 5 attack findings (self-ring ordering bug, two-phase delivery, prompt-injection hazard); kept for the record (the primary-source record of the self-ring reversal).
+
 **Agent:** `oc-red` (parent: `opencode-plugin-scout`), with one child, `ocr-lab`,
 who re-ran the load-bearing experiments hostilely at the **store level** rather
 than by asking the model. Target: `docs/design/OPENCODE-PLUGIN.md`.

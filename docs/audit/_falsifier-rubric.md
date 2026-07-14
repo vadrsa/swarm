@@ -1,5 +1,7 @@
 # CLASSIFICATION RUBRIC — falsifier forms (shared by all falsifier-probe children)
 
+> SUPERSEDED by nothing (still actively cited by path); kept for the record (the pre-registered classification rubric behind the 0/135 unfalsifiable + 17-fired counts; the a-independent/a-self-report distinction not restated downstream).
+
 You are auditing swarm journals as READ-ONLY EVIDENCE. Do NOT modify any .swarm/journal/*.md file.
 Do NOT design or recommend anything. Your value is a TRUE count, including "zero".
 

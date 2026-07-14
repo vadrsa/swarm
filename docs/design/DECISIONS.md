@@ -1,5 +1,7 @@
 # DECISIONS — a decision engine for the operator's gate, researched against the record
 
+> SUPERSEDED by HOOK-WIRING.md §13 (via DECISION-WIRING), as the earliest research doc ("should a decision engine exist") now an implementation-guide predecessor; kept for the record (the cited evidentiary base — PR #62 case study, falsifier-corpus audit — every downstream wiring doc references as `DEC §n`).
+
 **Author:** `decision-scout`, research-only, reporting to the operator. Written at
 `main@834fec4`, 2026-07-10. Revised same day after adversarial review by
 `red-decisions` (1 KILL, 9 WOUNDs — `.swarm/research/red-decisions-review.md`);

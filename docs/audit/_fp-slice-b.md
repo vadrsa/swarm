@@ -1,5 +1,7 @@
 # fp-slice-b — falsifier forensics on the FLEET-EVAL family
 
+> SUPERSEDED by org-review-falsifier-2026-07-12.md; kept for the record (the sharpest single finding of the study — a falsifier independently recomputed by a hostile third party and survived — with full citations).
+
 Auditor: `fp-slice-b` (child of `falsifier-probe`). Rubric: `docs/audit/_falsifier-rubric.md`.
 Journals audited READ-ONLY, unmodified: `v3-run-ds.md`, `v3-run-glm.md`, `fleet-eval.md`.
 

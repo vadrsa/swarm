@@ -1,5 +1,7 @@
 # hcrev-slm: adversarial fact-check of HARNESS.md's Haiku survivability claim and industry/SLM cites
 
+> SUPERSEDED by _hcr-evidence.md (F-1/S-2 restate almost verbatim); kept for the record (the first full working-out of the Haiku-ban-is-infra-bug finding with primary pane-capture evidence).
+
 Adversarial fact-check only. No charity extended to HARNESS.md's phrasing where the source doesn't fully back it.
 
 ## Verdict on the Haiku claim (load-bearing, sec2.4/sec4.1/sec7.3)

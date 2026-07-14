@@ -1,5 +1,7 @@
 # Adversarial fact-check: HARNESS.md §3 and §5 vs. sources
 
+> SUPERSEDED by _hcr-evidence.md, which re-verified and cites this shard's corrections; kept for the record (the shard-level methodology-in-action correction log).
+
 Leaf: hcrev-eval, under hcr-ev. No charity given — every claim checked against verbatim source text.
 
 | CLAIM (HARNESS.md, section) | SOURCE CHECKED (file:line, verbatim) | VERDICT | NOTE |

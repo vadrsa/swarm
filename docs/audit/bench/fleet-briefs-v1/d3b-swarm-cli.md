@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d3b-swarm-cli.md; kept for the record (doubly stale — superseded generation, and predates v3's later `--model`/`--reason` edit).
+
 This task exercises the `swarm` command-line tool directly. Do each step with
 the real command; do not describe it, run it.
 

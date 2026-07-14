@@ -1,5 +1,7 @@
 # Mandate scoping — extracted verbatim from MODEL-FIT.md §5/§6/§7 and HARNESS.md §2.4
 
+> SUPERSEDED by the shipped error text in bin/swarm's spawn_mandate_error(); kept for the record (the reasoning/citations behind the wording, including corrections to a misreading of MODEL-FIT.md).
+
 Source: `git show swarm-dev/model-fit:docs/design/MODEL-FIT.md` (656 lines) +
 `.swarm/journal/mandate-red.md` (adversarial review, this repo) + `docs/design/HARNESS.md`
 §2.4 (current branch). All quotes verbatim with line numbers against the `/tmp/MODEL-FIT.md`

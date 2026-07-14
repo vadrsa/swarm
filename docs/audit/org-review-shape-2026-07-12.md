@@ -1,5 +1,7 @@
 # ORG-REVIEW: TREE SHAPE FORENSICS — what the swarm's own files actually record
 
+> SUPERSEDED as a live reference by final ORG-REVIEW.md, which cites its nulls, and org-review-roles' corrected numbers; kept for the record (the standing-vs-leaked forensic verdict and "no death record" structural-limitation finding).
+
 **Author:** `shape-forensics` (child of `org-review-scout`), 2026-07-12.
 **Mandate:** mine the tree shape and the top-level agents' journals as *evidence*.
 Produce true numbers and honest nulls. **This document does not design an

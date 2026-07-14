@@ -1,5 +1,7 @@
 # mandate-blast census — every `swarm spawn` caller, ahead of the `--model`/`--reason` mandate
 
+> SUPERSEDED by the mandate's actual implementation/test fixes; kept for the record (the pre-mandate call-site census — 13 Python, 0 shell — and a USAGE self-contradiction finding not necessarily preserved elsewhere).
+
 Agent: mandate-blast (parent: spawn-mandate). Branch: `swarm-dev/spawn-mandate` (off cfb3113).
 Read-only census — no edits, no commits made by me or my children.
 

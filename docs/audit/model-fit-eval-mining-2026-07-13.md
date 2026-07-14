@@ -1,5 +1,7 @@
 # Mining the fleet-eval record for a model-fit rule
 
+> SUPERSEDED by docs/design/MODEL-FIT.md (merged, PR #83); kept for the record (§7's numbered findings with citation trail, including a corrected error 7e not otherwise documented).
+
 **Agent:** `eval-miner` · **For:** `model-fit` · **Date:** 2026-07-13
 **Question asked:** this repo already ran the experiment — what actually happens when a weaker model sits in a swarm seat?
 

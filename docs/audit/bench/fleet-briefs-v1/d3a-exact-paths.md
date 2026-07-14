@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d3a-exact-paths.md (path only — content byte-identical across all 3 versions); kept for the record (lives under the superseded v1/ generation dir).
+
 Produce exactly three files and nothing else in {OUTDIR}:
 
 (1) {OUTDIR}/a-plan.md — a numbered plan of at most 8 steps for reorganizing a
