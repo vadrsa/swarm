@@ -493,11 +493,12 @@ that is emphatically not a tautology. It is a claim about a specific, fixable pi
 
 ## 9. WHAT SURPRISED ME
 
-1. **Half the money is spent asking idle agents if they have mail.** 49.2% of agent spend is
-   `check queue` polls; 58.6% of every dollar is cache reads — **and they are the same money.**
-   Waking an agent re-sends its entire context. `hardener` spent **$43.87 of $51.62** answering
-   pings. **This is the largest and cheapest lever in the system and it took an adversary
-   destroying my headline for me to find it.**
+1. **DELIVERY IS THE EXPENSIVE ACT.** 58.6% of every dollar is cache reads, and for a large agent
+   **each message received costs ~$2.58** — because receiving re-sends its entire context.
+   `hardener` spent **$43.87 of its $51.62 receiving 17 messages.** *(I first mis-diagnosed this as
+   a wasteful poll loop and had to retract it — §0. The cost is real; it is the price of mail, not
+   waste.)* **You are not paying agents to think. You are paying them to remember, once per
+   message.**
 
 2. **My meter was silently broken, and a null result is indistinguishable from a broken mechanism.**
    My `aisdk.language` hook assigned to `output.model` (metadata — the host only writes back
