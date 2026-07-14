@@ -55,23 +55,50 @@ mechanism I was about to recommend to you was aimed at the wrong variable.
 
 **The adversary did not contest the POC.** It attacked the cost analysis, and it was right to.
 
-**AND THE CORRECTION LED SOMEWHERE BETTER — this is the finding I would act on first.** Two numbers
-I thought were separate turn out to be **the same money**:
+**AND THEN I REFUTED MYSELF ONE MORE TIME — read this, it is the most useful thing in the run.**
 
-> - **58.6% of every dollar is CACHE READS** — agents re-reading their own accumulated context.
-> - **49.2% of all agent spend ($401 of $816) is attributable to `check queue` polls.** *(MEASURED)*
->
-> **These are the same phenomenon.** A `check queue` ping **re-sends the agent's ENTIRE context to
-> the model** just to discover an empty queue.
->
-> ### `hardener` spent ~$43.87 of its $51.62 answering pings.
-> **62.5 million cache-read tokens — re-reading itself, over and over, to find an empty queue.**
+After the kills, I found what looked like a bigger finding: **49.2% of agent spend is `check queue`
+pings, and 58.6% of every dollar is cache reads — the same money.** Waking an agent re-sends its
+entire context. `hardener` spent **$43.87 of its $51.62 receiving messages** (62.5M cache-read
+tokens). I wrote a recommendation calling it *"worth more than everything else in this document
+combined": gate the poll, stop waking idle agents, zero output cost.*
 
-**So the expensive thing is not a long-lived agent. It is a long-lived agent BEING WOKEN UP.**
+**Then I opened the queue directory, and it was wrong.**
 
-**The lever is the poll loop — stop waking idle agents — and it costs ZERO OUTPUT to pull.** No
-model does less work; it simply is not asked a question whose answer is "nothing." **That is worth
-more than everything else in this document combined, and neither of us thought of it.** §6.
+| agent | `check queue` pings | messages actually delivered | wasted wake-ups |
+|---|---|---|---|
+| `field-tester` | 67 | 67 | **0** |
+| `hardener` | 17 | 17 | **0** |
+| **TOTAL (8 agents)** | **124** | **127** | **0** |
+
+> ### `check queue` IS NOT A POLL. IT IS THE DOORBELL.
+> Swarm rings an agent **because a message arrived.** There are **zero** wasted wake-ups. I read
+> the phrase "check queue," pattern-matched it to "polling loop," and built a recommendation on a
+> word. **There is no poll loop to fix.**
+
+**What survives is narrower and harder:** the **cost of delivery** is real and enormous — each
+message costs `hardener` **~$2.58 to receive**, because receiving re-sends 62.5M tokens of context.
+**The cost is real; my proposed cause was wrong.** The lever is not *"stop waking idle agents"*
+(they are not idle — they have mail). It is **"make receiving a message cheap,"** which is a
+context-management problem, not a scheduling one. **I have not solved it and I will not pretend I
+have.**
+
+### THE ACTUAL LESSON OF THIS RUN
+
+**I was wrong four times in eight hours. Every single time, the DATA caught me — never my
+reasoning.** And the four errors have **one identical shape**:
+
+| I reasoned from the NAME… | …the ARTIFACT said |
+|---|---|
+| `processor.ts` — *"the tool-loop driver"* | it is ONE step; the loop is `prompt.ts:1088` |
+| `turns` | **API calls** — `hardener`'s "295 turns" = 20 prompts |
+| `check queue` — *"a poll"* | **the doorbell.** It only fires when mail exists |
+| *"the economic loop is novel"* | **already published as a null** (TRIAGE) |
+
+**Every time I reasoned from a NAME, I was wrong. Every time someone OPENED THE ARTIFACT, the truth
+was different.** That is `PHILOSOPHY` §4 — *judge artifacts, never claims* — and **I violated it
+repeatedly while writing a report about measurement discipline.** It is the most valuable thing I
+learned, and it cost ~$50 of Opus tokens to learn it.
 
 ---
 
@@ -307,11 +334,19 @@ each "you have no mail" costs.
 > ### `hardener` spent ~$43.87 of its $51.62 answering pings.
 > **62.5 million cache-read tokens** — re-reading itself, over and over, to find an empty queue.
 
-**So the expensive thing is not a long-lived agent. It is a long-lived agent BEING WOKEN UP.**
+**So the expensive thing is not a long-lived agent — it is a long-lived agent BEING WOKEN UP.**
 
-That is why my original claim *looked* true: polled agents accumulate API calls, and API calls
-accumulate cost. But the causal arrow does not run through *lifetime* — it runs through **the
-poll loop**, and the poll loop is **free to fix**: not waking an idle agent costs **zero output.**
+**But I then refuted my own explanation, and this is the correction that matters.** I assumed
+`check queue` was a wasteful *poll*. **It is not. It is the DOORBELL** — swarm rings an agent
+*because a message arrived*. VERIFIED from the queue files: across 8 agents, **124 pings vs 127
+messages actually delivered — ZERO wasted wake-ups.**
+
+> **There is no poll loop to gate. The cost is not waste — it is the PRICE OF DELIVERY.**
+> Each message costs `hardener` **~$2.58 to receive**, because receiving re-sends its whole context.
+
+**The lever is therefore NOT "wake fewer agents."** It is **"make receiving a message cheap"** — a
+context-management problem (compaction, or a delivery path that does not re-send the world), not a
+scheduling one. **That is harder, I have not solved it, and I am not going to pretend otherwise.**
 
 ### 5.2 The tier effect, correctly stated
 
@@ -346,34 +381,27 @@ corrected it — says the money is not going where I thought. **Nearly half of a
 the swarm asking idle agents whether they have mail, and paying to re-read their entire context to
 hear "no."**
 
-### 6.1 FIRST — FIX THE POLL LOOP. Zero output cost. ~49% of agent spend in play.
+### 6.1 THE RECOMMENDATION I RETRACTED — and what is actually there
 
-> **Do not wake an agent to check a queue you can check yourself.**
->
-> The queue is **files** (`.swarm/queue/<name>/`). Whether it is empty is knowable **without
-> spending a single token** — `os.listdir()` answers it. Today, something wakes the agent, the
-> agent's *entire accumulated context* is re-sent to the model, and the model reports an empty
-> directory.
+**I originally led this section with: "gate the poll loop — 49% of agent spend, zero output cost."
+IT IS WRONG AND I HAVE REMOVED IT.** `check queue` is the **doorbell**, not a poll: it fires
+*because* a message arrived (124 pings vs 127 delivered messages across 8 agents — **zero** wasted
+wake-ups). There is nothing to gate. *(The retraction stands in §0 rather than being quietly
+deleted, because how I got it wrong is more instructive than the claim was.)*
 
-**Three changes, in increasing order of ambition:**
+**What is really there, stated honestly:** **delivery is expensive.** Every message an agent
+receives costs it a full context re-read — **~$2.58 per message for `hardener`.** That is not
+waste; it is the *price* of the swarm's mail. **The lever is context size at delivery time**, and
+the honest options are:
 
-1. **Gate the ping on the queue actually being non-empty.** If `queue/<name>/` is empty, do not
-   ring. This is a one-line predicate at the call site, and it is the whole fix for the common case.
-2. **Back off.** An agent that has been idle N pings does not need to be polled at the same rate as
-   one mid-task.
-3. **Make the wake-up carry the mail.** If you must wake an agent, deliver the message in the same
-   breath — never wake it to *ask* whether it has mail.
+- **compact before delivery** on long-lived agents (opencode owns the compaction prompt by
+  construction — `experimental.session.compacting`, VERIFIED),
+- **batch** mail so N messages cost one context re-read instead of N,
+- **close** agents once harvested, so there is no expensive context to re-read at all.
 
-**Why this is the right shape and not just thrift** (PHILOSOPHY §1's test — *"a mechanism that
-saves tokens and does nothing for the goal is a cache"*): this is **not** a token-thrift mechanism
-inside the contract. **It removes a turn that produces no output.** The agent's work, judgment, and
-duties are untouched — it is simply not asked a question whose answer was already on disk. **No
-goal is traded away, so §1 does not bite.**
-
-**Falsifier:** if a large share of `check queue` pings actually FIND mail, then the poll is doing
-real delivery work and gating it would delay messages. **Measure the hit rate before shipping.**
-*(My prior: low — 67% of prompts to long-lived agents were polls, and those agents were mostly
-idle. But I did not measure the hit rate and I will not pretend I did.)*
+**I did not build or test any of these, and I rate my confidence LOW.** It is a direction, not a
+finding. **Do not act on it without measuring first — I have now been wrong four times in this
+document by reasoning ahead of the data.**
 
 ### 6.2 SECOND — the tier quote, because tier is the real 2nd lever (54.6% vs 22.5%)
 
@@ -497,10 +525,11 @@ that is emphatically not a tautology. It is a claim about a specific, fixable pi
 
 ## 10. WHAT TO DO NEXT — in order
 
-1. **MEASURE THE POLL HIT RATE, THEN GATE THE POLL** (§6.1). *What fraction of `check queue` pings
-   actually find mail?* If it is low — and the evidence says it is — **gate the ring on a non-empty
-   queue directory.** The queue is files; `os.listdir()` is free. **~49% of agent spend is in play,
-   at zero output cost.** This is a `bin/swarm` change, not a fork. **Do this first.**
+1. **~~Gate the poll loop~~ — RETRACTED. I measured it and I was wrong** (§6.1). `check queue` is
+   the doorbell, not a poll. **The real problem is that DELIVERY IS EXPENSIVE** (~$2.58/message for
+   a large agent — a full context re-read each time). **Measure whether compaction-before-delivery
+   or batching helps before building anything.** I did not, and I have been wrong four times in
+   this document by moving ahead of the data.
 2. **Fix `swarm-cost`'s two structural bugs before trusting ANY cost number** (§5.0/§5.3): it
    cannot see the operator (no spawn stamp) and its glob misses 749 nested subagent transcripts.
    **Rename `turns` → `api_calls`** — the misnomer alone caused a four-hour wrong conclusion.
@@ -521,19 +550,19 @@ that is emphatically not a tautology. It is a claim about a specific, fixable pi
 ## 11. WHAT I WOULD HAVE ASKED YOU
 
 1. **Is the binding constraint DOLLARS or the WEEKLY SUBSCRIPTION CEILING?** Your journal says
-   *"weekly limit at 82%."* If it is the **ceiling**, then §6.1 (the poll loop) is even more urgent
-   than the dollars suggest — **half your weekly capacity may be going to agents answering "no, I
-   have no mail."** *Assumed: capacity. Designed for it.*
+   *"weekly limit at 82%."* If it is the **ceiling**, then the *cost of delivery* (§5.1 — a full
+   context re-read per message) is eating your weekly capacity, not just your dollars.
+   *Assumed: capacity. Designed for it.*
 2. **Do you want the fork at all?** Honest answer: **the fork buys exactly one thing — refusing a
    turn.** Everything else I built is a plugin or a `bin/swarm` change. `LOOP.md` bet the win would
    come from the *stock* scaffold, not the fork — **and on this evidence LOOP.md was right.** The
    one exception is the **landing turn** (§3), which is genuinely fork-only and is the only
    mechanism here the literature has not already refuted. *Assumed: keep the fork as a live option
    on a pinned base; do not merge it.*
-3. **Was the poll loop a deliberate design choice?** I do not know why agents are pinged on a
-   schedule rather than on queue-arrival. **If there is a reason I cannot see, §6.1 is wrong and I
-   would want to know before you act on it.** It is the one recommendation I am making where I
-   suspect I may be missing context that only you have.
+3. **Is there a cheap delivery path I am not seeing?** Every message costs a full context re-read
+   (§5.1). Compaction-before-delivery, or batching, might fix it. **This is the biggest unsolved
+   problem I am leaving you** — and it is the one place where I would most want an hour of your
+   judgment before anyone builds anything.
 
 ---
 
