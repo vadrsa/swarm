@@ -1,5 +1,7 @@
 # LOOP-RED3 — adversarial review of LOOP.md §4b, the third fork trigger, and the Build 1 quiescence rule
 
+> SUPERSEDED by LOOP.md §10, where most repairs are folded (quiescence predicate rebuilt, M1b added, confidence revised); kept for the record (the repair history — one item, repair #6's "per model generation" trigger, was worth a spot-check before treating as fully closed).
+
 **Reviewer:** `hc-red3`, fresh eyes, no access to the author's reasoning process, no
 access to `hc-red2`'s prior review while forming my own reads (checked against
 `LOOP-RED.md` only afterward, to avoid duplicate filing — noted where our findings

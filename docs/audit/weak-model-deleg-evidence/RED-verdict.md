@@ -1,5 +1,7 @@
 # RED review of weak-model-deleg's Haiku-delegation probe
 
+> SUPERSEDED by weak-model-delegation-2026-07-13.md's "WOUNDED — folded in below" section, which fully folds in all four hits; kept for the record (the primary unabridged record with full reasoning, not DEAD).
+
 **Verdict: WOUNDED — usable, but only for the narrow claim it actually earned, and the headline as drafted overclaims. Do not ship "THE FEAR DOES NOT REPRODUCE" as a general finding. Ship "Haiku shows no spawn reflex before synthesis" and say the synthesis wall is untested.**
 
 I read: task-haiku.txt / task-opus.txt / task-haiku2.txt (diffed all three), journal weak-model-deleg.md, all four wmd-*.md journals, all four wmd-*.json raw records, both EVIDENCE-*.txt pane captures, report-opus.md, report-haiku2.md (0 bytes), msg-modelfit.txt. I did not take any count on faith — recomputed descendants from the raw `.swarm/agents/` directory myself.

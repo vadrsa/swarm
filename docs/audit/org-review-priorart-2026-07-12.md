@@ -1,5 +1,7 @@
 # ORG-REVIEW PRIOR ART — the living-prior-art prosecution
 
+> SUPERSEDED by final ORG-REVIEW.md and the RED review it fed into; kept for the record (the detailed prior-art/kill-precedent analysis — offer=confirm-decay kill, overseer kill, frozen-plan kill).
+
 **Author:** `grave-priorart`, child of `grave-org`. Written at `main@aa6063d`, 2026-07-12.
 **Method:** read every named file top to bottom (no skimming), `git log --oneline --all` on each,
 and grep the *shipped surfaces* (`bin/swarm`, `skill/SKILL.md`, `WORLD.md`, `README.md`,

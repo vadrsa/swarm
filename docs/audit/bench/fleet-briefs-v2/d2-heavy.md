@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d2-heavy.md; kept for the record (the pre-fix version — heavy-delegation children had no cwd/report instruction, making spawned work unjudgeable).
+
 Four independent audit jobs on the repository at {REPO}, all real work:
 
 (1) STABILITY CHECK: run `python3 {REPO}/tests/test_swarm.py` 25 times in a

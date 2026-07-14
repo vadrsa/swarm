@@ -1,5 +1,7 @@
 # mandate-audit — adversarial review of 9d6d62b (+ self-fix 8706d0c)
 
+> SUPERSEDED as a live gate by the merged `--model`/`--reason` PR (9d6d62b); kept for the record (the audit trail — clean bill on merge-breakage, reason-theater re-grading, the one open reason-phrasing disagreement).
+
 Fresh-eyes audit of `feat(spawn): --model and --reason are required`, against
 `docs/design/MODEL-FIT.md` §5/§6 and `docs/design/HARNESS.md` §2.4 + falsifier #4.
 Author (spawn-mandate) fixed three of my four targets before I reported — see

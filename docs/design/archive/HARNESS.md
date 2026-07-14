@@ -1,5 +1,7 @@
 # HARNESS — choosing, measuring, and switching agent harnesses
 
+> SUPERSEDED by nothing directly (kept as an independent, differently-scoped doc — a different topic, the claude-vs-codex harness choice, targeting CODEX-DESIGN.md, not a stale draft of root HARNESS.md); kept for the record (the benchmark protocol R2, the quota-signal asymmetry finding R3 — codex exposes `token_count`/`rate_limits`, Claude doesn't — and the successor-based harness-switching pattern R4).
+
 **Author:** `harness-scout`, at the operator's request, with three child
 researchers (`bench-designer` R2, `quota-scout` R3, `switch-scout` R4 —
 briefs in `.swarm/briefs/`, inputs in `.swarm/research/harness/`). Design

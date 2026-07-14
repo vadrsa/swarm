@@ -1,5 +1,7 @@
 # REVIEW — simplest/swarm vs docs/design/SIMPLEST.md
 
+> SUPERSEDED by absorption into shipped `bin/swarm` (review of the `simplest/swarm` prototype); kept for the record (the evidentiary trail behind SELF-AUDIT.md's R1–R6 fixes — queue-depth trailer, truncation hole, broken-pipe exit code).
+
 **Reviewer:** `review-simplest` (no stake in design or implementation). **Method:** execute,
 never infer — I ran the shipped suite (31/31 pass, reproduced), then wrote and ran 22 tests of
 my own at process level (real `swarm` subprocesses against fixture `.swarm/` trees, a fake

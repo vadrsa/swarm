@@ -1,5 +1,7 @@
 # Is `falsifier-not-honored` detectable from the journal files?
 
+> SUPERSEDED as a live question by org-review-graveyard-2026-07-12.md and ORG-REVIEW.md's RED review; kept for the record (the rigorous "falsifier orphaning" empirical finding — 114 statements, FIRED-IGNORED=0 — cited by later docs but not restated in full).
+
 **Probe:** falsifier-probe (child of shape-forensics) · **Date:** 2026-07-12
 **Question:** Can an instrument detect *"the agent named a falsifier, the falsifier FIRED, and the
 agent did NOT change course"* by reading `.swarm/journal/*.md`?

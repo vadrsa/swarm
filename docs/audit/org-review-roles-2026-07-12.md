@@ -1,5 +1,7 @@
 # Role census — recurring roles and duplicate work in this swarm's history
 
+> SUPERSEDED as a live reference by org-review-shape's §4.4 reconciliation and final ORG-REVIEW.md's use of this data; kept for the record (the detailed 115-row per-agent classification appendix not reproduced elsewhere).
+
 **Agent:** `role-census` (child of `shape-forensics`, under `org-review-scout`)
 **Date:** 2026-07-12
 **Mission:** pure counting. No design, no org-shape recommendation. Numbers only.

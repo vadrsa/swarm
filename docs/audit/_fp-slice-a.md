@@ -1,5 +1,7 @@
 # fp-slice-a — falsifier forensics: field-tester, hardener, updater
 
+> SUPERSEDED by org-review-falsifier-2026-07-12.md; kept for the record (the raw quoted-evidence trail and FIRED-CHANGED/FIRED-IGNORED case studies grounding the synthesis).
+
 Auditor: fp-slice-a (child of falsifier-probe). Rubric: docs/audit/_falsifier-rubric.md.
 Source journals read READ-ONLY and IN FULL (not just grep hits) — the forward-hunt for
 class-(a) statements requires later entries. No journal file was modified.

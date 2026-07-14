@@ -1,5 +1,7 @@
 # SHARD BRIEF — fp-compliance children (fpc-s0 … fpc-s3)
 
+> SUPERSEDED by nothing (still actively cited by path and byte count in docs/design/ORG-REVIEW.md:468); kept for the record (the Q2i/Q2ii self-labelled-vs-substantive split and the Q6 power-separation design; cited as a VERIFIED exhibit).
+
 READ-ONLY. Never modify any `.swarm/journal/*.md`. You are counting, not designing.
 Your value is a TRUE count, including "zero". Do not manufacture findings.
 

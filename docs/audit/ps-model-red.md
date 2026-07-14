@@ -1,5 +1,7 @@
 # Red review — `swarm ps` shows the model
 
+> SUPERSEDED by the merged ps model-display feature (commit 6c77f10) — first-pass wounds fixed and verified (SHIP verdict); kept for the record (two new findings, §7 semantic q= spoofing and §8 codepoint-vs-column count, filed "not ship-blocking" and not confirmed fixed, plus the 26-vector regression-test provenance).
+
 **Reviewer:** `ps-model-red` (adversarial). **Date:** 2026-07-13.
 **Under attack:** the design in `.swarm/journal/ps-model.md`, entry *"2026-07-13 — design decided"*.
 **Diff under attack:** none. `swarm-dev/ps-model` exists but its tip **is** `main` (`aa6063d`), zero

@@ -1,5 +1,7 @@
 # PIPELINE-WIRING — a sequential, tracked pipeline for operator-bound escalations
 
+> SUPERSEDED by HOOK-WIRING.md §13's universal middleware (not a tracked pipeline at all); kept for the record (the barrier-vs-tendency ordering-guarantee analysis, cited onward by HOOK-WIRING).
+
 **Author:** `pipeline-drafter`, for `pipeline-scout`. Written at `main@834fec4`,
 2026-07-11. Third iteration of the decision-engine wiring, scoped down by the
 operator to **only operator-bound escalations**: the engine reads each one

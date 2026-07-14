@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d2-cheap.md (path only, byte-identical); kept for the record (the same {REPO}/-prefix fix record).
+
 Produce four independent summaries of four unrelated files in the repository at
 {REPO}: (1) {REPO}/README.md (2) {REPO}/WORLD.md (3) {REPO}/docs/design/SIMPLEST.md
 (4) {REPO}/docs/design/REVIEW.md.

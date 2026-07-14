@@ -1,5 +1,7 @@
 # RED2 — fresh adversarial review of `OPERATOR-STRUCTURE.md`
 
+> SUPERSEDED by OPERATOR-STRUCTURE.md, which folds in and credits its core finding; kept for the record (the review of the now-retracted tool fix — "fixes rendering, not attention — any agent may still mail the human" — that directly caused the pivot to doctrine+middleware).
+
 **Reviewer:** `structure-red2`. I ran none of the original design work — that is my
 qualification. Written 2026-07-12 at `main@aa6063d`.
 

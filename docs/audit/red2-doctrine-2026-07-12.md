@@ -1,5 +1,7 @@
 # RED2 / DOCTRINE — attacks D, E, F on `OPERATOR-STRUCTURE.md`
 
+> SUPERSEDED by whatever final OPERATOR-STRUCTURE.md revision incorporated its fixes; kept for the record (executed-probe evidence — pane-id durability tests, herdr session.json decode — behind those corrections).
+
 **Author:** `red2-doctrine`, for `structure-red2`. 2026-07-12.
 **Under review:** `docs/design/OPERATOR-STRUCTURE.md` (+ its `-FIX`, `-RED`, `-GRAVE` children).
 

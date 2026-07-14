@@ -1,5 +1,7 @@
 # CODEX-CAPABILITIES — what codex 0.142.5 can actually do for swarm
 
+> SUPERSEDED by archival as a companion to CODEX-DESIGN.md, same archived status; kept for the record (the VERIFIED-tagged capability probe methodology — hooks, delivery, restore, sandboxing — that OPENCODE-PLUGIN.md's own probes copy).
+
 Evidence from live probes of the installed binary (`codex-cli 0.142.5`,
 `/opt/homebrew/bin/codex`, ChatGPT-account auth, default model `gpt-5.5`),
 run 2026-07-10 in `/tmp/codex-scout-sandbox` and scratch herdr tabs (all

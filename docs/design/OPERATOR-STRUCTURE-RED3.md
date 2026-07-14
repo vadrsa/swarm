@@ -1,5 +1,7 @@
 # RED3 — fresh adversarial review of the REFRAMED operator-structure model
 
+> SUPERSEDED by OPERATOR-STRUCTURE.md §2/§4e/§4e′, which directly incorporate nearly all of its content; kept for the record (the mechanism discovery, miscitation correction, and authority/agent-graph distinction from the round whose findings matter most).
+
 **Reviewer:** `structure-red3`. I did none of the design work; that is my qualification.
 Written 2026-07-12 against `main@aa6063d`. I reviewed the **new model** as briefed
 (operator-outside-the-swarm, doctrine-only, no tool change). The retracted `root-1`

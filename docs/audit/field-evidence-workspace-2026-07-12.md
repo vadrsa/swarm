@@ -1,5 +1,7 @@
 # Field evidence — workspace-placement bug (spawn omits --workspace) — 2026-07-12
 
+> SUPERSEDED by the merged workspace-pin fix in bin/swarm; kept for the record (the original repro and live 3-case verification of that fix).
+
 **Author:** `field-tester`. Reported bug: spawned tabs open in the wrong herdr
 workspace when multiple spaces exist. Root cause (operator-confirmed): `cmd_spawn`'s
 `herdr tab create` passes no `--workspace`, so the child lands in herdr's *focused*

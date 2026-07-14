@@ -1,5 +1,7 @@
 # MODEL-FIT — how a parent picks a child's model
 
+> SUPERSEDED by docs/design/MODEL-FIT.md, partially (the doc has since drifted 33 lines past §5); kept for the record (the frozen citation substrate _hcrev-fit.md's 9 line-cites resolve against; holds the pre-overrule ruling text — 87 lines differ from current MODEL-FIT.md).
+
 **Author:** `model-fit`, reporting to the operator. **Status:** DESIGN — proposed
 doctrine + wiring. **Written at** `main@aa6063d`, 2026-07-13.
 

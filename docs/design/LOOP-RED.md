@@ -1,5 +1,7 @@
 # LOOP-RED — adversarial review of LOOP.md
 
+> SUPERSEDED by LOOP.md §10, which states all 7 repairs folded, none rebutted; kept for the record (the measured finding that a v2 GLM-hang citation was wrongly used as live evidence — a recurring citation-quality pattern).
+
 **Reviewer:** `hc-red2`, fresh eyes, no access to the author's reasoning process.
 My mandate was to refute, not repair. Where a claim survives, I say so and name the
 strongest attack that still stands against it. Every citation below was checked

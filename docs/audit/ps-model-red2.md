@@ -1,5 +1,7 @@
 # Red review 2 — the DIFF: `swarm ps` shows a pinned model
 
+> SUPERSEDED by the fix it triggered, live and shipped in current bin/swarm (renaming to a `model=x` namespace, entirely outside `(you)`'s syntax); kept for the record (why the `model=` rendering, not `(model)`, was chosen — its one KILL finding, `--model you` forging the `(you)` self-marker via a namespace collision — reasoning not restated elsewhere).
+
 **Reviewer:** `ps-model-red2` (adversarial). **Date:** 2026-07-13.
 **Under attack:** the diff, `main...swarm-dev/ps-model` (3 commits: `1cc2ac1`, `d2f8625`, `f62a7e0`).
 The first red (`docs/audit/ps-model-red.md`) reviewed the *design*, before any code existed, and its

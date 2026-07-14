@@ -1,5 +1,7 @@
 # Cost measurement — status quo, foreign prices, comparison
 
+> SUPERSEDED (partially) by _hc-tiers.md, which re-verifies/corrects its Part 2 price-table rows; kept for the record (Part 1's $/active-hour measurement and Part 3's cost comparison, which _hc-tiers.md doesn't redo).
+
 **Author:** `hc-price`. Numbers with sources, no design. Every figure tagged
 **MEASURED** (I computed it from files on this machine), **DOCUMENTED** (a
 named external source states it), or **ASSUMED** (I chose it; falsifiable,

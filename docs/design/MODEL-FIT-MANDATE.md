@@ -1,5 +1,7 @@
 # MODEL-FIT-MANDATE — should `swarm spawn` force a model choice and a reason?
 
+> SUPERSEDED by MODEL-FIT.md §5 — its headline recommendation ("`--model` stays optional") was overruled by the operator; kept for the record (the falsifier-audit evidence — 0/135 unfalsifiable, 17 fired — and the blast-radius measurement the final mandate still rests on).
+
 **Author:** `mandate-red` (red team), reporting to `model-fit`. **Date:** 2026-07-13.
 **Brief:** attack the operator's proposal — *"make `swarm spawn` pass a MANDATORY
 model-choice REASON, recorded in the agent record"* — and return one recommendation.

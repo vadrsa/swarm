@@ -1,5 +1,7 @@
 # SELF-AUDIT — simplest/swarm vs the SIMPLEST spec
 
+> SUPERSEDED by absorption into shipped `bin/swarm` (same prototype-era scope as REVIEW.md); kept for the record (the 27→9 concept traceability table and the R1–R7 post-review amendment ledger, cited as prior art by ORG-REVIEW.md).
+
 Written against the post-review amended file (rulings R1–R6 applied; see
 "Post-review amendments" below). Line numbers are from `simplest/swarm` at this
 commit. Tests: 40/40 pass (`python3 -m unittest test_swarm`).

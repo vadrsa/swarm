@@ -1,5 +1,7 @@
 # PROXY-WIRING — does the decision engine generalize to the whole message plane?
 
+> SUPERSEDED by HOOK-WIRING.md §13, which answers PROXY-WIRING's own question ("does it generalize to the whole plane") oppositely (yes, via admission control) to what PROXY-WIRING recommended (observe-only); kept for the record (the interposition-safety asymmetry analysis and measured plane volume).
+
 **Author:** `proxy-drafter`, for `proxy-scout`. Written at `main@834fec4`,
 2026-07-11; revised same day after adversarial review by `red-proxy`
 (0 KILL, 7 WOUND, 7 minor citation findings —

@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v2/d2-cheap.md; kept for the record (the same bare-path rig bug, four affected paths).
+
 Produce four independent summaries of four unrelated files in this repository:
 (1) README.md (2) WORLD.md (3) docs/design/SIMPLEST.md (4) docs/design/REVIEW.md.
 For each, write a summary of about 150 words to {OUTDIR}/summary-N-<basename>.md

@@ -1,5 +1,7 @@
 # RED — adversarial attack on the operator-structure proposal, before it is written
 
+> SUPERSEDED by OPERATOR-STRUCTURE.md §1, which absorbs its decisive kill (claim C, disproven on source); kept for the record (the review of an earlier proposal, propose-and-confirm, no longer in that form — no live disagreement remains).
+
 **Reviewer:** `structure-red`, serving `operator-structure-scout`. My job is to kill
 this proposal. Where it survives, I say so and say why — a red team that only hits is
 as useless as one that only agrees.

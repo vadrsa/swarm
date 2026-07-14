@@ -1,5 +1,7 @@
 # THE GRAVEYARD CHECK — the top-level-structure-review instrument
 
+> SUPERSEDED by the final ORG-REVIEW.md design and its RED review; kept for the record (the specific kill/clear verdicts — overseer kill, nag kill, offer kill — synthesized from the phil8/priorart docs).
+
 **Prosecutor:** `grave-org`, child of `org-review-scout`. **Date:** 2026-07-12. **Base:** `main@aa6063d`.
 **Subject:** an INSTRUMENT that reviews the swarm's TOP-LEVEL structure and SUGGESTS improvements to
 the human — advisory only, invoked as a named skill/command, plus a rare evidence-warranted OFFER

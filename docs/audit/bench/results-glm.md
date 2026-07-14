@@ -1,5 +1,7 @@
 # Fleet bench cell — GLM (zai-coding-plan/glm-4.7)
 
+> SUPERSEDED by results-v3-glm.md (v2-run GLM cell); kept for the record (the now-retracted "8 children died, model hung 35min" headline — proven a rig artifact, empty sandbox cwd, not a real GLM failure; a cautionary example worth keeping).
+
 Scored by `run-glm-2` (successor to closed `run-glm`) per `fleet-rubric-v1.md`,
 from files only. n=1 per dimension. Panes/transcripts read only for [H]/[M]
 disambiguation and flag detection (rubric §0, §3b tagging note).

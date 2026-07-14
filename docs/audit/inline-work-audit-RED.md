@@ -1,5 +1,7 @@
 # RED TEAM — `inline-work-audit-2026-07-12.md`
 
+> SUPERSEDED by inline-work-audit-2026-07-12.md's §0/§6 ("what v1 got wrong"), which fully folds it in; kept for the record (full detail on the "5 items not 14" reasoning v2 references but doesn't re-derive).
+
 Reviewer: `iwa-red`. Adversarial. My job was to break the report, not improve it.
 
 Sources I read myself, not through the report: `.swarm/journal/operator.md`

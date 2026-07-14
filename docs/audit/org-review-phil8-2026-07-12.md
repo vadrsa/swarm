@@ -1,5 +1,7 @@
 # The §8 verdict on the top-level-structure instrument — on evidence
 
+> SUPERSEDED by final ORG-REVIEW.md and its RED review, which incorporated and partly rebutted its §8 argument; kept for the record (the original prosecution case and evidentiary basis).
+
 **Auditor:** grave-phil8 (prosecution, under grave-org)
 **Date:** 2026-07-12
 **Charge:** does the proposed INSTRUMENT (a skill/command that reviews the swarm's top-level

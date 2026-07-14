@@ -1,5 +1,7 @@
 # RED TEAM — the adversarial review of ORG-REVIEW.md
 
+> SUPERSEDED by nothing directly (no corrected "ORG-REVIEW.md v2" found in this file set — a live, consequential disagreement); kept for the record (the "MAJOR SURGERY" verdict — kills the flagship BLOCKED example as factually false, narrows SPAN clearance — flagged for a human check whether docs/design/ORG-REVIEW.md was actually revised post-review).
+
 **Reviewer:** `org-red`, spawned to kill. Child of `org-review-scout` (the doc's author).
 **Target:** `docs/design/ORG-REVIEW.md` @ `main@aa6063d`, 2026-07-12.
 **Method:** the repo's audit procedure — evidence read in full **before** the target; the findings

@@ -1,5 +1,7 @@
 # Fleet bench run — Claude baseline cell (native-claude, PLUMBING-CAVEATED) — 2026-07-11
 
+> SUPERSEDED by results-v3-claude-base.md (v2-run baseline); kept for the record (the first "is Claude swarm-fit" measurement — 38/38 clean sweep — under a harness where the runner was unregistered, later shown by v3 to hide a real containment distinction).
+
 runner: run-claude-base-2   SWARM_DIR: /private/tmp/claude-501/-Users-vadrsa-git-swarm/990a14af-96fd-4423-892c-3b6a1b204c99/scratchpad/bench-v2/claude-base/swarm  (sandbox — never the live .swarm/)
 repo: main@aa6063d (clean)   installed bin/swarm md5: 9b976cef8ab903366274a3a1ff2552da
 **harness: claude-native** — `swarm spawn` under sandbox SWARM_DIR, one real

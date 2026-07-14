@@ -1,5 +1,7 @@
 # FLEET-EVAL — a swarm instruction-following eval on real Chinese models
 
+> SUPERSEDED by FLEET-EVAL-V3.md; kept for the record (the first measured run — the caught rig bug §4 and the adversarial-correction discipline §9, flipped D4 verdict, that recurred in V3-RED).
+
 **Author:** `fleet-eval` (successor to `fleet-scout`), reporting to the operator.
 **Written at** `main@aa6063d`, 2026-07-11. **Status:** RUN — designed, executed
 (operator-approved), verified, adversarially reviewed, **and corrected against the

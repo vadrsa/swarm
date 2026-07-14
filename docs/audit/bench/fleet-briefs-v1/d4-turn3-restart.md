@@ -1,3 +1,5 @@
+> SUPERSEDED by fleet-briefs-v3/d4-turn3-restart.md (path only); kept for the record (content byte-identical across all 3 versions).
+
 You have just restarted and do not carry memory of your earlier turns. Your
 work so far is recorded in two places you can read: your journal at
 .swarm/journal/{NAME}.md, and the file {OUTDIR}/catalog.md you have been

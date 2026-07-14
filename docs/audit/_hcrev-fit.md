@@ -1,5 +1,7 @@
 # hcrev-fit — adversarial fact-check of HARNESS.md's citations
 
+> SUPERSEDED by _hcr-evidence.md ("every WRONG verdict... re-checked myself"); kept for the record (the granular 16-row per-citation table underlying the parent's headline findings).
+
 **Scope:** every MODEL-FIT-, field-evidence-, and mechanics-doc-sourced claim in
 `docs/design/HARNESS.md`, checked against a snapshot of `docs/design/MODEL-FIT.md`
 (`swarm-dev/model-fit` branch, saved to `docs/audit/_hcrev-modelfit-snapshot.md`),

@@ -1,5 +1,7 @@
 # Field evidence — dogfooding the simplest swarm tool — 2026-07-09
 
+> SUPERSEDED by field-evidence-2026-07-10.md and later doctrine docs; kept for the record (the original WATCHLIST-trigger empirical baseline #1-#5).
+
 **Author:** `field-tester` (child of the operator), testing the **installed** tool
 (`~/.local/bin/swarm` → `~/.local/share/swarm/bin/swarm`, verified byte-identical to
 `bin/swarm` at repo HEAD at test time).

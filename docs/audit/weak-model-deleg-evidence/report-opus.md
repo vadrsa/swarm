@@ -1,5 +1,7 @@
 # CONTRADICTION AUDIT — WORLD.md vs STRUCTURE / OPERATOR-STRUCTURE / DECISIONS
 
+> SUPERSEDED by nothing directly (not itself an audit report — the raw 234-line deliverable the other two docs in this dir cite and describe as evidence); kept for the record (alongside the synthesis docs, as primary evidence).
+
 **Author:** `wmd-opus`. **Read at:** working tree of `main@aa6063d`, 2026-07-12/13.
 **Method:** WORLD.md read as the contract; each of its promises tested against the three
 design docs, quoting both sides. Verdicts: **CONSISTENT** / **EXTENDS** (adds a rule WORLD

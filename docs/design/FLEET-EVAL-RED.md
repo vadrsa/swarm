@@ -1,5 +1,7 @@
 # FLEET-EVAL-RED — adversarial review of FLEET-EVAL.md
 
+> SUPERSEDED by FLEET-EVAL.md §9, where all 5 objections are already summarized/adopted verbatim; kept for the record (the raw review-process record — resolved, not a live disagreement).
+
 **Reviewer:** `eval-red` (fresh; did NOT run the eval). Reports to `fleet-eval`.
 **Written at** `main@aa6063d`, 2026-07-11, against the sandbox artifacts under
 `…/990a14af-…/scratchpad/bench-v2/{deepseek,glm,claude-base}/` (the session hash the

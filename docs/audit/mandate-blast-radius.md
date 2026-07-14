@@ -1,5 +1,7 @@
 # Blast radius: making `--model` (and/or `--reason`) a REQUIRED flag on `swarm spawn`
 
+> SUPERSEDED by the merged mandate PR; kept for the record (a distinct/complementary executed-not-just-grepped measurement — 5 failing tests + 1 latent rot — worth keeping as the harder evidence class).
+
 **Agent:** mr-blast · **Parent:** mandate-red · **Date:** 2026-07-13
 **Question:** every place that invokes or documents `swarm spawn`; what breaks if the flag becomes required.
 **Method:** `grep -rn 'swarm spawn' . --exclude-dir=.git` (**119** pre-existing hits, excluding this

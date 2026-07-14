@@ -1,5 +1,7 @@
 # HARNESS-RED — an adversarial review of `docs/design/HARNESS.md`
 
+> SUPERSEDED by HARNESS.md §10, which folds every finding in; kept for the record (the origin record of two real errors — a mis-cited causal claim, and a citation-integrity pattern that recurred in LOOP.md per LOOP-RED).
+
 **Reviewer:** `hc-red`, spawned fresh with no sight of the author's reasoning. I read the
 doc as a stranger would: the argument on the page, and the sources it points at.
 **Written at** `swarm-dev/spawn-slash-shim@cfb3113`, 2026-07-13.

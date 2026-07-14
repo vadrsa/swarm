@@ -1,5 +1,7 @@
 # Field evidence — onboarding-doctrine falsifiers 1 & 2, run live — 2026-07-12
 
+> SUPERSEDED by shipped onboarding doctrine and later OPERATOR-STRUCTURE.md/red2 fixes to the root-naming bug it identified; kept for the record (the corrected trigger-gap and parent=operator contract-contradiction findings).
+
 **Author:** `field-tester` (runners `dp-f1`, `dp-f2`; baseline arm run by me).
 **Status: POST-ADVERSARIAL-REVIEW.** The fresh reviewer (`dp-red`,
 `docs/audit/field-evidence-doctrine-2026-07-12-RED.md`) flipped both of this
