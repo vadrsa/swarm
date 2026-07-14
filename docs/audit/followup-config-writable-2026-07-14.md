@@ -58,3 +58,28 @@ is not the PR that caused it.
 
 The third is the smallest change that closes the spawn-escalation half; it does **not** close the
 middleware-exec half, which needs one of the first two.
+
+## Update (2026-07-14, later same day): `DEFAULT_PERMISSION_MODE` is now `auto` — the gap got sharper
+
+`bin/swarm`'s shipped default moved from `acceptEdits` to `auto` (operator ruling: "set auto mode
+by default not acceptEdits" — the true status quo this machine already ran, argued in the
+`DEFAULT_PERMISSION_MODE` comment block). That change does not touch this file's mechanism — the
+sandbox boundary, the two privileged keys, the missing ACL are all unchanged — but it changes what
+the mechanism is worth to an attacker:
+
+**Before:** a child that wrote `.swarm/config` to escalate its own tree's default (or hijack
+`[middleware] command`) still landed inside the acceptEdits ceiling for any spawn that omitted
+`--permission-mode` — no network egress from that inherited default alone. The escalation path
+existed but the reach it bought was local-filesystem-only.
+
+**Now:** the same self-rewrite is a standing invitation to a config that grants network egress by
+default (`auto`, or worse, `bypassPermissions`) to every future spawn in the tree that doesn't pin
+its own `--permission-mode`. A child that reaches this file no longer needs to escalate to
+`bypassPermissions` to add network reach tree-wide — `auto` alone is now enough, and it's the
+value most likely to look unremarkable in a diff.
+
+This does not change the "why not fixed in that PR" reasoning above — the mechanism predates both
+changes and neither PR created it. It does mean the **cost of leaving it open went up** the moment
+`auto` shipped as the default, because the blast radius of a successful `.swarm/config` write grew
+from "local writes tree-wide" to "local writes AND network egress tree-wide." Recommend whoever
+triages the backlog treats this as a candidate to move up, not as unchanged risk.
