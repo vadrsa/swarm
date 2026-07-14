@@ -870,6 +870,43 @@ def live_pane_set():
             if p.get("pane_id")}
 
 
+def listed_ids(kind, timeout=15):
+    """The live set of tab_id (kind="tab") or pane_id (kind="pane") from
+    herdr, or None if herdr is unreachable — never asserted as empty."""
+    d = herdr_json([kind, "list"], timeout=timeout)
+    if d is None:
+        return None
+    key = "tab_id" if kind == "tab" else "pane_id"
+    plural = "tabs" if kind == "tab" else "panes"
+    return {item.get(key) for item in d.get("result", {}).get(plural, [])}
+
+
+def wait_gone(kind, ident, timeout=3.0, interval=0.2, poll_timeout=1.0):
+    """Poll `herdr <kind> list` until ident is absent from it. `kind` is
+    "tab" or "pane". Returns True once the id is verifiably gone (including
+    if it was already gone on the first check), False if the timeout
+    expires with the id still — or ambiguously, herdr-unreachable — present.
+
+    A close call's return code fires before herdr's teardown does — the id
+    can still show up in `list` seconds after `close` returned 0. Only a
+    listing that no longer contains the id is proof; the return code is a
+    claim, not the fact (PHILOSOPHY §4). herdr-unreachable is treated as
+    still-present, not gone: silence must never be read as success.
+
+    Each poll's own subprocess is capped at poll_timeout, well under
+    `timeout`: a herdr that hangs (rather than erroring) must not let one
+    poll blow the overall wait past its documented bound.
+    """
+    t0 = time.time()
+    while True:
+        ids = listed_ids(kind, timeout=poll_timeout)
+        if ids is not None and ident not in ids:
+            return True
+        if time.time() - t0 >= timeout:
+            return False
+        time.sleep(interval)
+
+
 def pane_prompt_line(pane):
     try:
         p = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible",
@@ -1649,16 +1686,32 @@ def cmd_close(argv):
         die(f"unknown agent: {name}")
     for aid in subtree(agents, name):
         a = agents[aid]
-        closed = False
+        gone, already, timed_out, kind = False, False, False, None
         if a.get("tab"):
-            p = subprocess.run(["herdr", "tab", "close", a["tab"]],
+            kind, ids = "tab", listed_ids("tab")
+            if ids is not None and a["tab"] not in ids:
+                already = True
+            else:
+                subprocess.run(["herdr", "tab", "close", a["tab"]],
                                capture_output=True)
-            closed = p.returncode == 0
-        if not closed and a.get("pane"):
-            p = subprocess.run(["herdr", "pane", "close", a["pane"]],
+                gone = wait_gone("tab", a["tab"])
+                timed_out = not gone
+        elif a.get("pane"):
+            kind, ids = "pane", listed_ids("pane")
+            if ids is not None and a["pane"] not in ids:
+                already = True
+            else:
+                subprocess.run(["herdr", "pane", "close", a["pane"]],
                                capture_output=True)
-            closed = p.returncode == 0
-        print(f"closed {aid}" if closed else f"{aid}: pane already gone")
+                gone = wait_gone("pane", a["pane"])
+                timed_out = not gone
+        if gone or already:
+            print(f"closed {aid}" if gone else f"{aid}: pane already gone")
+        elif timed_out:
+            print(f"{aid}: close requested, {kind} still present after 3s "
+                  f"(may be tearing down)")
+        else:
+            print(f"{aid}: pane already gone")
     print(f"files stay under {root} (journal, queue, delivered)")
 
 
