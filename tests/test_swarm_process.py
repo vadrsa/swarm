@@ -70,6 +70,70 @@ printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGS"
 exit 0
 '''
 
+# fake herdr that models herdr's real async teardown: `tab close`/`pane close`
+# return 0 immediately (the lie the bug trusted), but the id stays in `list`
+# for one poll after the close call, then is gone from the SECOND poll on.
+# Ids named "stuck-*" never leave `list` at all, modeling a close that never
+# completes -> proves the timeout branch. $FAKE_HERDR_STATE is a directory;
+# one file per id counts how many times it has been LISTED since close.
+ASYNC_FAKE_HERDR = r'''#!/usr/bin/env bash
+echo "$@" >> "$FAKE_HERDR_LOG"
+mkdir -p "$FAKE_HERDR_STATE"
+case "$1 $2" in
+  "tab close"|"pane close")
+    touch "$FAKE_HERDR_STATE/closed-$3"
+    ;;
+  "tab list")
+    ids=$(cat "$FAKE_HERDR_STATE/tab_ids" 2>/dev/null)
+    first=1
+    printf '{"result":{"tabs":['
+    for id in $ids; do
+      f="$FAKE_HERDR_STATE/closed-$id"
+      if [ -f "$f" ]; then
+        case "$id" in
+          stuck-*) : ;;                         # never leaves the list
+          *)
+            n=$(cat "$f" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            echo "$n" > "$f"
+            [ "$n" -ge 2 ] && continue           # gone from the 2nd poll on
+            ;;
+        esac
+      fi
+      [ $first -eq 0 ] && printf ','
+      printf '{"tab_id":"%s"}' "$id"
+      first=0
+    done
+    printf ']}}'
+    ;;
+  "pane list")
+    ids=$(cat "$FAKE_HERDR_STATE/pane_ids" 2>/dev/null)
+    first=1
+    printf '{"result":{"panes":['
+    for id in $ids; do
+      f="$FAKE_HERDR_STATE/closed-$id"
+      if [ -f "$f" ]; then
+        case "$id" in
+          stuck-*) : ;;
+          *)
+            n=$(cat "$f" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            echo "$n" > "$f"
+            [ "$n" -ge 2 ] && continue
+            ;;
+        esac
+      fi
+      [ $first -eq 0 ] && printf ','
+      printf '{"pane_id":"%s"}' "$id"
+      first=0
+    done
+    printf ']}}'
+    ;;
+  *) : ;;
+esac
+exit 0
+'''
+
 
 def run_swarm(args, env_extra, stdin_text="", cwd=None):
     # Clean room: this suite may itself run INSIDE a live swarm, so our own
@@ -116,6 +180,27 @@ class Base(unittest.TestCase):
                "FAKE_HERDR_LOG": log, "FAKE_CLAUDE_ARGS": argsf,
                "SWARM_READY_TIMEOUT": "10"}
         return env, log, argsf
+
+    def async_fake_herdr(self, tab_ids=(), pane_ids=()):
+        """Fake herdr modeling real async teardown: close returns 0 at once,
+        but an id lingers in `list` for one poll before vanishing (or, for
+        ids prefixed "stuck-", never vanishes). Returns (env, log, state)."""
+        log = os.path.join(self.root, "herdr.log")
+        state = os.path.join(self.root, "herdr-state")
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(self.bindir, "herdr"), "w") as f:
+            f.write(ASYNC_FAKE_HERDR)
+        os.chmod(os.path.join(self.bindir, "herdr"), 0o755)
+        if tab_ids:
+            with open(os.path.join(state, "tab_ids"), "w") as f:
+                f.write(" ".join(tab_ids))
+        if pane_ids:
+            with open(os.path.join(state, "pane_ids"), "w") as f:
+                f.write(" ".join(pane_ids))
+        env = {"PATH": self.bindir + ":/usr/bin:/bin",
+               "SWARM_DIR": self.root, "HERDR_ENV": "1",
+               "FAKE_HERDR_LOG": log, "FAKE_HERDR_STATE": state}
+        return env, log, state
 
 
 class TestProcessLevelDeliver(Base):
@@ -783,18 +868,19 @@ class TestPsCli(Base):
 
 
 class TestCloseCli(Base):
-    def test_close_subtree_files_stay(self):
-        env, log, _ = self.fake_tools(claude=True)
+    def write_agent(self, n, par, tab):
         os.makedirs(os.path.join(self.root, "agents"), exist_ok=True)
+        with open(sw.agent_rec_path(self.root, n), "w") as f:
+            json.dump({"name": n, "parent": par, "pane": f"p-{n}", "tab": tab}, f)
+        os.makedirs(os.path.dirname(sw.journal_path(self.root, n)), exist_ok=True)
+        with open(sw.journal_path(self.root, n), "w") as f:
+            f.write("j")
+
+    def test_close_subtree_files_stay(self):
+        env, log, _ = self.async_fake_herdr(tab_ids=["t-a", "t-b", "t-z"])
         for n, par, tab in (("a", "operator", "t-a"), ("b", "a", "t-b"),
                             ("z", "operator", "t-z")):
-            with open(sw.agent_rec_path(self.root, n), "w") as f:
-                json.dump({"name": n, "parent": par, "pane": f"p-{n}",
-                           "tab": tab}, f)
-            os.makedirs(os.path.dirname(sw.journal_path(self.root, n)),
-                        exist_ok=True)
-            with open(sw.journal_path(self.root, n), "w") as f:
-                f.write("j")
+            self.write_agent(n, par, tab)
         p = run_swarm(["close", "a"], env)
         self.assertEqual(p.returncode, 0, p.stderr)
         with open(log) as f:
@@ -805,6 +891,47 @@ class TestCloseCli(Base):
         for n in ("a", "b", "z"):   # files stay — ALL of them
             self.assertTrue(os.path.exists(sw.journal_path(self.root, n)))
             self.assertTrue(os.path.exists(sw.agent_rec_path(self.root, n)))
+
+    def test_close_waits_for_tab_to_actually_vanish_not_just_return_code(self):
+        # The fake's `tab close` returns 0 immediately (same lie the real bug
+        # trusted), yet the tab stays in `tab list` for one more poll before
+        # it's gone. A close that reads the return code alone would print
+        # "closed" before the fact is true; only a close that keeps polling
+        # `list` past that first still-present answer proves out the fix.
+        env, log, _ = self.async_fake_herdr(tab_ids=["t-a"])
+        self.write_agent("a", "operator", "t-a")
+        p = run_swarm(["close", "a"], env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("closed a", p.stdout)
+        with open(log) as f:
+            calls = f.read()
+        # proof of waiting: more than one `tab list` call was made after close
+        self.assertGreaterEqual(calls.count("tab list"), 2)
+
+    def test_close_still_present_after_timeout_is_reported_honestly_not_as_closed(self):
+        # "stuck-" never leaves `tab list` in the fake -> models a tab whose
+        # teardown never completes (or completes far slower than we wait).
+        env, log, _ = self.async_fake_herdr(tab_ids=["stuck-a"])
+        self.write_agent("a", "operator", "stuck-a")
+        t0 = time.time()
+        p = run_swarm(["close", "a"], env)
+        elapsed = time.time() - t0
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("closed a", p.stdout)
+        self.assertIn("a: close requested, tab still present after 3s", p.stdout)
+        self.assertLess(elapsed, 15, "close must not hang past its bounded poll")
+
+    def test_close_already_gone_reported_without_issuing_a_close_call(self):
+        # No id listed at all for t-a -> already gone before we ever call
+        # close; the honest "already gone" line, and no close call issued.
+        env, log, _ = self.async_fake_herdr(tab_ids=[])
+        self.write_agent("a", "operator", "t-a")
+        p = run_swarm(["close", "a"], env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("a: pane already gone", p.stdout)
+        with open(log) as f:
+            calls = f.read()
+        self.assertNotIn("tab close", calls)
 
 
 class TestEdgesFoundReading(Base):
