@@ -382,12 +382,15 @@ class TestPermissionMode(Base):
     defaulted to manual, every child wedged on the first dialog and rendered as
     plain 'idle' in `ps`. Invisible.
 
-    acceptEdits is the default this file installs. Its real boundary, measured
-    (see docs/audit/spawn-hardening-2026-07-14.md) — NOT "everything else
-    gates", which an earlier draft claimed and which is false: in-cwd edits AND
-    in-cwd Bash (including `rm`) run unattended; writes outside the cwd and
-    network egress are blocked. It is still narrower than what it replaces
-    (this machine's ambient default was `auto`, which permits network)."""
+    auto is the default this file installs. Its real boundary, measured (see
+    docs/audit/spawn-hardening-2026-07-14.md, spawn-red-2026-07-14.md) — NOT
+    "everything else gates", which an earlier draft claimed and which is
+    false: in-cwd edits AND in-cwd Bash (including `rm`) run unattended;
+    writes outside the cwd are blocked. Unlike acceptEdits, network egress is
+    ALLOWED — that is the one thing this default decides, and it is also the
+    TRUE status quo: this machine's own ambient default was already `auto`,
+    so every child here already ran with this exact privilege before swarm
+    ever specified a mode at all."""
 
     def _argv(self, argsf):
         for _ in range(50):                              # launcher runs async
@@ -397,7 +400,7 @@ class TestPermissionMode(Base):
         with open(argsf) as f:
             return f.read().splitlines()
 
-    def test_default_permission_mode_is_accept_edits_on_the_real_argv(self):
+    def test_default_permission_mode_is_auto_on_the_real_argv(self):
         env, _, argsf = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
                        "--reason", "this test reads the exact argv the fake "
@@ -406,7 +409,7 @@ class TestPermissionMode(Base):
         self.assertEqual(p.returncode, 0, p.stderr)
         argv = self._argv(argsf)
         self.assertIn("--permission-mode", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
 
     def test_permission_mode_override_reaches_the_real_argv(self):
         env, _, argsf = self.fake_tools(claude=True)
@@ -441,7 +444,7 @@ class TestPermissionMode(Base):
                       env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
         self.assertIn("unknown --permission-mode", p.stderr)
-        self.assertIn("acceptEdits", p.stderr)   # the accepted list, printed
+        self.assertIn("auto", p.stderr)   # the accepted list, printed
         self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
                           "a refused spawn must not claim the name")
 

@@ -78,29 +78,48 @@ PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual",
 # no mode, his machine defaulted to manual, and every child wedged on the first
 # dialog, rendering as plain "idle" in `ps`. Invisible.
 #
-# acceptEdits is the NARROWEST mode that actually unwedges a child. Measured
-# (real claude, empty settings file so no ambient default could leak in) — state
-# the unflattering half too, because an earlier draft of this comment claimed it
-# gates "arbitrary Bash" and that was FALSE:
-#   in-cwd Edit/Write ....... allowed unattended   <- the design
-#   in-cwd Bash, incl. `rm` . ALLOWED UNATTENDED   <- real blast radius, say it
-#   writes OUTSIDE the cwd .. blocked (sandbox)
-#   network egress .......... blocked
-# So: a child can do real damage inside its own working directory. What it
-# cannot do is reach the network or the wider filesystem.
+# auto, not acceptEdits. Measured (real claude, empty settings file so no
+# ambient default could leak in) — both modes share the same in-cwd blast
+# radius; egress is the ENTIRE difference:
+#   in-cwd Edit/Write ....... allowed unattended   <- both modes
+#   in-cwd Bash, incl. `rm` . ALLOWED UNATTENDED   <- both modes, say it plainly
+#   writes OUTSIDE the cwd .. blocked (sandbox)     <- both modes
+#   network egress .......... BLOCKED (acceptEdits) vs ALLOWED (auto)
+# So a child can already do real damage inside its own working directory under
+# EITHER mode. The one thing this default decides is whether it can also fetch
+# a doc, call an API, or install a package while unattended — or send data out
+# while unattended. Both readings are correct; there is no free lunch here.
 #
-# It is nonetheless NARROWER THAN THE STATUS QUO IT REPLACES: this machine's own
-# ~/.claude/settings.json says defaultMode "auto", and auto PERMITS network
-# egress (measured: identical benign curl task — auto downloads, acceptEdits
-# blocks). Every child ever spawned here already ran with more privilege than
-# this line grants. bypassPermissions (== --dangerously-skip-permissions) stays
-# distinct, opt-in, and deliberately NOT the default.
+# Why auto anyway: it is the TRUE status quo, not a widening. This machine's own
+# ~/.claude/settings.json says defaultMode "auto" — every child ever spawned
+# here already ran with exactly this privilege, inherited by accident from a
+# file swarm does not own. swarm's actual contribution was never "narrow the
+# machine's default" — it was "SPECIFY a mode instead of silently inheriting
+# whatever the machine happens to have," which is what fixed the WSL wedge
+# above. That fix holds regardless of which mode is chosen here. Given that,
+# picking acceptEdits bought a narrower default than what every agent here was
+# already running with, at the cost of blocking the network calls most agents
+# actually need (fetching a doc, calling an API, installing a package) — an
+# agent that cannot reach the network is unattended right up until the moment
+# it needs to be attended, which defeats the point of "unattended."
 #
-# Known gap, real and pre-existing (docs/audit/spawn-red-2026-07-14.md):
+# The cost, stated plainly and not softened: a child running under auto CAN
+# send data out over the network without anyone watching. That is a real
+# exfiltration surface, not a hypothetical one, and it is the entire price of
+# this default. bypassPermissions (== --dangerously-skip-permissions) is a
+# different, larger step — it also drops the out-of-cwd write sandbox — and
+# stays distinct, opt-in, and deliberately NOT the default.
+#
+# Known gap, real, pre-existing, and now SHARPER (docs/audit/spawn-red-2026-07-14.md):
 # .swarm/config lives INSIDE the cwd sandbox, so a child can write it — and it
-# drives both this default and the [middleware] command that runs on every send.
-# Follow-up hardening, not created by this change.
-DEFAULT_PERMISSION_MODE = "acceptEdits"
+# drives both this default and the [middleware] command that runs on every
+# send. Under acceptEdits that self-rewrite was reach-limited to the local
+# filesystem. Under auto, a child that rewrites its own config can now also
+# exfiltrate over the network in the same unattended turn — the ceiling on what
+# that gap is worth to an attacker went up when this default did. Still not
+# fixed here (out of scope for a default-mode change); flagged as a candidate
+# to reprioritize, not as something this change resolves.
+DEFAULT_PERMISSION_MODE = "auto"
 # ps-blocked detection: a CLOSED set of (kind, substring) pairs matched against a
 # pane's own recent text. The kind — never the matched text itself — is what ps
 # renders. This is deliberate: pane text is attacker-controlled (any agent can
@@ -1336,8 +1355,8 @@ def cmd_spawn(argv):
     # the mandate guard above: an invalid --permission-mode must refuse without
     # burning the child's name. Precedence: --permission-mode flag, else
     # .swarm/config's [spawn] permission_mode, else DEFAULT_PERMISSION_MODE
-    # (acceptEdits) — never Claude Code's own built-in default (manual), which
-    # is the wedge this whole change exists to fix.
+    # (auto) — never Claude Code's own built-in default (manual), which is the
+    # wedge this whole change exists to fix.
     if not permission_mode:
         permission_mode = configured_permission_mode(root) or DEFAULT_PERMISSION_MODE
     if permission_mode not in PERMISSION_MODES:
@@ -1676,13 +1695,14 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 prompt (opt-in, default off — for throwaway dirs
                                 only, never for real repos)
                                 --permission-mode MODE sets the child's Claude
-                                Code permission mode (default: acceptEdits — can
-                                edit files unattended, cannot bypass everything
-                                unattended). Accepted: acceptEdits auto
-                                bypassPermissions manual dontAsk plan (verbatim
-                                from `claude --help`). Overridable per-spawn
-                                here, or as a standing default via
-                                .swarm/config's [spawn] permission_mode.
+                                Code permission mode (default: auto — can edit
+                                files and reach the network unattended, cannot
+                                bypass the out-of-cwd write sandbox). Accepted:
+                                acceptEdits auto bypassPermissions manual
+                                dontAsk plan (verbatim from `claude --help`).
+                                Overridable per-spawn here, or as a standing
+                                default via .swarm/config's [spawn]
+                                permission_mode.
   swarm send <name> --stdin     message an agent or `operator` (body from stdin —
   swarm send <name> "<msg>"     recommended; a positional body is a shell word).
                                 Delivered whole, ONE per turn, oldest first. Must
