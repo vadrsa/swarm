@@ -2,8 +2,9 @@
 # install.sh — wire swarm into this machine.
 #
 # swarm is one file (bin/swarm) plus the world doc it prints; this script does
-# the three machine-specific things: put `swarm` on PATH, activate the skill
-# for Claude Code, and check prerequisites. Idempotent — safe to re-run.
+# the three machine-specific things: put `swarm` (and `yoke`, the optional
+# opencode-fork harness) on PATH, activate the skill for Claude Code, and
+# check prerequisites. Idempotent — safe to re-run.
 #
 #   ./install.sh             install (or re-install)
 #   ./install.sh --uninstall remove the symlinks this script created
@@ -12,12 +13,14 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$REPO/bin/swarm"
+YOKE_SRC="$REPO/harness/yoke"
 SKILL_SRC="$REPO/skill"
 SKILL_DST="$HOME/.claude/skills/swarm"
 SKILL2_SRC="$REPO/skill-middleware"
 SKILL2_DST="$HOME/.claude/skills/swarm-middleware"
 # Prefer ~/.local/bin (usually on PATH); fall back to advising a PATH export.
 BIN_DST="$HOME/.local/bin/swarm"
+YOKE_DST="$HOME/.local/bin/yoke"
 
 say()  { printf '  %s\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -29,6 +32,7 @@ uninstall() {
   [ -L "$SKILL_DST" ]  && { rm -f "$SKILL_DST";  ok "removed skill symlink $SKILL_DST"; }   || say "no skill symlink"
   [ -L "$SKILL2_DST" ] && { rm -f "$SKILL2_DST"; ok "removed skill symlink $SKILL2_DST"; }  || say "no swarm-middleware skill symlink"
   [ -L "$BIN_DST" ]    && { rm -f "$BIN_DST";    ok "removed bin symlink $BIN_DST"; }       || say "no bin symlink"
+  [ -L "$YOKE_DST" ]   && { rm -f "$YOKE_DST";   ok "removed yoke symlink $YOKE_DST"; }      || say "no yoke symlink"
   echo "Done. (Your .swarm/ state dirs and PATH edits were left untouched.)"
   exit 0
 }
@@ -39,7 +43,7 @@ case "${1:-}" in
   *)           err "unknown flag: $1"; echo "usage: ./install.sh [--uninstall]" >&2; exit 1;;
 esac
 
-if [ -L "$BIN_DST" ] || [ -L "$SKILL_DST" ] || [ -L "$SKILL2_DST" ]; then
+if [ -L "$BIN_DST" ] || [ -L "$YOKE_DST" ] || [ -L "$SKILL_DST" ] || [ -L "$SKILL2_DST" ]; then
   echo "Re-installing swarm from: $REPO (existing install detected)"
 else
   echo "Installing swarm from: $REPO"
@@ -59,14 +63,21 @@ if [ "$missing" -ne 0 ]; then
   say "  python3 — the interpreter that runs swarm itself"
   say "Install the missing ones, then re-run ./install.sh"
 fi
+if command -v bun >/dev/null 2>&1; then ok "bun (optional, needed by yoke)"; else
+  say "  bun     — not found (optional: only needed to run \`yoke\`-launched agents)"
+fi
 echo
 
-# 2. Put `swarm` on PATH -----------------------------------------------------
+# 2. Put `swarm` and `yoke` on PATH -------------------------------------------
 echo "Linking the CLI:"
 chmod +x "$BIN_SRC" 2>/dev/null || true
 mkdir -p "$(dirname "$BIN_DST")"
 ln -sfn "$BIN_SRC" "$BIN_DST"
 ok "symlinked $BIN_DST -> $BIN_SRC"
+chmod +x "$YOKE_SRC" 2>/dev/null || true
+mkdir -p "$(dirname "$YOKE_DST")"
+ln -sfn "$YOKE_SRC" "$YOKE_DST"
+ok "symlinked $YOKE_DST -> $YOKE_SRC"
 if ! command -v swarm >/dev/null 2>&1; then
   warn "$(dirname "$BIN_DST") is not on your PATH. Add this to your shell rc:"
   say "  export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -97,3 +108,6 @@ echo "  • Start a NEW Claude Code session so it picks up the skill (or its upd
 echo "  • Inside a herdr pane, say e.g.  \"start a swarm to <goal>\""
 echo "  • The tool writes state into a .swarm/ dir in your project — add it to"
 echo "    that project's .gitignore if you don't want it committed."
+echo "  • \`yoke\` (the opencode-fork harness) is also on PATH now, but it is"
+echo "    optional and inert until you configure a fork checkout: pass"
+echo "    --yoke-fork <dir> or set YOKE_FORK, and make sure \`bun\` is installed."
