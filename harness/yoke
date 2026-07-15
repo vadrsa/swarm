@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""yoke — launch an opencode-backed swarm agent in INTERACTIVE TUI mode.
+
+Ported from swarm-rnd/harness/spawn-oc-tui.py (the proven 224-line R&D script) as
+productize PR 2. This is the interactive-TUI harness ONLY — the headless `serve` +
+HTTP-wake path that R&D also prototyped is shelved (see docs/design/PRODUCTIZE.md §5);
+its one surviving piece here is the free-port helper (free_port()), kept present and
+correct for a possible future port-binding mode even though the TUI path never calls it.
+
+WHY THE TUI BOOTS HOW IT DOES: the fork's TUI needs `cd packages/opencode/` FIRST so bun
+reads packages/opencode/bunfig.toml's `preload = ["@opentui/solid/preload"]` (the JSX
+transform the .tsx files need), and the CLI is invoked with NO subcommand token
+(`$0 [project]` — `tui` is not a subcommand).
+
+Task delivery: the TUI's own `--prompt` flag, fed into the session at boot. No HTTP, no
+queue-nudge dance — the initial task is the TUI's first turn, exactly like a Claude
+agent's initial prompt. Later mail arrives via the swarm queue + the pane doorbell, same
+as a Claude agent.
+
+--auto: TUI auto-approves permissions not explicitly denied. Same "no ask can ever wedge
+an unattended agent" policy as bin/swarm's own posture, native to the TUI command.
+
+Mirrors bin/swarm's file contract so a Claude-backend parent judges a TUI child
+identically: journal tombstone, agent record (with pane/tab/reason), queue on demand.
+The pump plugin (.opencode/plugin/swarm-pump.js) is copied into the workspace and
+discovered by the same glob path the TUI and serve share. SWARM_DIR/SWARM_AGENT_ID/
+SWARM_PARENT go into the pane env so the pump identifies itself; swarm's own bin dir
+goes on PATH so the agent can run `swarm spawn/ps/send`.
+
+THE 3 FIXES over the R&D script (docs/design/PRODUCTIZE.md §5):
+  1. --reason is accepted and recorded (the R&D script fabricated its own).
+  2. No hardcoded SWARM_DIR/SWARM_BIN_DIR/FORK_DIR/HARNESS_DIR/PUMP_SRC. SWARM_DIR comes
+     from --swarm-dir or the SWARM_DIR env var (else refuse); the swarm bin dir and pump
+     source resolve relative to yoke's OWN location (os.path.realpath(__file__)) so an
+     installed symlink still finds them; the opencode fork dir comes from --yoke-fork or
+     the YOKE_FORK env var (else refuse — it is genuinely machine-specific).
+  3. Real free-port acquisition (free_port() below) instead of a salted-hash guess,
+     shipped so any future port-binding path can never regress to that bug.
+"""
+import os
+import sys
+import json
+import time
+import shlex
+import socket
+import subprocess
+
+
+def die(msg):
+    print(f"yoke: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def fmt_ts(ms):
+    import datetime
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def free_port():
+    """Bind to an ephemeral port on 127.0.0.1, read it back, release it, return it.
+
+    Fix 3 (docs/design/PRODUCTIZE.md §5): the R&D serve harness picked a port via
+    `4200 + (abs(hash(name)) % 400)` — hash() is salted per-process, so this was
+    effectively random and collision-prone with no retry. This helper is the real
+    fix. The interactive-TUI path below never calls it (it binds no port at all);
+    it is shipped so any future port-binding mode can never regress to that bug.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def write_atomic(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.rename(tmp, path)
+
+
+def journal_path(swarm_dir, name):
+    return os.path.join(swarm_dir, "journal", f"{name}.md")
+
+
+def agent_rec_path(swarm_dir, name):
+    return os.path.join(swarm_dir, "agents", f"{name}.json")
+
+
+def claim_name(swarm_dir, name):
+    jpath = journal_path(swarm_dir, name)
+    os.makedirs(os.path.dirname(jpath), exist_ok=True)
+    try:
+        fd = os.open(jpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        die(f"name '{name}' was already used (journal/{name}.md exists)")
+    return fd
+
+
+def herdr_json(args, timeout=15):
+    p = subprocess.run(["herdr"] + args, capture_output=True, text=True, timeout=timeout)
+    if p.returncode != 0:
+        die(f"herdr {' '.join(args)} failed: {p.stderr.strip()}")
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        die(f"herdr {' '.join(args)} returned non-JSON: {p.stdout!r}")
+
+
+def herdr_run_path(launcher):
+    # Same construction as bin/swarm's herdr_run_path: herdr strips exactly one
+    # leading '/' before typing the command into the pane's shell, so quote
+    # first, then prepend a bare '/' outside the quote.
+    q = shlex.quote(launcher)
+    if launcher.startswith("/"):
+        return "/" + q
+    return q
+
+
+def resolve_swarm_dir(flag_value):
+    if flag_value:
+        return flag_value
+    env_value = os.environ.get("SWARM_DIR")
+    if env_value:
+        return env_value
+    die("no swarm dir: pass --swarm-dir <root>/.swarm or set the SWARM_DIR env var")
+
+
+def resolve_fork_dir(flag_value):
+    if flag_value:
+        return flag_value
+    env_value = os.environ.get("YOKE_FORK")
+    if env_value:
+        return env_value
+    die("no opencode fork configured: pass --yoke-fork <dir> or set the YOKE_FORK env var "
+        "(the fork checkout is machine-specific and cannot be derived — see "
+        "docs/design/PRODUCTIZE.md §5 'the fork dependency')")
+
+
+def main():
+    argv = sys.argv[1:]
+    if len(argv) < 2:
+        die('usage: yoke <name> "<task>" --model <provider/model> --parent <parent> '
+            '--reason "<why>" [--swarm-dir <dir>] [--yoke-fork <dir>]')
+    name, task = argv[0], argv[1]
+    rest = argv[2:]
+    model = None
+    parent = None
+    reason = None
+    swarm_dir_flag = None
+    fork_dir_flag = None
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--model" and i + 1 < len(rest):
+            model = rest[i + 1]
+            i += 2
+        elif rest[i] == "--parent" and i + 1 < len(rest):
+            parent = rest[i + 1]
+            i += 2
+        elif rest[i] == "--reason" and i + 1 < len(rest):
+            reason = rest[i + 1]
+            i += 2
+        elif rest[i] == "--swarm-dir" and i + 1 < len(rest):
+            swarm_dir_flag = rest[i + 1]
+            i += 2
+        elif rest[i] == "--yoke-fork" and i + 1 < len(rest):
+            fork_dir_flag = rest[i + 1]
+            i += 2
+        else:
+            die(f"unknown flag {rest[i]}")
+    if not model:
+        die("--model is required, format provider/model (e.g. zai-coding-plan/glm-5.1)")
+    if not parent:
+        die("--parent is required")
+    if "/" not in model:
+        die(f"--model must be provider/model, got {model!r}")
+
+    # Fix 1: --reason is taken from the caller (bin/swarm's dispatch passes the
+    # parent's own reason through); only fall back to a fabricated one if the
+    # caller genuinely didn't pass one.
+    if not reason:
+        reason = f"opencode/{model.split('/', 1)[0]} agent launched via yoke (interactive TUI mode, no --reason given)"
+
+    # Fix 2: no hardcoded paths. SWARM_DIR and the fork dir are resolved from
+    # flags/env (refusing clearly if absent); yoke's own bin dir and the pump
+    # source resolve relative to yoke's real location so an installed symlink
+    # still finds them.
+    swarm_dir = resolve_swarm_dir(swarm_dir_flag)
+    fork_dir = resolve_fork_dir(fork_dir_flag)
+    yoke_real = os.path.realpath(__file__)
+    harness_dir = os.path.dirname(yoke_real)
+    swarm_bin_dir = os.path.normpath(os.path.join(harness_dir, "..", "bin"))
+    pump_src = os.path.join(harness_dir, "swarm-pump.js")
+
+    ws = os.path.join(harness_dir, f"ws-{name}")
+    os.makedirs(ws, exist_ok=True)
+    plugin_dir = os.path.join(ws, ".opencode", "plugin")
+    os.makedirs(plugin_dir, exist_ok=True)
+    with open(pump_src) as f:
+        pump_js = f.read()
+    with open(os.path.join(plugin_dir, "swarm-pump.js"), "w") as f:
+        f.write(pump_js)
+
+    # Belt+braces with --auto: also deny the two interactive-only gates in
+    # config so they fail fast rather than surfacing a modal the doorbell
+    # can't dismiss. (--auto already auto-approves everything not denied.)
+    with open(os.path.join(ws, "opencode.json"), "w") as f:
+        json.dump({"$schema": "https://opencode.ai/config.json",
+                   "permission": {"*": "allow",
+                                  "doom_loop": "deny",
+                                  "question": "deny"}}, f)
+
+    # 1. Claim the journal tombstone (bin/swarm's spawn-name contract).
+    fd = claim_name(swarm_dir, name)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"# journal of {name}\n\n## {fmt_ts(now_ms())} — spawned\n"
+                f"Model: {model} — {reason}\n"
+                f"Task from {parent}: {task}\n")
+
+    # 2. Write the agent record BEFORE boot (record is truth even if boot is slow).
+    write_atomic(agent_rec_path(swarm_dir, name), json.dumps({
+        "name": name, "parent": parent, "pane": "", "tab": "",
+        "model": model, "reason": reason, "cwd": ws, "task": task,
+        "ts": now_ms(),
+    }))
+
+    # 3. Build the launcher shell script the herdr pane runs.
+    #    cd packages/opencode/ FIRST (bunfig.toml preload — see docstring), then
+    #    invoke the CLI with NO subcommand token. The project positional is the
+    #    workspace; --prompt delivers the initial task; --auto unattends it.
+    launch_sh = os.path.join(ws, "launch.sh")
+    log_path = os.path.join(ws, "boot.log")
+    env_lines = "\n".join([
+        f"export SWARM_DIR={shlex.quote(swarm_dir)}",
+        f"export SWARM_AGENT_ID={shlex.quote(name)}",
+        f"export SWARM_PARENT={shlex.quote(parent)}",
+        "export SWARM_DIGEST_COOLDOWN=1",
+        f"export PATH={shlex.quote(swarm_bin_dir)}:$PATH",
+    ])
+    script = f"""#!/bin/bash
+cd {shlex.quote(os.path.join(fork_dir, "packages", "opencode"))}
+{env_lines}
+exec bun run src/index.ts {shlex.quote(ws)} \\
+    -m {shlex.quote(model)} --auto \\
+    --prompt {shlex.quote(task)} \\
+    2>&1 | tee {shlex.quote(log_path)}
+"""
+    with open(launch_sh, "w") as f:
+        f.write(script)
+    os.chmod(launch_sh, 0o755)
+
+    # 4. herdr tab + pane run — observable, same pattern as bin/swarm's own spawn.
+    tab_args = ["tab", "create", "--cwd", ws, "--no-focus", "--label", name,
+                "--env", f"SWARM_DIR={swarm_dir}", "--env", f"SWARM_AGENT_ID={name}"]
+    wsid = os.environ.get("HERDR_WORKSPACE_ID")
+    if wsid:
+        tab_args[2:2] = ["--workspace", wsid]
+    d = herdr_json(tab_args)
+    try:
+        pane = d["result"]["root_pane"]["pane_id"]
+        tab = d["result"]["tab"]["tab_id"]
+    except Exception:
+        die(f"herdr tab create returned unexpected shape: {d}")
+    subprocess.run(["herdr", "pane", "run", pane, herdr_run_path(launch_sh)],
+                    capture_output=True)
+
+    write_atomic(agent_rec_path(swarm_dir, name), json.dumps({
+        "name": name, "parent": parent, "pane": pane, "tab": tab,
+        "model": model, "reason": reason, "cwd": ws, "task": task,
+        "ts": now_ms(),
+    }))
+
+    print(json.dumps({
+        "name": name, "pane": pane, "tab": tab, "mode": "tui",
+        "workspace": ws, "log": log_path,
+        "note": "TUI launched; initial task delivered via --prompt. Watch the "
+                "pane with `herdr pane read`. Wake later mail via bin/swarm's "
+                "normal pane doorbell (swarm send).",
+    }))
+
+
+if __name__ == "__main__":
+    main()

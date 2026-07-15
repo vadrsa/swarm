@@ -8,3 +8,7 @@
 
 __pycache__/
 *.pyc
+
+# yoke workspaces: created next to harness/yoke at runtime (and by its own
+# test suite), never part of the package
+harness/ws-*/
