@@ -536,7 +536,7 @@ class TestPermissionMode(Base):
     def test_config_default_permission_mode_applies_without_a_flag(self):
         env, _, argsf = self.fake_tools(claude=True)
         with open(os.path.join(self.root, "config"), "w") as f:
-            f.write('[spawn]\npermission_mode = "plan"\n')
+            f.write(json.dumps({"spawn": {"permission_mode": "plan"}}))
         p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
                        "--reason", "operator standing default from "
                        ".swarm/config, no --permission-mode flag given"],
@@ -548,7 +548,7 @@ class TestPermissionMode(Base):
     def test_flag_overrides_configured_default(self):
         env, _, argsf = self.fake_tools(claude=True)
         with open(os.path.join(self.root, "config"), "w") as f:
-            f.write('[spawn]\npermission_mode = "plan"\n')
+            f.write(json.dumps({"spawn": {"permission_mode": "plan"}}))
         p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
                        "--reason", "an explicit flag must win over the "
                        "configured standing default",
@@ -708,26 +708,39 @@ class TestSpawnMandate(Base):
         self.assertEqual(p.returncode, 1)
         self.assertIn("unknown model", p.stderr)
 
-    def test_default_is_a_real_choice_recorded_but_not_passed_to_claude(self):
-        # `default` means "I looked, and the configured default is right" — a DECISION,
-        # and the record keeps it as one. But the LAUNCHER must pass no --model at all,
-        # exactly as an unpinned spawn did. Record and launcher diverge here ON PURPOSE:
-        # collapsing `default` to "" in the record would erase the very distinction this
-        # change exists to capture — a chosen default vs. an inherited one.
-        env, _, argsf = self.fake_tools(claude=True)
+    def test_unknown_model_error_names_config_aliases(self):
+        # PR 1 (C1): the refusal names the builtin tokens PLUS any config
+        # [models] aliases, and points at `swarm models` — it does NOT
+        # dispatch to the alias (that's PR 3); an alias name is still an
+        # unknown --model token on cmd_spawn's Claude-only path today.
+        env, _, _ = self.fake_tools(claude=True)
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(json.dumps({"models": {
+                "glm51": {"harness": "yoke", "model": "zai-coding-plan/glm-5.1"}}}))
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "an alias is not yet dispatchable in PR 1; this "
+                       "assertion reads the refusal, not a launched child"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown model", p.stderr)
+        self.assertIn("glm51", p.stderr)
+        self.assertIn("swarm models", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_default_model_token_is_refused_no_escape_hatch(self):
+        # C1 (operator override, CONFIG-NOTES #1): `default` is REMOVED as a model
+        # token — there is no configured default that can rescue a silent spawn.
+        # `--model default` must now be refused exactly like any other unknown
+        # token, and the name must not be burned.
+        env, _, _ = self.fake_tools(claude=True)
         p = run_swarm(["spawn", "worker", "t", "--model", "default",
-                       "--reason", "the default is right here and its output is one "
-                       "file this test greps"], env, cwd=self.root)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        with open(sw.agent_rec_path(self.root, "worker")) as f:
-            self.assertEqual(json.load(f)["model"], "default")   # the CHOICE is kept
-        for _ in range(50):
-            if os.path.exists(argsf):
-                break
-            time.sleep(0.1)
-        with open(argsf) as f:
-            argv = f.read().splitlines()                          # what claude saw
-        self.assertNotIn("--model", argv, "`default` must exec bare claude")
+                       "--reason", "default used to be a real choice; now it is "
+                       "just an unknown token like any other"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown model", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")),
+                         "a refused spawn must not burn the name")
 
     def test_reason_over_the_cap_is_refused(self):
         env, _, _ = self.fake_tools(claude=True)
@@ -954,14 +967,16 @@ class TestSendMiddleware(Base):
     reserved and ordinary error codes, so a failure can never be misread as
     a deliberate HANDLED."""
 
-    def _arm(self, script_body, extra=""):
+    def _arm(self, script_body, extra=None):
         mw = os.path.join(self.bindir, "mwcmd")
         with open(mw, "w") as f:
             f.write("#!/usr/bin/env bash\n" + script_body + "\n")
         os.chmod(mw, 0o755)
         os.makedirs(self.root, exist_ok=True)
+        middleware = {"command": mw}
+        middleware.update(extra or {})
         with open(os.path.join(self.root, "config"), "w") as f:
-            f.write(f'[middleware]\ncommand = "{mw}"\n{extra}')
+            f.write(json.dumps({"middleware": middleware}))
         return mw
 
     def _kid(self):
@@ -1046,7 +1061,7 @@ class TestSendMiddleware(Base):
 
     def test_fail_open_timeout_bounds_the_send_and_queues(self):
         # the config's own timeout key bounds the invocation
-        self._arm("sleep 30", extra="timeout = 1\n")
+        self._arm("sleep 30", extra={"timeout": 1})
         t0 = time.time()
         p = run_swarm(["send", "operator", "--stdin"],
                       {"SWARM_DIR": self.root, "SWARM_AGENT_ID": "kid"},
@@ -1110,6 +1125,63 @@ class TestSendMiddleware(Base):
         self.assertNotEqual(rc, 0, "the sender must observe the failure")
         self.assertEqual(sw.list_waiting(self.root, "operator"), [],
                          "an unaccepted send must leave nothing queued")
+
+
+class TestModelsCmd(Base):
+    """`swarm models` — read-only discovery, writes nothing. Lists the four
+    builtin Claude tokens and any config [models] aliases, each with its
+    NAMED harness (docs/design/PRODUCTIZE.md §3/§7 PR1) and resolved model."""
+
+    def test_builtins_listed_and_ready_when_claude_on_path(self):
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["models"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for tok in ("opus", "sonnet", "fable", "haiku"):
+            self.assertIn(tok, p.stdout)
+        self.assertNotIn("default", p.stdout.split("\n")[0].split())
+        self.assertIn("ready", p.stdout)
+
+    def test_builtins_not_ready_when_claude_missing(self):
+        env, _, _ = self.fake_tools(claude=False)
+        p = run_swarm(["models"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("not on PATH", p.stdout)
+
+    def test_alias_shows_named_harness_and_resolved_model(self):
+        env, _, _ = self.fake_tools(claude=True)
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(json.dumps({"models": {
+                "glm51": {"harness": "yoke",
+                          "model": "zai-coding-plan/glm-5.1"},
+                "judge": {"harness": "claude", "model": "opus"},
+            }}))
+        p = run_swarm(["models"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("glm51", p.stdout)
+        self.assertIn("yoke", p.stdout)
+        self.assertIn("zai-coding-plan/glm-5.1", p.stdout)
+        self.assertIn("judge", p.stdout)
+        # judge's row names its harness as claude and its resolved model as opus
+        judge_line = [l for l in p.stdout.splitlines() if l.startswith("judge")][0]
+        self.assertIn("claude", judge_line)
+        self.assertIn("opus", judge_line)
+
+    def test_writes_nothing(self):
+        env, _, _ = self.fake_tools(claude=True)
+        before = os.path.exists(self.root) and set(os.listdir(self.root))
+        run_swarm(["models"], env, cwd=self.root)
+        after = os.path.exists(self.root) and set(os.listdir(self.root))
+        self.assertEqual(before, after, "swarm models must not create state")
+
+    def test_legacy_toml_config_warns(self):
+        env, _, _ = self.fake_tools(claude=True)
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write('[spawn]\npermission_mode = "plan"\n')
+        p = run_swarm(["models"], env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("old TOML format", p.stderr)
 
 
 if __name__ == "__main__":

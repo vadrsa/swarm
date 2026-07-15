@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # swarm (SIMPLEST) — the whole tool in one file: CLI verbs + hook entrypoints.
 #
-# Nine concepts, four verbs (+ `world`, which prints the contract). An agent is
+# Nine concepts, four verbs (+ `world`, which prints the contract, and `models`,
+# a read-only discovery verb). An agent is
 # a Claude session in a herdr pane, with a name, a parent, and a journal. A
 # message is a claim on one turn. Everything stored on disk is a fact the
 # filesystem can witness — who, to whom, when, what, and whether it has yet
@@ -26,6 +27,7 @@ import concurrent.futures
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -51,9 +53,13 @@ REASON_CAP = 500         # the record keeps the reason verbatim; this caps only 
 NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newline
 
 # Models a parent may pin. This is a POLICY list, not a capability list — the two differ,
-# and the difference is the honest part. `default` is the escape hatch: it means "I looked
-# at this child and the configured default is the right answer", which is a DECISION. It is
-# not the same as today's silence, where 142 of 143 spawns inherited a default nobody chose.
+# and the difference is the honest part. There is no `default` token: a spawn with no
+# --model is always an error (spawn_mandate_error()), and no configured default can rescue
+# it. Silence is never free — "always force to think" (operator override, CONFIG-NOTES #1,
+# 2026-07-15). This tightens the earlier mandate, which let `--model default` stand in for
+# an explicit choice; that escape hatch is gone — every accepted model resolves to a
+# concrete launcher --model, and config [models] aliases (see read_config) extend this set
+# by name, never by inventing a silent fallback.
 #
 # haiku was banned 2026-07-13 on the claim "it doesn't have auto mode" — a capability claim
 # that was never independently measured (docs/audit/weak-model-delegation-2026-07-13.md's own
@@ -63,7 +69,7 @@ NAME_RE = r"^[a-z0-9][a-z0-9-]{0,39}\Z"  # \Z, not $: $ admits a trailing newlin
 # spawned with acceptEdits, cleared the permission wall, edited a real file unattended, and
 # reached Stop with real last words (`swarm ps` showed it `[live] idle`, not wedged). The ban
 # rested on an unmeasured claim; the measurement says otherwise. Lifted.
-SPAWN_MODELS = ("opus", "sonnet", "fable", "haiku", "default")
+SPAWN_MODELS = ("opus", "sonnet", "fable", "haiku")
 BANNED_MODELS = ()
 # Verbatim from `claude --help` (2026-07-14), the --permission-mode flag's own
 # accepted-values list — not guessed, not carried over from the settings-JSON
@@ -73,7 +79,8 @@ BANNED_MODELS = ()
 PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual",
                      "dontAsk", "plan")
 # The default every spawned child gets unless overridden (--permission-mode or
-# .swarm/config's [spawn] permission_mode). Without it a child inherits the
+# .swarm/config's "spawn" key: {"spawn": {"permission_mode": ...}}). Without
+# it a child inherits the
 # MACHINE's ambient default — which is how the WSL field bug happened: swarm set
 # no mode, his machine defaulted to manual, and every child wedged on the first
 # dialog, rendering as plain "idle" in `ps`. Invisible.
@@ -182,8 +189,8 @@ def spawn_mandate_error():
         "as if it were a finding.\n"
         "  The tell: delete \"I\" from your reason. If it still makes sense, it failed "
         "— a real reason is about what YOU will do, never a property of the model.\n"
-        "  tokens: opus · sonnet · fable · haiku · default (you looked, and the "
-        "configured default is right — that is a decision, not a silence)"
+        "  tokens: opus · sonnet · fable · haiku (plus any config [models] alias — "
+        "see `swarm models`). There is no default: silence is never free."
     )
 
 
@@ -417,61 +424,80 @@ def queue_put(root, rec):
     raise FileExistsError(f"queue name space exhausted near {fn}")
 
 
-def read_flat_toml(path):
-    """Minimal TOML for .swarm/config's flat shape — [section], key = value
-    (quoted string or bare int), # comments — used only where the stdlib
-    tomllib (py3.11+) is unavailable. Not a general TOML parser."""
-    out, section = {}, None
-    with open(path) as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1].strip()
-                out.setdefault(section, {})
-                continue
-            if "=" not in line or section is None:
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip()
-            if v[:1] in "\"'":
-                end = v.find(v[0], 1)
-                if end > 0:
-                    out[section][k] = v[1:end]
-            else:
-                v = v.split("#", 1)[0].strip()
-                try:
-                    out[section][k] = int(v)
-                except ValueError:
-                    out[section][k] = v
-    return out
+def _looks_like_legacy_toml(path):
+    """True if the first non-comment, non-blank line looks like a TOML
+    section header ([spawn] / [middleware] / ...) — the signature of the
+    pre-JSON .swarm/config format. Used only to decide whether a failed
+    json.load deserves a loud warning instead of silent fail-open."""
+    try:
+        with open(path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                return line.startswith("[") and line.endswith("]")
+    except OSError:
+        pass
+    return False
+
+
+def read_config(root):
+    """THE config reader — one file, .swarm/config, JSON. Returns a dict, or
+    {} on ANY error (no file, unreadable, malformed JSON): fail-open, same
+    contract read_flat_toml + the inline tomllib blocks used to give
+    registered_middleware and configured_permission_mode. Those two callers
+    now both go through here, so they read the same values by the same
+    top-level keys (spawn/middleware) — only the parser under them changed.
+
+    Shape (docs/design/PRODUCTIZE.md §2):
+        {
+          "spawn":      { "permission_mode": "auto" },
+          "middleware": { "command": "...", "identity": "...", "timeout": 60 },
+          "harness":    { "yoke": "/absolute/path/to/yoke" },
+          "models":     { "alias": { "harness": "yoke", "model": "..." } }
+        }
+
+    Legacy detection: if the file exists, json.load fails, AND the first
+    non-comment line looks like a TOML section ([spawn]/[middleware]), this
+    is almost certainly the old flat-TOML config surviving an upgrade — print
+    ONE stderr warning so the loss is loud, not silent, and still return {}.
+    The file is never auto-rewritten (bin/swarm:113's self-modifying-config
+    hazard) — the warning tells the human to convert it."""
+    path = os.path.join(root, "config")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        if _looks_like_legacy_toml(path):
+            print(".swarm/config looks like the old TOML format; swarm now "
+                  "reads JSON — see docs/design/PRODUCTIZE.md §2",
+                  file=sys.stderr)
+        return {}
 
 
 def registered_middleware(root):
     """The send middleware, if configured: (identity, command, timeout) from
-    the [middleware] section of .swarm/config (TOML, world-readable):
+    the "middleware" key of .swarm/config (JSON, world-readable):
 
-        [middleware]
-        command  = "python3 /path/to/mw.py"  # required; args allowed (the
-                                             # git core.editor pattern)
-        identity = "middleware"              # optional; the SWARM_AGENT_ID
-                                             # injected, default "middleware"
-        timeout  = 60                        # optional; seconds
+        {"middleware": {
+            "command":  "python3 /path/to/mw.py",  # required; args allowed
+                                                    # (the git core.editor
+                                                    # pattern)
+            "identity": "middleware",              # optional; the
+                                                    # SWARM_AGENT_ID injected,
+                                                    # default "middleware"
+            "timeout":  60                         # optional; seconds
+        }}
 
-    ONE middleware only — a single [middleware] section; a chain belongs
-    inside the middleware, not in the tool. The tool carries NO policy about
-    what the middleware does. None on ANY error — no file, no section, no
-    command key, unparseable — means no middleware, and cmd_send is
-    byte-identical to today (fail-open)."""
+    ONE middleware only — a single "middleware" key; a chain belongs inside
+    the middleware, not in the tool. The tool carries NO policy about what
+    the middleware does. None on ANY error — no file, no key, no command
+    key, unparseable — means no middleware, and cmd_send is byte-identical to
+    today (fail-open)."""
     try:
-        path = os.path.join(root, "config")
-        try:
-            import tomllib
-            with open(path, "rb") as f:
-                conf = tomllib.load(f)
-        except ImportError:
-            conf = read_flat_toml(path)
+        conf = read_config(root)
         mw = conf.get("middleware") or {}
         command = str(mw.get("command") or "").strip()
         if not command:
@@ -485,27 +511,22 @@ def registered_middleware(root):
 
 def configured_permission_mode(root):
     """The operator's chosen default permission mode, if set, from the
-    [spawn] section of .swarm/config:
+    "spawn" key of .swarm/config:
 
-        [spawn]
-        permission_mode = "plan"   # e.g. an operator who wants every child
-                                   # to start cautious, overriding the
-                                   # DEFAULT_PERMISSION_MODE built into swarm
+        {"spawn": {"permission_mode": "plan"}}   # e.g. an operator who wants
+                                                  # every child to start
+                                                  # cautious, overriding the
+                                                  # DEFAULT_PERMISSION_MODE
+                                                  # built into swarm
 
-    None on ANY error — no file, no section, no key, unparseable — meaning
-    "use DEFAULT_PERMISSION_MODE", same fail-open posture as
+    None on ANY error — no file, no key, no permission_mode, unparseable —
+    meaning "use DEFAULT_PERMISSION_MODE", same fail-open posture as
     registered_middleware. NOT validated against PERMISSION_MODES here — the
     one caller (cmd_spawn) validates whatever value it ends up with,
     regardless of source, so there is exactly one place a bad mode is
     rejected."""
     try:
-        path = os.path.join(root, "config")
-        try:
-            import tomllib
-            with open(path, "rb") as f:
-                conf = tomllib.load(f)
-        except ImportError:
-            conf = read_flat_toml(path)
+        conf = read_config(root)
         sp = conf.get("spawn") or {}
         mode = str(sp.get("permission_mode") or "").strip()
         return mode or None
@@ -1141,7 +1162,8 @@ def spawn_header(name, parent):
         f"model's error costs you nothing — pin `sonnet`. If catching a flaw would "
         f"mean redoing the reasoning yourself, pay for `opus`. Say THAT — not why the "
         f"model is good (you do not know, and a guess dressed as a reason is worse "
-        f"than none). Tokens: opus sonnet fable haiku · default.\n\n"
+        f"than none). Tokens: opus sonnet fable haiku, plus any config "
+        f"[models] alias (see `swarm models`). There is no default.\n\n"
         f"Your duties (briefed, not enforced): keep your journal at "
         f".swarm/journal/{name}.md — append timestamped entries in your own words "
         f"as you work, and always before going idle; a reconciliation entry names "
@@ -1369,21 +1391,19 @@ def cmd_spawn(argv):
         die(f"{model} is banned by standing operator policy — see bin/swarm's "
             f"BANNED_MODELS comment for why.")
     if model not in SPAWN_MODELS:
-        die(f"unknown model '{model}' — tokens: {' '.join(SPAWN_MODELS)}. "
-            f"(`default` is a real answer: it means you looked and the configured "
-            f"default is right. It is not the same as saying nothing.)")
+        aliases = tuple(sorted(read_config(root_dir()).get("models") or {}))
+        known = SPAWN_MODELS + aliases
+        die(f"unknown model '{model}' — tokens: {' '.join(known)}. "
+            f"There is no default: every spawn names a real model. "
+            f"See `swarm models` for what's spawnable.")
     if len(reason) > REASON_CAP:
         die(f"--reason is {len(reason)} chars; the cap is {REASON_CAP}. It is a clause, "
             f"not an essay — if it does not fit, the thinking is not done.")
 
-    # `default` means "I chose the configured default" — a DECISION, recorded as one. But the
-    # LAUNCHER must then pass no --model at all (bare `claude`), exactly as an unpinned spawn
-    # did before. So the record and the launcher diverge here ON PURPOSE: the record keeps the
-    # decision ("default"), the launcher enacts it (silence). Collapsing `default` to "" in the
-    # record would erase the very thing this change exists to capture — the difference between
-    # a chosen default and an inherited one, which is invisible in exactly the direction that
-    # produced 142 of 143 blind spawns.
-    launch_model = "" if model == "default" else model
+    # Every accepted model resolves to a concrete launcher --model — there is no longer a
+    # token that means "silence". (The old `default` token collapsed to "" here, exec'ing
+    # bare `claude`; that collapse is gone along with the token.)
+    launch_model = model
 
     root = root_dir()
     parent = my_name()
@@ -1715,6 +1735,44 @@ def cmd_close(argv):
     print(f"files stay under {root} (journal, queue, delivered)")
 
 
+def cmd_models():
+    """Read-only discovery: what --model tokens are spawnable. Writes nothing —
+    no file, no state change. Lists the four builtin Claude tokens (ready iff
+    `claude` is on PATH) and every config [models] alias, each shown with its
+    NAMED harness and resolved model (docs/design/PRODUCTIZE.md §3 — the
+    harness is declared in the alias, never deduced). PR 1 only DEFINES and
+    DISPLAYS this schema; dispatching a yoke alias to a real harness is PR 3."""
+    root = root_dir()
+    conf = read_config(root)   # read_config itself prints the legacy-TOML warning
+
+    claude_ready = shutil.which("claude") is not None
+    rows = []  # (token, harness, resolved model, ready/note)
+    for tok in SPAWN_MODELS:
+        rows.append((tok, "claude", tok, "ready" if claude_ready else "claude not on PATH"))
+
+    aliases = conf.get("models") or {}
+    for name in sorted(aliases):
+        entry = aliases[name] or {}
+        harness = str(entry.get("harness") or "?")
+        model = str(entry.get("model") or "?")
+        if harness == "claude":
+            ready = "ready" if claude_ready else "claude not on PATH"
+        elif harness == "yoke":
+            ready = "ready" if shutil.which("yoke") is not None else "yoke not on PATH"
+        else:
+            ready = f"unknown harness '{harness}'"
+        rows.append((name, harness, model, ready))
+
+    w_tok = max(len(r[0]) for r in rows)
+    w_harness = max(len(r[1]) for r in rows)
+    w_model = max(len(r[2]) for r in rows)
+    print(f"{'TOKEN'.ljust(w_tok)}  {'HARNESS'.ljust(w_harness)}  "
+          f"{'MODEL'.ljust(w_model)}  READY")
+    for tok, harness, model, ready in rows:
+        print(f"{tok.ljust(w_tok)}  {harness.ljust(w_harness)}  "
+              f"{model.ljust(w_model)}  {ready}")
+
+
 def cmd_world():
     # WORLD.md sits at the repo root, one level above bin/ (realpath first:
     # the installed `swarm` is a symlink into the checkout)
@@ -1741,9 +1799,10 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 the diff anyway) → a small model's error is free;
                                 expensive to check (you'd redo the reasoning) →
                                 pay for the strong one. Say THAT, not why the
-                                model is good. Tokens: opus sonnet fable haiku ·
-                                default (a real answer: you looked, and the
-                                configured default is right).
+                                model is good. Tokens: opus sonnet fable haiku,
+                                plus any config [models] alias (see `swarm
+                                models`). There is no default — silence is
+                                never free.
                                 --trust pre-approves --cwd's workspace-trust
                                 prompt (opt-in, default off — for throwaway dirs
                                 only, never for real repos)
@@ -1769,6 +1828,10 @@ name, a parent, and a journal. A message is a claim on one turn.
                                 the one view you scan)
   swarm close <name>            end an agent and its subtree; files stay
   swarm world                   print the contract (two screens)
+  swarm models                  read-only: list spawnable models — the four
+                                builtin Claude tokens, and any config [models]
+                                aliases with their named harness and resolved
+                                model. Writes nothing.
 
 State: ./.swarm (override with SWARM_DIR). Journals at .swarm/journal/<name>.md —
 world-readable; read your children's. deliver/event/restore are hook entrypoints
@@ -1791,6 +1854,8 @@ def main(argv):
         cmd_close(rest)
     elif verb == "world":
         cmd_world()
+    elif verb == "models":
+        cmd_models()
     elif verb == "deliver":
         cmd_deliver()
     elif verb == "event":
