@@ -168,11 +168,20 @@ def resolve_swarm_dir(flag_value):
 #   - MCP tool names are always registered as `<server-name>_<tool-name>`
 #     (packages/opencode/src/mcp/catalog.ts:119: `toolName = (clientName, name) =>
 #     sanitize(clientName) + "_" + sanitize(name)`) — always containing an underscore.
-#   - Every BUILTIN tool id is a single bare word with no underscore
-#     (packages/opencode/src/tool/registry.ts:226-244: invalid, question, shell, read,
-#     glob, grep, edit, write, task, fetch, todo, search, skill, patch, execute, lsp,
-#     plan) — so a glob that matches "contains an underscore" catches every MCP tool
-#     from every server, regardless of name, and no builtin.
+#   - Almost every BUILTIN tool id is a single bare word with no underscore
+#     (packages/opencode/src/tool/registry.ts: read, glob, grep, edit, write, task,
+#     webfetch, websearch, shell, question, skill, lsp, plan, invalid, todowrite) — so a
+#     glob matching "contains an underscore" catches every MCP tool from every server,
+#     regardless of name, and (almost) no builtin.
+#   - KNOWN COLLATERAL, accepted and tested: exactly ONE builtin id contains an
+#     underscore — `apply_patch` (ApplyPatchTool, registry.ts:31,110; its id is the
+#     literal string "apply_patch", tool/apply_patch.ts:22-23). So "*_*" ALSO denies
+#     apply_patch. This is acceptable: `edit` and `write` (no underscore) survive, so a
+#     yoke coordinator keeps full file-editing capability; apply_patch is a patch-hunk
+#     convenience the fork itself gates behind a usePatch flag (registry.ts:294), not a
+#     capability the coordinator role needs. Flagged here (rather than hidden) and pinned
+#     by test_apply_patch_builtin_is_stripped_known_collateral so this stays a conscious,
+#     visible fact if the builtin set ever changes.
 #   - The pump plugin registers no custom tool (only an `event` hook — see
 #     harness/swarm-pump.js), so it is not caught either; if a future plugin DID register
 #     a tool without going through the default MCP path it would still be namespaced

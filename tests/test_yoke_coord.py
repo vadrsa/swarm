@@ -115,10 +115,29 @@ class TestMcpStripConfig(Base):
         for mcp_name in ("bridgemind_create_task", "bridgememory_search_memories",
                          "playwright_navigate"):
             self.assertTrue(regex.match(mcp_name), f"{mcp_name!r} should be stripped")
-        # Builtin tool ids (tool/registry.ts:226-244) -- single bare words, no underscore.
-        for builtin in ("read", "write", "edit", "bash", "shell", "glob", "grep",
-                         "task", "fetch", "todo", "search", "skill", "patch"):
+        # Builtin tool ids (tool/registry.ts) -- real registered ids taken from the fork
+        # registry (not a plausible-looking guess). All bare single words with no
+        # underscore, so the strip leaves them alone -- most importantly edit + write, so
+        # the coordinator keeps full file-editing capability.
+        for builtin in ("read", "write", "edit", "glob", "grep", "task",
+                         "webfetch", "websearch", "shell", "question", "skill",
+                         "lsp", "plan", "invalid", "todowrite"):
             self.assertFalse(regex.match(builtin), f"{builtin!r} must NOT be stripped")
+
+    def test_apply_patch_builtin_is_stripped_known_collateral(self):
+        # KNOWN, ACCEPTED COLLATERAL (documented above mcp_strip_config in harness/yoke):
+        # exactly one builtin id contains an underscore -- `apply_patch` (its id is the
+        # literal "apply_patch", tool/apply_patch.ts:22-23) -- so "*_*" denies it too.
+        # This test PINS that fact so it stays a conscious, visible decision rather than a
+        # silent surprise: if a future change made apply_patch matter to a yoke agent, this
+        # assertion is where the collateral becomes re-decidable. edit/write survive
+        # (asserted above), so file-editing capability is unaffected.
+        import re
+        pattern = yokemod.MCP_STRIP_TOOLS_KEY
+        regex = re.compile("^" + pattern.replace("*", ".*") + "$")
+        self.assertTrue(regex.match("apply_patch"),
+                        "apply_patch contains an underscore and IS stripped -- known "
+                        "collateral, see mcp_strip_config's comment in harness/yoke")
 
 
 class TestPermissionModeTranslation(Base):
