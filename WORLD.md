@@ -21,8 +21,12 @@ stores no claim about attention, compliance, or intent.
    and you pay for the strong one. It is **not** "why is this model good" —
    that question demands knowledge nobody has, so it gets answered fluently and
    wrongly, laundering a guess into a decision. The tell: delete "I" from your
-   reason; if it still makes sense, it failed. Tokens: `opus` `sonnet` `fable` ·
-   `default` (a real answer — you looked, and the configured default is right).
+   reason; if it still makes sense, it failed. Tokens: `opus` `sonnet` `fable`
+   `haiku`, plus any alias your `.swarm/config` defines. **There is no
+   `default`: a spawn that names no model is always an error.** An alias
+   names its harness explicitly — `claude` or **yoke**, the cheap-model
+   harness — never guessed from the model string's shape. `swarm models`
+   lists every spawnable token, its harness, and whether it's ready.
 4. **`swarm send <name>`** — **a message is a claim on one turn.** It is queued
    as a file and delivered **whole, one per turn, oldest first**, headed by its
    sender and their relation to you (parent / child / sibling / OPERATOR).
@@ -69,7 +73,7 @@ stores no claim about attention, compliance, or intent.
   drained by its reader: the tool never delivers there — the human's side
   moves the mail to `delivered/` and journals the claim before acting on it.
 - **A configured send middleware sits on the send path.** When `.swarm/config`
-  carries a `[middleware]` section, every `swarm send` runs its command in the
+  (one JSON file) carries a `"middleware"` key, every `swarm send` runs its command in the
   sender's process, before the message is queued, with the full envelope —
   from, to, ts, body — on stdin. Its exit code is the whole verdict: 0 passes
   the message through (queued for its recipient unchanged); 100 means the

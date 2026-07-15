@@ -97,3 +97,9 @@ echo "  • Start a NEW Claude Code session so it picks up the skill (or its upd
 echo "  • Inside a herdr pane, say e.g.  \"start a swarm to <goal>\""
 echo "  • The tool writes state into a .swarm/ dir in your project — add it to"
 echo "    that project's .gitignore if you don't want it committed."
+echo "  • .swarm/config is JSON now (it used to be flat-TOML-ish). An old-format"
+echo "    file still there after upgrading will warn on the next 'swarm models'"
+echo "    or spawn and fail open (no middleware, no permission-mode default) —"
+echo "    convert it to the JSON shape in docs/design/PRODUCTIZE.md §2."
+# TODO(PR2): note the yoke prereq (bun + a configured opencode fork) here once
+# yoke's install.sh wiring lands.

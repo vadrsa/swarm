@@ -35,7 +35,13 @@ glue; the work itself goes to children. You doing the work is the failure mode.
    Nothing matched → the strong model. This is a **fit** rule, not a thrift rule;
    if saving would put a cheap model where its error goes uncaught, refuse the
    saving. Say the choice in your journal at the spawn (`spawned <name> on <model>
-   — <clause>`); an unnamed model is a step skipped, like an unwritten brief. The
+   — <clause>`); an unnamed model is a step skipped, like an unwritten brief.
+   **There is no `default` token — every spawn names a real model, or it is
+   refused.** A cheap-tier choice is an alias your `.swarm/config` defines,
+   naming its harness explicitly (`claude` or **yoke**, the harness for
+   non-Claude cheap models) and the real model string underneath — never
+   guessed from the token's shape. Run `swarm models` to see every spawnable
+   token, its harness, and whether it's ready before you pick one. The
    rule, its evidence, its limits, and the model IDs:
    [docs/design/MODEL-FIT.md](../docs/design/MODEL-FIT.md).
 3. **Reconciliation asks the tree question — grow and shrink.** At every
