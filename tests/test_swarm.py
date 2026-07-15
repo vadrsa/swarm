@@ -4,8 +4,10 @@ Runnable as `python3 -m unittest test_swarm -v` or `python3 -m pytest test_swarm
 Live-pane behaviors (doorbell, stop re-ring) are exempt per the brief; their
 decision logic (select_next on a non-empty queue) is covered here.
 """
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import shlex
@@ -1135,7 +1137,7 @@ class TestQueuePut(Base):
 
 
 class TestRegisteredMiddleware(Base):
-    """.swarm/config's [middleware] section is registration; any defect in it
+    """.swarm/config's "middleware" key is registration; any defect in it
     means no middleware (None), which is the fail-open branch. The tool
     carries no policy about what the configured middleware does."""
 
@@ -1144,39 +1146,88 @@ class TestRegisteredMiddleware(Base):
         with open(os.path.join(self.root, "config"), "w") as f:
             f.write(text)
 
+    def _config_json(self, obj):
+        self._config(json.dumps(obj))
+
     def test_absent_config_is_none(self):
         self.assertIsNone(sw.registered_middleware(self.root))
 
     def test_full_section_parsed(self):
-        self._config('[middleware]\ncommand = "python3 /path/to/mw.py --flag"\n'
-                     'identity = "screener"\ntimeout = 5\n')
+        self._config_json({"middleware": {
+            "command": "python3 /path/to/mw.py --flag",
+            "identity": "screener", "timeout": 5}})
         self.assertEqual(sw.registered_middleware(self.root),
                          ("screener", "python3 /path/to/mw.py --flag", 5))
 
     def test_identity_and_timeout_defaults(self):
-        self._config('[middleware]\ncommand = "/path/mw"\n')
+        self._config_json({"middleware": {"command": "/path/mw"}})
         ident, command, timeout = sw.registered_middleware(self.root)
         self.assertEqual(ident, "middleware")
         self.assertEqual(command, "/path/mw")
         self.assertEqual(timeout, sw.MIDDLEWARE_TIMEOUT)
 
     def test_defective_configs_are_none(self):
-        for bad in ("", "[middleware]\n", "[middleware]\ncommand = \"\"\n",
-                    "[other]\ncommand = \"/path\"\n", "not toml at [all"):
+        for bad in ("", '{"middleware": {}}', '{"middleware": {"command": ""}}',
+                    '{"other": {"command": "/path"}}', "not json at all"):
             self._config(bad)
             self.assertIsNone(sw.registered_middleware(self.root),
                               f"{bad!r} must read as no middleware")
 
-    def test_fallback_parser_handles_the_flat_shape(self):
-        # the tiny non-tomllib path: sections, quoted strings, bare ints,
-        # comments — enough for .swarm/config, nothing more
-        self._config('# a comment\n[middleware]\n'
-                     'command = "python3 mw.py"  # inline note\n'
-                     'timeout = 7\n[other]\nx = 1\n')
-        conf = sw.read_flat_toml(os.path.join(self.root, "config"))
-        self.assertEqual(conf["middleware"],
-                         {"command": "python3 mw.py", "timeout": 7})
-        self.assertEqual(conf["other"], {"x": 1})
+
+class TestReadConfig(Base):
+    """read_config is THE reader: .swarm/config as JSON, {} on any error
+    (fail-open). Legacy flat-TOML files are detected and warned about, once,
+    on stderr — never auto-rewritten — and still fail open to {}."""
+
+    def _config(self, text):
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(text)
+
+    def test_absent_file_is_empty_dict(self):
+        self.assertEqual(sw.read_config(self.root), {})
+
+    def test_json_read_works(self):
+        self._config(json.dumps({
+            "spawn": {"permission_mode": "plan"},
+            "middleware": {"command": "python3 mw.py", "timeout": 7},
+            "harness": {"yoke": "/abs/path/to/yoke"},
+            "models": {"glm51": {"harness": "yoke",
+                                  "model": "zai-coding-plan/glm-5.1"}},
+        }))
+        conf = sw.read_config(self.root)
+        self.assertEqual(conf["spawn"], {"permission_mode": "plan"})
+        self.assertEqual(conf["middleware"]["command"], "python3 mw.py")
+        self.assertEqual(conf["harness"]["yoke"], "/abs/path/to/yoke")
+        self.assertEqual(conf["models"]["glm51"]["harness"], "yoke")
+
+    def test_legacy_toml_warns_and_fails_open(self):
+        self._config('[middleware]\ncommand = "python3 mw.py"\ntimeout = 7\n')
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            conf = sw.read_config(self.root)
+        self.assertEqual(conf, {})
+        self.assertIn("old TOML format", stderr.getvalue())
+        self.assertIn("PRODUCTIZE.md", stderr.getvalue())
+
+    def test_legacy_toml_warning_is_printed_exactly_once(self):
+        self._config('[spawn]\npermission_mode = "plan"\n')
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            sw.read_config(self.root)
+        self.assertEqual(stderr.getvalue().count("old TOML format"), 1)
+
+    def test_malformed_json_fails_open_no_warning(self):
+        self._config("{not valid json at all")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            conf = sw.read_config(self.root)
+        self.assertEqual(conf, {})
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_empty_file_fails_open(self):
+        self._config("")
+        self.assertEqual(sw.read_config(self.root), {})
 
 
 if __name__ == "__main__":
