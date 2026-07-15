@@ -70,6 +70,15 @@ printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGS"
 exit 0
 '''
 
+FAKE_YOKE = r'''#!/usr/bin/env bash
+# fake yoke: record argv exactly as received (one per line, so multi-line
+# tasks are visible whole), then exit with $FAKE_YOKE_EXIT (default 0). No
+# real fork, no real herdr call — this is the PR3 unit boundary: bin/swarm's
+# dispatch is exercised end to end, yoke itself is a stand-in.
+printf '%s\n' "$@" > "$FAKE_YOKE_ARGS"
+exit "${FAKE_YOKE_EXIT:-0}"
+'''
+
 # fake herdr that models herdr's real async teardown: `tab close`/`pane close`
 # return 0 immediately (the lie the bug trusted), but the id stays in `list`
 # for one poll after the close call, then is gone from the SECOND poll on.
@@ -180,6 +189,17 @@ class Base(unittest.TestCase):
                "FAKE_HERDR_LOG": log, "FAKE_CLAUDE_ARGS": argsf,
                "SWARM_READY_TIMEOUT": "10"}
         return env, log, argsf
+
+    def fake_yoke(self, exit_code=0):
+        """A fake `yoke` binary at a path of the caller's choosing (NOT
+        necessarily on PATH — the alias's [harness].yoke value is an
+        absolute path, exactly like a real install), recording its argv."""
+        path = os.path.join(self.bindir, "fake-yoke")
+        argsf = os.path.join(self.root, "yoke.args")
+        with open(path, "w") as f:
+            f.write(FAKE_YOKE)
+        os.chmod(path, 0o755)
+        return path, argsf, exit_code
 
     def async_fake_herdr(self, tab_ids=(), pane_ids=()):
         """Fake herdr modeling real async teardown: close returns 0 at once,
@@ -709,23 +729,26 @@ class TestSpawnMandate(Base):
         self.assertIn("unknown model", p.stderr)
 
     def test_unknown_model_error_names_config_aliases(self):
-        # PR 1 (C1): the refusal names the builtin tokens PLUS any config
-        # [models] aliases, and points at `swarm models` — it does NOT
-        # dispatch to the alias (that's PR 3); an alias name is still an
-        # unknown --model token on cmd_spawn's Claude-only path today.
+        # PR 3 (C3): an alias name now RESOLVES instead of hitting the
+        # unknown-model gate (superseding the PR 1-era behavior, where every
+        # alias was still an unknown --model token on the Claude-only path).
+        # This fixture's alias has no [harness].yoke configured, so it hits
+        # the harness-not-configured refusal — a different gate, but still
+        # name-not-burned. The unknown-model message + alias listing is
+        # covered by test_unknown_model_is_refused and
+        # TestUnifiedDispatch.test_unknown_alias_refused_before_name_burn.
         env, _, _ = self.fake_tools(claude=True)
         os.makedirs(self.root, exist_ok=True)
         with open(os.path.join(self.root, "config"), "w") as f:
             f.write(json.dumps({"models": {
                 "glm51": {"harness": "yoke", "model": "zai-coding-plan/glm-5.1"}}}))
         p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
-                       "--reason", "an alias is not yet dispatchable in PR 1; this "
-                       "assertion reads the refusal, not a launched child"],
+                       "--reason", "an alias resolves now; with no [harness].yoke "
+                       "configured this must refuse before the name is burned"],
                       env, cwd=self.root)
         self.assertEqual(p.returncode, 1)
-        self.assertIn("unknown model", p.stderr)
-        self.assertIn("glm51", p.stderr)
-        self.assertIn("swarm models", p.stderr)
+        self.assertIn("harness", p.stderr)
+        self.assertIn("yoke", p.stderr)
         self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
 
     def test_default_model_token_is_refused_no_escape_hatch(self):
@@ -810,6 +833,315 @@ class TestSpawnMandate(Base):
         self.assertIn("--model", task)
         self.assertIn("--reason", task)
         self.assertIn("cheaply tell", task)
+
+
+class TestUnifiedDispatch(Base):
+    """PR 3 (docs/design/PRODUCTIZE.md §3/§7): `swarm spawn --model <alias>`
+    dispatches to the alias's NAMED harness — claude (byte-for-byte
+    unchanged) or yoke (subprocess, mocked here). No slash heuristic
+    anywhere: a '/'-containing model reaches yoke ONLY through an explicit
+    alias whose harness says so."""
+
+    def _config(self, models=None, harness=None, extra=None):
+        conf = {}
+        if models is not None:
+            conf["models"] = models
+        if harness is not None:
+            conf["harness"] = harness
+        if extra:
+            conf.update(extra)
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, "config"), "w") as f:
+            f.write(json.dumps(conf))
+
+    def _yoke_env(self, yoke_path, exit_code=0):
+        env = {"PATH": self.bindir + ":/usr/bin:/bin",
+               "SWARM_DIR": self.root, "HERDR_ENV": "1",
+               "FAKE_YOKE_EXIT": str(exit_code)}
+        return env
+
+    def test_alias_dispatches_to_yoke_subprocess_with_correct_argv(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "do the thing", "--model", "glm51",
+                       "--reason", "this test asserts the exact argv yoke "
+                       "receives; a wrong translation is caught mechanically"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[0], "worker")
+        self.assertEqual(argv[1], "do the thing")
+        self.assertEqual(argv[argv.index("--model") + 1], "zai-coding-plan/glm-5.1")
+        self.assertEqual(argv[argv.index("--reason") + 1],
+                         "this test asserts the exact argv yoke "
+                         "receives; a wrong translation is caught mechanically")
+        self.assertEqual(argv[argv.index("--swarm-dir") + 1], self.root)
+        self.assertEqual(argv[argv.index("--parent") + 1], "operator")
+
+    def test_multiline_task_survives_argv_handoff_to_yoke(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        task = "line one\nline two\nline three"
+        p = run_swarm(["spawn", "worker", task, "--model", "glm51",
+                       "--reason", "a multi-line task must reach yoke's argv "
+                       "whole, not truncated or split at the first newline"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        # printf '%s\n' splits the recorded task back across lines; rejoin
+        # the three lines that follow the name to recover the original.
+        idx = argv.index("worker") + 1
+        self.assertEqual("\n".join(argv[idx:idx + 3]), task)
+
+    def test_alias_to_claude_path_unchanged(self):
+        env, log, argsf = self.fake_tools(claude=True)
+        self._config(models={"judge": {"harness": "claude", "model": "opus"}})
+        p = run_swarm(["spawn", "worker", "do the thing", "--model", "judge",
+                       "--reason", "an alias naming harness claude must take "
+                       "the byte-for-byte-unchanged claude path"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for _ in range(50):
+            if os.path.exists(argsf):
+                break
+            time.sleep(0.1)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+
+    def test_builtin_claude_tokens_need_no_config(self):
+        # The one implicit resolution: opus/sonnet/fable/haiku resolve to
+        # {harness: claude, model: <token>} with NO config file at all —
+        # today's zero-config Claude spawn, preserved exactly.
+        env, log, argsf = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t", "--model", "sonnet",
+                       "--reason", "no config file exists in this fixture; "
+                       "the builtin must still resolve and reach claude"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "config")))
+
+    def test_config_alias_shadows_a_builtin_name(self):
+        # "opus" redefined in config as a yoke alias: config wins, no special
+        # case needed — the resolver checks aliases before builtins.
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"opus": {"harness": "yoke",
+                                       "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "opus",
+                       "--reason", "a config alias named 'opus' must shadow "
+                       "the builtin and route to yoke, not to claude"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[argv.index("--model") + 1], "zai-coding-plan/glm-5.1")
+
+    def test_no_slash_routing_a_slash_model_without_an_alias_is_unknown(self):
+        # C3's whole point: harness is NAMED, never deduced from token shape.
+        # A '/'-containing token with NO config alias must be refused exactly
+        # like any other unknown token — it must NOT silently reach yoke.
+        env, _, _ = self.fake_tools(claude=True)
+        p = run_swarm(["spawn", "worker", "t",
+                       "--model", "zai-coding-plan/glm-5.1",
+                       "--reason", "no alias defines this token; the slash "
+                       "must not be read as a routing signal"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown model", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_unknown_alias_refused_before_name_burn(self):
+        env, _, _ = self.fake_tools(claude=True)
+        self._config(models={"glm51": {"harness": "yoke", "model": "x/y"}})
+        p = run_swarm(["spawn", "worker", "t", "--model", "not-an-alias",
+                       "--reason", "an alias that names neither a config "
+                       "entry nor a builtin must refuse before the tombstone"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("unknown model", p.stderr)
+        self.assertIn("glm51", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_unknown_harness_name_refused_before_name_burn(self):
+        env, _, _ = self.fake_tools(claude=True)
+        self._config(models={"weird": {"harness": "gpt5", "model": "x/y"}})
+        p = run_swarm(["spawn", "worker", "t", "--model", "weird",
+                       "--reason", "an alias naming a harness that is "
+                       "neither claude nor yoke must refuse cleanly"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("harness 'gpt5'", p.stderr)
+        self.assertIn("claude, yoke", p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_yoke_harness_not_configured_refused_before_name_burn(self):
+        env, _, _ = self.fake_tools(claude=True)
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}})
+        # NOTE: no "harness" key at all -- [harness].yoke is unset.
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "yoke is not configured; the refusal "
+                       "must name the exact config key to add"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('"harness"', p.stderr)
+        self.assertIn('"yoke"', p.stderr)
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_yoke_boot_failure_propagates_exit_code_and_points_at_boot_log(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path, exit_code=1)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "a failing yoke must be reported by "
+                       "bin/swarm, not silently swallowed"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("spawn failed", p.stderr)
+        self.assertIn("boot.log", p.stderr)
+
+    def test_permission_mode_plan_threads_to_yoke_argv(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "plan must reach yoke's own argv, threaded "
+                       "verbatim by bin/swarm's dispatch",
+                       "--permission-mode", "plan"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+
+    def test_permission_mode_manual_refused_for_yoke(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "manual means ask-a-human; a yoke agent "
+                       "is unattended and must refuse this mode",
+                       "--permission-mode", "manual"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("ask a human", p.stderr)
+        self.assertFalse(os.path.exists(argsf), "yoke must never be invoked")
+        self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+
+    def test_permission_mode_dontask_refused_for_yoke(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "dontAsk is also ask-a-human in spirit; "
+                       "must be refused for the same reason as manual",
+                       "--permission-mode", "dontAsk"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("ask a human", p.stderr)
+        self.assertFalse(os.path.exists(argsf), "yoke must never be invoked")
+
+    def test_yoke_fork_configured_via_harness_key_reaches_argv(self):
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path, "yoke_fork": "/opt/oc-fork"})
+        env = self._yoke_env(yoke_path)
+        env["FAKE_YOKE_ARGS"] = argsf
+        p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                       "--reason", "[harness].yoke_fork must thread through "
+                       "to yoke's --yoke-fork flag"],
+                      env, cwd=self.root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(argsf) as f:
+            argv = f.read().splitlines()
+        self.assertEqual(argv[argv.index("--yoke-fork") + 1], "/opt/oc-fork")
+
+    def test_provider_not_authed_refused_before_name_burn(self):
+        # Isolate HOME so this test is deterministic regardless of what's
+        # really authed on the machine running the suite: an auth.json that
+        # names a DIFFERENT provider than the alias's model.
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        fake_home = tempfile.mkdtemp(prefix="swarm-fakehome-")
+        try:
+            auth_dir = os.path.join(fake_home, ".local", "share", "opencode")
+            os.makedirs(auth_dir)
+            with open(os.path.join(auth_dir, "auth.json"), "w") as f:
+                json.dump({"deepseek": {"type": "api", "key": "x"}}, f)
+            env = self._yoke_env(yoke_path)
+            env["FAKE_YOKE_ARGS"] = argsf
+            env["HOME"] = fake_home
+            p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                           "--reason", "zai-coding-plan is not in this fake "
+                           "auth store; the refusal must name it and list "
+                           "what IS authed"],
+                          env, cwd=self.root)
+            self.assertEqual(p.returncode, 1)
+            self.assertIn("zai-coding-plan", p.stderr)
+            self.assertIn("not authed", p.stderr)
+            self.assertIn("deepseek", p.stderr)
+            self.assertFalse(os.path.exists(argsf), "yoke must never be invoked")
+            self.assertFalse(os.path.exists(sw.journal_path(self.root, "worker")))
+        finally:
+            shutil.rmtree(fake_home, ignore_errors=True)
+
+    def test_provider_authed_check_fails_open_with_no_auth_file(self):
+        # No auth.json at all (fresh machine) must NOT block a spawn that
+        # would otherwise work — the check is a courtesy, not a gate that can
+        # wedge everyone until they've run opencode's own auth login.
+        yoke_path, argsf, _ = self.fake_yoke()
+        self._config(models={"glm51": {"harness": "yoke",
+                                        "model": "zai-coding-plan/glm-5.1"}},
+                     harness={"yoke": yoke_path})
+        fake_home = tempfile.mkdtemp(prefix="swarm-fakehome-")
+        try:
+            env = self._yoke_env(yoke_path)
+            env["FAKE_YOKE_ARGS"] = argsf
+            env["HOME"] = fake_home
+            p = run_swarm(["spawn", "worker", "t", "--model", "glm51",
+                           "--reason", "no auth.json at all must fail open, "
+                           "not refuse the spawn"],
+                          env, cwd=self.root)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        finally:
+            shutil.rmtree(fake_home, ignore_errors=True)
+
+    def test_no_code_path_infers_yoke_from_a_slash(self):
+        # Static assertion on the dispatch source itself: resolve_model_alias
+        # must decide harness ONLY from the alias/builtin table, never by
+        # inspecting the model string's shape for a '/'.
+        import inspect
+        src = inspect.getsource(sw.resolve_model_alias)
+        self.assertNotIn("'/'", src)
+        self.assertNotIn('"/"', src)
 
 
 class TestEventCli(Base):

@@ -1333,6 +1333,91 @@ def pre_trust_dir(abspath):
         return False
 
 
+OPENCODE_AUTH_PATH = os.path.expanduser("~/.local/share/opencode/auth.json")
+
+
+def resolve_model_alias(model, conf):
+    """C3 (docs/design/PRODUCTIZE.md §3): --model always names an alias, and
+    the alias names its harness EXPLICITLY — there is no slash heuristic and
+    no bare-token-with-slash path. Returns (harness, resolved_model) or
+    (None, None) if `model` names neither a config alias nor a builtin.
+
+    Resolution order:
+      1. A config [models] alias — SHADOWS a same-named builtin (config wins).
+      2. One of the four implicit builtin Claude tokens (opus/sonnet/fable/
+         haiku) — resolves to {harness: "claude", model: <token>} with NO
+         config entry needed. This is the ONE implicit resolution kept from
+         today's zero-config Claude spawn; every other token must be an
+         explicit alias naming its harness."""
+    aliases = conf.get("models") or {}
+    entry = aliases.get(model)
+    if entry is not None:
+        harness = str(entry.get("harness") or "")
+        resolved = str(entry.get("model") or "")
+        return harness, resolved
+    if model in SPAWN_MODELS:
+        return "claude", model
+    return None, None
+
+
+def provider_auth_refusal(model):
+    """Cheap, best-effort check: is the provider prefix of a yoke `model`
+    (e.g. "zai-coding-plan" out of "zai-coding-plan/glm-5.1") present in
+    opencode's own auth store? Returns a one-sentence refusal string if NOT
+    authed, or None if authed / the check can't be done cheaply (fail-open —
+    an unreadable or absent auth.json must never block a spawn that would
+    otherwise have worked; yoke itself will surface a real auth failure).
+    Deferred per the design: this reads opencode's auth store as a courtesy
+    early check, not a guarantee — the authoritative check is opencode's own,
+    inside the fork, which this PR does not reach into."""
+    if "/" not in model:
+        return None
+    provider = model.split("/", 1)[0]
+    try:
+        with open(OPENCODE_AUTH_PATH) as f:
+            authed = json.load(f)
+    except Exception:
+        return None
+    if provider in authed:
+        return None
+    known = ", ".join(sorted(authed)) or "(none)"
+    return (f"provider '{provider}' (from model '{model}') is not authed in "
+            f"opencode ({OPENCODE_AUTH_PATH}) — authed providers: {known}. "
+            f"Run opencode's auth login for '{provider}' first.")
+
+
+def dispatch_yoke(name, task, model, parent, reason, root, yoke_path, conf,
+                   permission_mode):
+    """C3 yoke path (docs/design/PRODUCTIZE.md §3): subprocess (NOT exec —
+    bin/swarm stays alive to report failure and propagate exit code) the
+    installed `yoke` command. yoke claims its own tombstone/agent-record and
+    does its own herdr tab; bin/swarm's job here is purely to translate its
+    own flags into yoke's argv and pass stdout/stderr + exit code through."""
+    argv = [yoke_path, name, task,
+            "--model", model,
+            "--parent", parent,
+            "--reason", reason,
+            "--swarm-dir", root]
+    yoke_fork = (conf.get("harness") or {}).get("yoke_fork") or os.environ.get("YOKE_FORK")
+    if yoke_fork:
+        argv += ["--yoke-fork", yoke_fork]
+    # C4: thread the (already-validated, already-yoke-compatible) permission
+    # mode through. PR3 only THREADS the flag + refuses ask-a-human modes
+    # (done above, before dispatch); the opencode permission-map translation
+    # under this flag is PR4/yoke's job — if the installed yoke doesn't yet
+    # accept --permission-mode, this flag reaching it as an unknown flag is a
+    # yoke-side gap for PR4 to close, not something bin/swarm silently drops.
+    argv += ["--permission-mode", permission_mode]
+    p = subprocess.run(argv)
+    if p.returncode != 0:
+        ws = os.path.join(os.path.dirname(os.path.realpath(yoke_path)),
+                           f"ws-{name}")
+        log = os.path.join(ws, "boot.log")
+        print(f"swarm: spawn failed (yoke exited {p.returncode}) — check the "
+              f"boot log at {log}", file=sys.stderr)
+    sys.exit(p.returncode)
+
+
 def cmd_spawn(argv):
     if len(argv) < 2:
         die('spawn needs: swarm spawn <name> "<task>" --model M --reason "<why>" '
@@ -1390,8 +1475,11 @@ def cmd_spawn(argv):
     if model.lower() in BANNED_MODELS:
         die(f"{model} is banned by standing operator policy — see bin/swarm's "
             f"BANNED_MODELS comment for why.")
-    if model not in SPAWN_MODELS:
-        aliases = tuple(sorted(read_config(root_dir()).get("models") or {}))
+    root = root_dir()
+    conf = read_config(root)
+    harness, launch_model = resolve_model_alias(model, conf)
+    if harness is None:
+        aliases = tuple(sorted((conf.get("models") or {}).keys()))
         known = SPAWN_MODELS + aliases
         die(f"unknown model '{model}' — tokens: {' '.join(known)}. "
             f"There is no default: every spawn names a real model. "
@@ -1400,12 +1488,6 @@ def cmd_spawn(argv):
         die(f"--reason is {len(reason)} chars; the cap is {REASON_CAP}. It is a clause, "
             f"not an essay — if it does not fit, the thinking is not done.")
 
-    # Every accepted model resolves to a concrete launcher --model — there is no longer a
-    # token that means "silence". (The old `default` token collapsed to "" here, exec'ing
-    # bare `claude`; that collapse is gone along with the token.)
-    launch_model = model
-
-    root = root_dir()
     parent = my_name()
 
     # Resolve the permission mode BEFORE the name is claimed, same reasoning as
@@ -1419,6 +1501,39 @@ def cmd_spawn(argv):
     if permission_mode not in PERMISSION_MODES:
         die(f"unknown --permission-mode '{permission_mode}' — accepted values: "
             f"{', '.join(PERMISSION_MODES)} (verbatim from `claude --help`).")
+
+    # C3 dispatch (docs/design/PRODUCTIZE.md §3): the harness is NAMED by the
+    # alias, never deduced from the model token's shape. Everything below is a
+    # refusal that must fire BEFORE the name is claimed — same reasoning as the
+    # mandate guard above.
+    yoke_path = None
+    if harness == "yoke":
+        yoke_path = (conf.get("harness") or {}).get("yoke")
+        if not yoke_path:
+            die("alias resolves to harness 'yoke' but [harness].yoke is not "
+                "configured in .swarm/config — add "
+                '{"harness": {"yoke": "/path/to/yoke"}} (see `swarm models`).')
+        auth_note = provider_auth_refusal(launch_model)
+        if auth_note:
+            die(auth_note)
+        # C4: --permission-mode must be EXPRESSIBLE for yoke too, but manual/
+        # dontAsk mean "ask a human" — refuse rather than silently wedge an
+        # unattended agent (docs/design/PRODUCTIZE.md §4).
+        if permission_mode in ("manual", "dontAsk"):
+            die(f"--permission-mode {permission_mode} means \"ask a human\" — "
+                f"a yoke agent is unattended and has no one to ask. Use auto "
+                f"(default), plan, acceptEdits, or bypassPermissions.")
+    elif harness != "claude":
+        die(f"alias names harness '{harness}'; the harnesses are claude, yoke.")
+
+    if harness == "yoke":
+        # yoke claims its OWN tombstone (same claim_name contract, its own
+        # copy) — bin/swarm must not claim it first, or the child's own claim
+        # would collide with its parent's. bin/swarm stays alive (subprocess,
+        # not exec) only to pass argv/exit code through and report failure.
+        dispatch_yoke(name, task, launch_model, parent, reason, root,
+                      yoke_path, conf, permission_mode)
+        return
 
     # Claim the name FIRST: journal-as-tombstone. A name ever used errors here.
     try:
