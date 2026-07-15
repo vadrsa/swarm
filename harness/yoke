@@ -36,6 +36,16 @@ THE 3 FIXES over the R&D script (docs/design/PRODUCTIZE.md §5):
      the YOKE_FORK env var (else refuse — it is genuinely machine-specific).
   3. Real free-port acquisition (free_port() below) instead of a salted-hash guess,
      shipped so any future port-binding path can never regress to that bug.
+
+PRODUCTIZE PR 4 additions (docs/design/PRODUCTIZE.md §6, §4/C4):
+  - Non-swarm MCP tools are stripped from the workspace opencode.json via a `"tools"`
+    glob-deny, so the cheap coordinator's toolset never includes a leaked MCP server's
+    tools (see mcp_strip_config() below for the exact key and where it was confirmed).
+  - --permission-mode translates to opencode's per-tool permission map per §4's table
+    (permission_map_for_mode() below). This is a BEST-EFFORT TRANSLATION, not a claim
+    that opencode's behavior under a given map is identical to Claude's named mode —
+    §4 states this limit explicitly, and the tests here assert the map yoke WRITES,
+    not opencode's runtime behavior under it.
 """
 import os
 import sys
@@ -132,6 +142,86 @@ def resolve_swarm_dir(flag_value):
     die("no swarm dir: pass --swarm-dir <root>/.swarm or set the SWARM_DIR env var")
 
 
+# The MCP-strip mechanism, confirmed (not invented) against the opencode fork's own
+# config schema and docs, since neither of the two design-cited sources
+# (coord-tui/COORD-TUI-FINDINGS.md, coord-tui/tasks/DRIVER-PROTOCOL.md) names the exact
+# key — they only say "strip non-swarm MCP tools" (COORD-TUI-FINDINGS.md:161-164) and,
+# in the separate coord-test report, "Consider stripping non-swarm MCP tools from the
+# coordinator's opencode config" (swarm-rnd/coord-test/COORD-FINDINGS.md:198-199) —
+# neither names a key.
+#
+# The key, confirmed by reading the fork itself:
+#   - Per-server `mcp.<name>.enabled: false` (packages/web/src/content/docs/
+#     mcp-servers.mdx:34,43; schema at packages/core/src/v1/config/mcp.ts:17,47) exists,
+#     but requires enumerating server names in advance — the leaked servers
+#     (bridgemind/bridgememory/playwright) come from the OPERATOR's own global opencode
+#     config, not from anything yoke writes, so yoke cannot name them ahead of time.
+#   - The mechanism that works WITHOUT knowing server names: the top-level `"tools"`
+#     config key. It is a map of glob-pattern -> bool, compiled straight into permission
+#     rules matched by Wildcard.match against each tool's name
+#     (packages/opencode/src/session/prompt.ts:1064-1071: `for (const [t, enabled] of
+#     Object.entries(input.tools ?? {})) permissions.push({permission: t, action: enabled
+#     ? "allow" : "deny", pattern: "*"})`). Documented at
+#     packages/web/src/content/docs/mcp-servers.mdx:293-343 ("Manage" / "Global" /
+#     glob-pattern sections) — "We can also use a glob pattern to disable all matching
+#     MCPs."
+#   - MCP tool names are always registered as `<server-name>_<tool-name>`
+#     (packages/opencode/src/mcp/catalog.ts:119: `toolName = (clientName, name) =>
+#     sanitize(clientName) + "_" + sanitize(name)`) — always containing an underscore.
+#   - Almost every BUILTIN tool id is a single bare word with no underscore
+#     (packages/opencode/src/tool/registry.ts: read, glob, grep, edit, write, task,
+#     webfetch, websearch, shell, question, skill, lsp, plan, invalid, todowrite) — so a
+#     glob matching "contains an underscore" catches every MCP tool from every server,
+#     regardless of name, and (almost) no builtin.
+#   - KNOWN COLLATERAL, accepted and tested: exactly ONE builtin id contains an
+#     underscore — `apply_patch` (ApplyPatchTool, registry.ts:31,110; its id is the
+#     literal string "apply_patch", tool/apply_patch.ts:22-23). So "*_*" ALSO denies
+#     apply_patch. This is acceptable: `edit` and `write` (no underscore) survive, so a
+#     yoke coordinator keeps full file-editing capability; apply_patch is a patch-hunk
+#     convenience the fork itself gates behind a usePatch flag (registry.ts:294), not a
+#     capability the coordinator role needs. Flagged here (rather than hidden) and pinned
+#     by test_apply_patch_builtin_is_stripped_known_collateral so this stays a conscious,
+#     visible fact if the builtin set ever changes.
+#   - The pump plugin registers no custom tool (only an `event` hook — see
+#     harness/swarm-pump.js), so it is not caught either; if a future plugin DID register
+#     a tool without going through the default MCP path it would still be namespaced
+#     `<namespace>_<id>` when its id isn't "default" (registry.ts:190), so this same glob
+#     would also strip a non-default-id custom tool — acceptable, since the goal is
+#     "only swarm CLI + file tools reach the agent."
+#
+# So: {"tools": {"*_*": false}} is the outcome §6 commits to — no non-swarm mcp__* tool
+# reaches the agent — achieved without yoke ever needing to know a leaked server's name.
+MCP_STRIP_TOOLS_KEY = "*_*"
+
+
+def mcp_strip_config():
+    return {"tools": {MCP_STRIP_TOOLS_KEY: False}}
+
+
+# C4 (docs/design/PRODUCTIZE.md §4) — swarm's --permission-mode, translated to opencode's
+# per-tool permission map. BEST-EFFORT TRANSLATION, stated as a limit in the design: there
+# is no first-class "plan mode" in opencode, so `{"*": "deny"}` only APPROXIMATES it; the
+# tests here assert the map yoke writes, never a claim that opencode's runtime behavior
+# under that map equals Claude's behavior under the same-named mode.
+PERMISSION_MAPS = {
+    "auto": {"*": "allow", "doom_loop": "deny", "question": "deny"},
+    "plan": {"*": "deny"},
+    "acceptEdits": {"*": "allow", "webfetch": "deny", "doom_loop": "deny", "question": "deny"},
+    "bypassPermissions": {"*": "allow"},
+}
+# manual/dontAsk mean "ask a human" — an unattended TUI/headless agent has no human to
+# answer an ask, so these are refused rather than silently mapped to something else.
+REFUSED_PERMISSION_MODES = ("manual", "dontAsk")
+
+
+def permission_map_for_mode(mode):
+    """Return the opencode permission map for a swarm --permission-mode, or None if the
+    mode is refused for yoke (manual/dontAsk) or unrecognized."""
+    if mode in REFUSED_PERMISSION_MODES:
+        return None
+    return PERMISSION_MAPS.get(mode)
+
+
 def resolve_fork_dir(flag_value):
     if flag_value:
         return flag_value
@@ -147,7 +237,8 @@ def main():
     argv = sys.argv[1:]
     if len(argv) < 2:
         die('usage: yoke <name> "<task>" --model <provider/model> --parent <parent> '
-            '--reason "<why>" [--swarm-dir <dir>] [--yoke-fork <dir>]')
+            '--reason "<why>" [--swarm-dir <dir>] [--yoke-fork <dir>] '
+            '[--permission-mode <mode>]')
     name, task = argv[0], argv[1]
     rest = argv[2:]
     model = None
@@ -155,6 +246,7 @@ def main():
     reason = None
     swarm_dir_flag = None
     fork_dir_flag = None
+    permission_mode = "auto"
     i = 0
     while i < len(rest):
         if rest[i] == "--model" and i + 1 < len(rest):
@@ -172,6 +264,9 @@ def main():
         elif rest[i] == "--yoke-fork" and i + 1 < len(rest):
             fork_dir_flag = rest[i + 1]
             i += 2
+        elif rest[i] == "--permission-mode" and i + 1 < len(rest):
+            permission_mode = rest[i + 1]
+            i += 2
         else:
             die(f"unknown flag {rest[i]}")
     if not model:
@@ -180,6 +275,18 @@ def main():
         die("--parent is required")
     if "/" not in model:
         die(f"--model must be provider/model, got {model!r}")
+
+    # C4: manual/dontAsk mean "ask a human" — refused for an unattended yoke agent
+    # (docs/design/PRODUCTIZE.md §4). Refuse before the name is burned, same posture
+    # as the swarm-dir/fork-dir refusals below.
+    permission_map = permission_map_for_mode(permission_mode)
+    if permission_map is None:
+        if permission_mode in REFUSED_PERMISSION_MODES:
+            die(f"--permission-mode {permission_mode!r} means \"ask a human\"; an "
+                f"unattended yoke agent has no human to answer, so this mode is "
+                f"refused for yoke (docs/design/PRODUCTIZE.md §4)")
+        die(f"unknown --permission-mode {permission_mode!r}; yoke accepts: "
+            f"{', '.join(PERMISSION_MAPS)}")
 
     # Fix 1: --reason is taken from the caller (bin/swarm's dispatch passes the
     # parent's own reason through); only fall back to a fabricated one if the
@@ -210,11 +317,14 @@ def main():
     # Belt+braces with --auto: also deny the two interactive-only gates in
     # config so they fail fast rather than surfacing a modal the doorbell
     # can't dismiss. (--auto already auto-approves everything not denied.)
+    # permission_map is the C4 translation of --permission-mode (default "auto",
+    # which reproduces this same map). The "tools" key is the MCP-strip fix (PR 4,
+    # see mcp_strip_config()'s comment above for exactly where the key was confirmed).
+    oc_config = {"$schema": "https://opencode.ai/config.json",
+                 "permission": permission_map}
+    oc_config.update(mcp_strip_config())
     with open(os.path.join(ws, "opencode.json"), "w") as f:
-        json.dump({"$schema": "https://opencode.ai/config.json",
-                   "permission": {"*": "allow",
-                                  "doom_loop": "deny",
-                                  "question": "deny"}}, f)
+        json.dump(oc_config, f)
 
     # 1. Claim the journal tombstone (bin/swarm's spawn-name contract).
     fd = claim_name(swarm_dir, name)
